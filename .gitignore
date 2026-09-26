@@ -1,0 +1,14 @@
+/weights/
+/audio_tower_code/
+/examples/
+/.vscode/
+
+# Generated model weights
+*.safetensors
+*.pt
+*.pth
+
+# Python and Jupyter caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
