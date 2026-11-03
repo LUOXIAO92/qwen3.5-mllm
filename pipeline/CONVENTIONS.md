@@ -1,0 +1,71 @@
+# 实验 v1 约定
+
+本文件是 v1 实验各任务共用的约定：数据放在哪里、各阶段之间交换什么格式、怎样共用唯一的一张 GPU。任务拆解和进度见 GitHub issue（标签 `exp-v1`）。修改本文件需要由协调者（主会话）完成，并在相关 issue 中说明。
+
+## 目录
+
+代码放在仓库的 `pipeline/` 下，按阶段分子目录：`text/`（抽取原文）、`tn/`（生成朗读稿）、`compare/`（比对规范化与数词统一）、`tts/`、`asr/`、`runner/`（合成—核对流水线）、`train/`、`eval/`。合成数据、下载的数据集和虚拟环境都不进仓库，统一放在工作目录 `/home/luoxiao/workspace/qwen3.5-asr-work/`：
+
+- `data/<任务编号>/`：各任务的数据产出，例如 `data/T03/`。下游只读取上游目录，不在其中写文件。
+- `envs/<名称>/`：用 `uv venv` 建立的虚拟环境，一个模型或一组相容的模型一个环境。conda 环境 `py3.14` 不安装、不升级任何包。
+- `logs/`：长时间任务的日志。
+- `gpu.lock`：GPU 锁文件，见下文。
+
+模型权重使用默认的 Hugging Face 缓存 `~/.cache/huggingface`。不要在家目录下创建其他目录；需要临时文件时放在 `qwen3.5-asr-work/tmp/` 下。不接受任何 gated 模型或数据集的条款，不调用付费 API。
+
+## GPU
+
+整机只有一张 RTX 5090（32 GB，sm_120，需要 CUDA 12.8 及以上的 PyTorch）。所有使用 GPU 的命令都通过锁文件排队：
+
+```bash
+flock /home/luoxiao/workspace/qwen3.5-asr-work/gpu.lock python -m pipeline.tts.omnivoice ...
+```
+
+冒烟测试控制在几分钟内；长时间任务（正式合成、训练）只由协调者启动。
+
+## 数据格式
+
+各阶段之间用 JSONL 交换数据，一行一个对象，UTF-8 编码，字段名使用英文。音频统一保存为 16 kHz 单声道 FLAC。
+
+**文本条目**（T03 产出，T04 补充字段）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `entry_id` | 全局唯一，格式 `<lang>-<source>-<序号>` |
+| `lang` | 语言代码，取值见下文 |
+| `source` | 来源数据集，使用 `datasets.md` 中的名称 |
+| `source_license` | 来源许可 |
+| `source_ref` | 来源中的定位信息，例如文档编号或 URL |
+| `original` | 原文，保持来源写法 |
+| `n_chars` | 原文字符数 |
+| `script` | 朗读稿（T04 补充） |
+| `tn_status` | `unchanged`（无需改写）、`normalized`（已改写）或 `dropped`（无法可靠改写，丢弃） |
+| `tn_note` | 改写或丢弃的原因，可为空 |
+
+语言代码：`zh en ja ko de fr ru pt es it id ms th vi fil ar tr fa`。
+
+**音色**（T07 产出）：`voice_id`、`source_model`、`builtin_name`、`gender`（已知时填写）、`ref_audio`、`ref_text`、`ref_lang`、`holdout`（是否留出不参与训练）。
+
+**合成任务与结果**（T11 产出）：`sample_id`、`entry_id`、`lang`、`text`（送入 TTS 的朗读稿）、`tts_model`、`mode`（`builtin` 或 `clone`）、`voice_id`、`ref_lang`、`cross_lingual`、`seed`、`audio_path`、`duration_s`、`status`。
+
+**识别结果**：`sample_id`、`asr_model`、`hypothesis`、`match`、`compare_detail`。
+
+**核对通过的训练清单**（T13 产出）：合并上述字段，每行一个通过核对的样本，至少包含 `sample_id`、`audio_path`、`duration_s`、`lang`、`original`、`script`、`source`、`source_license`、`tts_model`、`voice_id`、`holdout`、`cross_lingual`、`asr_model`。
+
+## 模型封装的命令行接口
+
+每个 TTS、ASR 模型在 `pipeline/tts/`、`pipeline/asr/` 下有一个封装模块，在该模型自己的虚拟环境中运行，只依赖该环境中的包和标准库。
+
+```bash
+# TTS：读取合成任务，逐条写出 <sample_id>.flac，并写出结果 JSONL
+python -m pipeline.tts.<模型> --input jobs.jsonl --output-dir <目录> --batch-size <N>
+
+# ASR：读取 sample_id、audio_path、lang，写出识别结果 JSONL
+python -m pipeline.asr.<模型> --input audio.jsonl --output results.jsonl --batch-size <N>
+```
+
+封装必须关闭模型自带的文本规范化，输出采样率统一转为 16 kHz。每个封装的模块说明写明：支持的语言代码、需要的环境、显存占用和实测吞吐。
+
+## 代码风格
+
+遵守仓库根目录 `AGENTS.md` 的 Python 写法：支持关键字传参的接口显式写出 `参数名 = 值`，`=` 两侧各留一个空格，四个及以上参数逐行书写。脚本会作为教程的一部分对外发布，注释和说明使用中文，不写入本机以外的路径、账号或密钥。

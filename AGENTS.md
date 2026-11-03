@@ -43,5 +43,5 @@ model = AutoModel.from_pretrained(
 ## 当前进度
 
 - 阶段 1 模块准备已完成，教材为 `01-module-preparation-zh.ipynb`，源码在 `qwen3.5-0.8b-mllm/`。音频塔从 Qwen3-Omni 提取，只将 `thinker.audio_tower.*` 改为 `model.audio_tower.*`，保留内部结构、参数值和原有 `forward`；自定义 `.py` 随模型目录保存，支持 remote code 加载。Projector 为 `Linear → SiLU → Linear`，参数新初始化，尚未训练。音频塔、projector 已与 Qwen3.5 的视觉塔、语言模型融合，完整模型可以保存、加载并调用 `generate`。
-- 阶段 2 训练数据准备正在进行，教材为 `02-training-data-preparation-zh.ipynb`。目标语言共 18 种：中文、英语、日语、韩语、德语、法语、俄语、葡萄牙语、西班牙语、意大利语，以及印尼语、马来语、泰语、越南语、菲律宾语、阿拉伯语、土耳其语、波斯语。朗读文本从现有数据集抽取，再合成 TTS 音频用于训练 projector；数据集清单见 `datasets.md`。项目纯开源，不涉及商业使用；对外只发布教程和清洗、TTS 合成脚本，合成数据和训练权重都不发布。LLM 无提示自由续写会产出大量代码，按主题提示生成又因种子提示词单一而内容重复严重，因此不再用 LLM 生成文本。`research/` 保存此前的 LLM 生成实验，以及 TTS、ASR 选型调查 `research/training-data-selection-zh.md`。
+- 阶段 2 训练数据准备正在进行，教材为 `02-training-data-preparation-zh.ipynb`。目标语言共 18 种：中文、英语、日语、韩语、德语、法语、俄语、葡萄牙语、西班牙语、意大利语，以及印尼语、马来语、泰语、越南语、菲律宾语、阿拉伯语、土耳其语、波斯语。朗读文本从现有数据集抽取，再合成 TTS 音频用于训练 projector；数据集清单见 `datasets.md`。项目纯开源，不涉及商业使用；对外只发布教程和清洗、TTS 合成脚本，合成数据和训练权重都不发布。LLM 无提示自由续写会产出大量代码，按主题提示生成又因种子提示词单一而内容重复严重，因此不再用 LLM 生成文本。`research/` 保存 TTS、ASR 选型调查 `research/training-data-selection-zh.md` 和文本规范化调查 `research/text-normalization-zh.md`。
 - 阶段 3 训练 projector、阶段 4 完整模块融合等待用户后续指示。
