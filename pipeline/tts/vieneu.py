@@ -12,8 +12,12 @@
 
 环境：envs/tts-vieneu（uv，Python 3.12，torch 2.8.0+cu128，transformers 4.57.6，vieneu 3.7.1）。
 有 CUDA 时 SDK 自动使用 PyTorch 后端并批量生成，所以需要用 flock 占用 GPU：
-    flock /home/luoxiao/workspace/qwen3.5-asr-work/gpu.lock \
+    flock <工作目录>/gpu.lock \
         python -m pipeline.tts.vieneu --input jobs.jsonl --output-dir out --batch-size 16
+版本固定：模型卡仓库与 MOSS 编解码器的 remote code 都由 HF 下载，封装用 snapshot_download 固定到下面的提交，
+再把本地目录交给 SDK，避免上游更新后代码变化：
+    pnnbao-ump/VieNeu-TTS-v3-Turbo  61b85e3d937fbbacb387714180e8182823512523
+    OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano  6aa02b01e445cc585582cf0ba480bc3ea6c8dd68
 显存与吞吐见 GitHub issue #12 的验收评论。
 
 许可：模型、代码、内置音色资源均为 Apache-2.0（模型卡明确内置音色的说话人已授权用于 AI 训练与合成语音）。
@@ -43,6 +47,10 @@ import soundfile as sf
 from scipy.signal import resample_poly
 
 目标采样率 = 16000
+模型仓库 = "pnnbao-ump/VieNeu-TTS-v3-Turbo"
+模型提交 = "61b85e3d937fbbacb387714180e8182823512523"
+编解码器仓库 = "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano"
+编解码器提交 = "6aa02b01e445cc585582cf0ba480bc3ea6c8dd68"
 
 
 def _关闭文本规范化():
@@ -92,8 +100,15 @@ def 主函数():
     结果路径 = Path(参数.results) if 参数.results else 输出目录 / "results.jsonl"
 
     _关闭文本规范化()
+    from huggingface_hub import snapshot_download
+
+    # 固定提交：把两个仓库下载到（或读取缓存中）指定提交，再以本地目录传给 SDK
+    模型目录 = snapshot_download(repo_id = 模型仓库, revision = 模型提交)
+    编解码器目录 = snapshot_download(repo_id = 编解码器仓库, revision = 编解码器提交)
     tts = Vieneu(
         mode = "v3turbo",
+        backbone_repo = 模型目录,
+        moss_tokenizer = 编解码器目录,
         device = 参数.device,
         max_batch_size = 参数.batch_size,
     )
