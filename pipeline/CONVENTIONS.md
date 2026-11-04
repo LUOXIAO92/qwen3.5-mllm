@@ -38,6 +38,8 @@ flock /home/luoxiao/workspace/qwen3.5-asr-work/gpu.lock python -m pipeline.tts.o
 | `source_ref` | 来源中的定位信息，例如文档编号或 URL |
 | `original` | 原文，保持来源写法 |
 | `n_chars` | 原文字符数 |
+| `length_bin` | 长度档（T03 补充）：`short`（估计朗读时长 5 秒以内）、`medium`（5–15 秒）、`long`（15–30 秒） |
+| `est_duration_s` | 按各语言估计语速（字符/秒）算出的朗读时长，单位秒（T03 补充） |
 | `script` | 朗读稿（T04 补充） |
 | `tn_status` | `unchanged`（无需改写）、`normalized`（已改写）或 `dropped`（无法可靠改写，丢弃） |
 | `tn_note` | 改写或丢弃的原因，可为空 |
