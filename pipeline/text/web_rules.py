@@ -86,6 +86,10 @@ _SPAM_URL = re.compile(
     r"赌|賭|博彩|彩票|娱乐城|娛樂城|棋牌|色情|成人|av[-_]|kasino|sabung",
     re.IGNORECASE,
 )
+# 句末标点后没有空格就接大写字母（"peserta.Mereka"）：HPLT 抽取时把相邻块直接拼在一起。
+_GLUED_SENTENCE = re.compile(r"(?<=[a-zà-ɏạ-ỹа-яё])[.!?](?=[A-ZÀ-ÞА-ЯЁẠ-Ỹ])")
+# 以省略号结尾：列表页的摘要预览，后半句被截掉。
+_ELLIPSIS_END = re.compile(r"(…|\.\.\.)[\"'”’»)]*$")
 _QUESTION_ANSWER = re.compile(r"^\s*(q|a|q&a|hỏi|đáp|soal|jawab|soru|cevap|سؤال|جواب)\s*[:：]", re.IGNORECASE)
 
 
@@ -142,6 +146,10 @@ def check_web_rules(text: str, *, lang: str) -> str | None:
         return "numeric_date"
     if (_SPACED_PUNCT_FR if lang == "fr" else _SPACED_PUNCT).search(text):
         return "spaced_punct"
+    if lang not in NO_SPACE_LANGS and _GLUED_SENTENCE.search(text):
+        return "glued_sentence"
+    if _ELLIPSIS_END.search(text):
+        return "ellipsis_end"
     if _EMPHASIS.search(text):
         return "emphasis"
     if _EMOJI.search(text):

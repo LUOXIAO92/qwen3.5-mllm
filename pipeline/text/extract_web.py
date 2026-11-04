@@ -46,7 +46,7 @@ def make_reader(*, source: str, directory: str, lang: str, raw_root: Path):
         code = HPLT_CODES[lang]
         files = web.list_files(raw_root / "HPLT" / "HPLT3.0" / code / "*.jsonl.zst")
         genre = directory.split("_", 1)[1]
-        glotlid = sorted(GLOTLID_LABELS[lang])[0]
+        glotlid = code  # HPLT 自己的语言代码（中文为 cmn_Hans，波斯语为 pes_Arab）
         return (lambda: web.read_hplt(files = files, lang = lang, genre = genre, glotlid_code = glotlid)), bool(files)
     if source == "fineweb2hq":
         if lang not in FINEWEB2_CONFIGS:

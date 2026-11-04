@@ -85,12 +85,19 @@ def test_boilerplate_only_active_for_web_entries():
         ("Photo: Reuters, the crowd gathered outside of the main building yesterday.", "en", "caption"),
         ("Top 10 Tips For Better Sleep And Healthy Living This Year.", "en", "title_case"),
         ("THE BEST OFFER YOU WILL SEE THIS WEEK IN THE CITY FOR SURE.", "en", "shouting"),
+        ("Para saintis merekrut 88 peserta untuk penyelidikan.Mereka membahagikan peserta kepada dua kumpulan.", "ms", "glued_sentence"),
+        ("Jumlah pembiayaan peribadi ditingkatkan kepada sehingga lima ribu ringgit susulan kenyataan terkini …", "ms", "ellipsis_end"),
         ("Buy cheap shoes buy cheap shoes buy cheap shoes buy cheap shoes online now.", "en", "repetitive"),
     ],
 )
 def test_pattern_rules_drop(text, lang, reason):
     assert check_web_rules(text, lang = lang) == reason
     assert web_check(text, lang) is not None  # 整个过滤链也会丢弃（原因可能是更早命中的通用规则）
+
+
+def test_glued_and_ellipsis_keep_normal_text():
+    assert web_check("Dr. Smith holds a doctorate from the university in Boston.", "en") is None
+    assert web_check("Он сказал, что придёт позже... Но так и не пришёл.", "ru") is None  # 句中省略号不算
 
 
 def test_phone_rule_keeps_ordinary_numbers():
