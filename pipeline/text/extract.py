@@ -19,6 +19,7 @@ import random
 from collections import Counter
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .dedup import Deduper
 from .exclusion import is_excluded, load_blocklist, load_exclusion
@@ -70,25 +71,32 @@ def extract_candidates(
     min_prob: float = 0.5,
     extra_labels: frozenset[str] = frozenset(),
     stats: Counter | None = None,
+    max_per_doc: int = 0,
+    max_per_domain: int = 0,
 ) -> list[dict]:
     """过滤并抽样一批 (文本, 定位信息)，返回候选字典列表。
 
     `paragraphs = True` 时每条记录是一个段落，先切句、剔除不干净的句子，再拼成目标长度的片段。
     `identifier` 为 None 时跳过语言检测（单元测试用）。
+    网页来源的定位信息是 `<URL>#<段落序号>`：`max_per_doc`、`max_per_domain` 限制同一文档、同一域名通过规则的条数
+    （0 为不限），防止个别站点或文档占满样本。
     """
     stats = stats if stats is not None else Counter()
     rng = random.Random(seed)
     options = options or default_options(lang)
     sentence_options = FilterOptions(
-        require_terminal = True,
+        require_terminal = options.require_terminal,
         min_words = 1,
-        min_chars = 1,
+        min_chars = 25 if (lang == "th" and options.web) else 1,  # 泰语网页按 crfcut 切出的片段常是短语，太短的丢弃
         max_chars = options.max_chars,
         max_digit_ratio = options.max_digit_ratio,
         max_symbols = options.max_symbols,
+        web = options.web,
     )
     deduper = Deduper(lang = lang, max_per_prefix = max_per_prefix, prefix_len = prefix_len)
     reservoir = BinReservoir(caps = caps or DEFAULT_CAPS, rng = rng)
+    per_doc: Counter = Counter()
+    per_domain: Counter = Counter()
 
     def sentence_ok(sentence: str) -> bool:
         return check_text(sentence, lang = lang, options = sentence_options) is None
@@ -123,6 +131,16 @@ def extract_candidates(
             if is_excluded(piece, lang = lang, exclusion = exclusion):
                 stats["drop_fleurs"] += 1
                 continue
+            doc_key = ref.rsplit("#", 1)[0]
+            domain_key = urlparse(doc_key).netloc or doc_key
+            if max_per_doc and per_doc[doc_key] >= max_per_doc:
+                stats["drop_doc_cap"] += 1
+                continue
+            if max_per_domain and per_domain[domain_key] >= max_per_domain:
+                stats["drop_domain_cap"] += 1
+                continue
+            per_doc[doc_key] += 1
+            per_domain[domain_key] += 1
             reservoir.add(bin_name, (piece, piece_ref, bin_name, duration))
             stats["passed_rules"] += 1
 

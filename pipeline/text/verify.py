@@ -8,15 +8,19 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from pathlib import Path
 
 from .exclusion import is_excluded, load_exclusion
-from .filters import check_text
+from .filters import check_text, default_options
 from .langs import LANGS
 from .lengths import length_bin
 from .normalize import norm_key
+
+# 网页与新闻来源的条目要额外通过网页规则（web_rules.py）。
+WEB_SOURCE_NAMES = {"HPLT 3.0", "epfml/FineWeb2-HQ-Plus", "HuggingFaceFW/fineweb-edu", "Wikinews"}
 
 REQUIRED = [
     "entry_id", "lang", "source", "source_license", "source_ref", "original",
@@ -48,7 +52,10 @@ def verify_file(path: Path, *, lang: str, exclusion: dict[str, set[str]]) -> dic
             seen_keys.add(key)
             if is_excluded(row["original"], lang = lang, exclusion = exclusion):
                 flag("fleurs_overlap")
-            if check_text(row["original"], lang = lang) is not None:
+            options = default_options(lang)
+            if row["source"] in WEB_SOURCE_NAMES:
+                options = dataclasses.replace(options, web = True)
+            if check_text(row["original"], lang = lang, options = options) is not None:
                 flag("filter_fail")
             if row["n_chars"] != len(row["original"]) or row["lang"] != lang:
                 flag("field_mismatch")

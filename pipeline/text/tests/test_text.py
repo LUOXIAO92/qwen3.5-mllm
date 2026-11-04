@@ -158,7 +158,7 @@ def test_split_sentences():
     assert split_sentences("Dr. Smith went home. He slept.", lang = "en") == ["Dr. Smith went home.", "He slept."]
     assert split_sentences("J. R. R. Tolkien wrote it. Yes!", lang = "en") == ["J. R. R. Tolkien wrote it.", "Yes!"]
     assert split_sentences("今天天气很好。我们去公园吧！好的。", lang = "zh") == ["今天天气很好。", "我们去公园吧！", "好的。"]
-    assert split_sentences("ทดสอบข้อความ ภาษาไทย", lang = "th") == ["ทดสอบข้อความ ภาษาไทย"]
+    assert " ".join(split_sentences("ทดสอบข้อความ ภาษาไทย", lang = "th")) == "ทดสอบข้อความ ภาษาไทย"  # 不丢字符
 
 
 def test_length_bins():

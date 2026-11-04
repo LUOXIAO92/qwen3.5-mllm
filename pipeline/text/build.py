@@ -22,7 +22,7 @@ from .exclusion import is_excluded, load_blocklist, load_exclusion
 from .filters import check_text
 from .langs import LANGS
 from .lengths import BINS
-from .sources import common_voice, tatoeba, wikipedia_paragraphs
+from .sources import common_voice, tatoeba, web, wikipedia_paragraphs
 
 # 候选目录名 -> (datasets.md 中的来源名, entry_id 里的短名, 许可)
 SOURCE_INFO = {
@@ -33,7 +33,17 @@ SOURCE_INFO = {
         wikipedia_paragraphs.SOURCE_SLUG,
         wikipedia_paragraphs.SOURCE_LICENSE,
     ),
+    # 网页与新闻来源（T03b）：HPLT 按体裁分三个候选目录，共用来源名和 entry_id 短名。
+    **{
+        f"hplt_{genre}": (web.HPLT_NAME, web.HPLT_SLUG, web.HPLT_LICENSE)
+        for genre in ("na", "op", "in")
+    },
+    "fw2hq": (web.FW2_NAME, web.FW2_SLUG, web.FW2_LICENSE),
+    "fwedu": (web.FWEDU_NAME, web.FWEDU_SLUG, web.FWEDU_LICENSE),
+    "wikinews": (web.WIKINEWS_NAME, web.WIKINEWS_SLUG, web.WIKINEWS_LICENSE),
 }
+# 个别语言的许可与来源默认值不同。
+LICENSE_BY_LANG = {("wikinews", lang): name for lang, name in web.WIKINEWS_LICENSE_BY_LANG.items()}
 
 DEFAULT_QUOTAS = {"short": 10000, "medium": 12000, "long": 8000}
 DEFAULT_MAX_TOTAL = 30000
@@ -94,6 +104,7 @@ def select_entries(
 
 def to_entry(row: dict, *, source_dir: str, index: int) -> dict:
     name, slug, license_name = SOURCE_INFO[source_dir]
+    license_name = LICENSE_BY_LANG.get((source_dir, row["lang"]), license_name)
     return {
         "entry_id": f"{row['lang']}-{slug}-{index:06d}",
         "lang": row["lang"],
@@ -144,8 +155,9 @@ def build_language(
     counters: Counter = Counter()
     entries = []
     for row in chosen:
-        counters[row["_source"]] += 1
-        entries.append(to_entry(row, source_dir = row["_source"], index = counters[row["_source"]]))
+        slug = SOURCE_INFO[row["_source"]][1]
+        counters[slug] += 1
+        entries.append(to_entry(row, source_dir = row["_source"], index = counters[slug]))
     return entries
 
 
