@@ -192,6 +192,8 @@ def transcribe_batch(model, processor, rows: list, audio_root: Path, max_new_tok
             do_sample = False,
             use_cache = True,
             pad_token_id = processor.tokenizer.pad_token_id,
+            # 阶段 1 的 generation_config 只在 <|endoftext|> 停止；助手回合以 <|im_end|> 结束，两者都作为停止标记
+            eos_token_id = processor.tokenizer.convert_tokens_to_ids(tokens = ["<|im_end|>", "<|endoftext|>"]),
         )
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - start
