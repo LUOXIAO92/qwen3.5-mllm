@@ -10,21 +10,39 @@ import re
 from pathlib import Path
 
 from .io_utils import read_jsonl
+from .validate import load_checked
 
 
 def norm_name(name: str) -> str:
     return re.sub(pattern = r"[^a-z0-9]", repl = "", string = str(name).lower())
 
 
-def load_entries(paths: list, langs: list | None, limit_per_lang: int | None, fallback_original: bool) -> list:
-    """读取文本条目。path 可以是 JSONL 文件，也可以是含 <lang>.jsonl 的目录。"""
+def load_entries(
+    paths: list,
+    langs: list | None,
+    limit_per_lang: int | None,
+    fallback_original: bool,
+    scripts: list | None = None,
+) -> list:
+    """读取文本条目。path 可以是 JSONL 文件，也可以是含 <lang>.jsonl 的目录。
+
+    scripts 是单独存放朗读稿的 JSONL（含 entry_id、script、tn_status），按 entry_id 合并进条目；
+    tn_status 为 dropped 的条目不合成。
+    """
     files = []
     for raw in paths:
         path = Path(raw)
         files.extend(sorted(path.glob("*.jsonl")) if path.is_dir() else [path])
+    script_rows = {}
+    for raw in scripts or []:
+        for row in load_checked(path = Path(raw), kind = "scripts"):
+            script_rows[row["entry_id"]] = row
     entries = {}
     for file in files:
-        for row in read_jsonl(path = file):
+        for row in load_checked(path = file, kind = "entries"):
+            if row["entry_id"] in script_rows:
+                extra = script_rows[row["entry_id"]]
+                row = {**row, "script": extra.get("script"), "tn_status": extra.get("tn_status", row.get("tn_status"))}
             if langs and row["lang"] not in langs:
                 continue
             if row.get("tn_status") == "dropped":
@@ -49,7 +67,7 @@ def load_entries(paths: list, langs: list | None, limit_per_lang: int | None, fa
 
 def load_voices(path: Path) -> list:
     path = Path(path)
-    voices = read_jsonl(path = path)
+    voices = load_checked(path = path, kind = "voices")
     for voice in voices:
         ref = voice.get("ref_audio")
         if ref and not Path(ref).is_absolute():

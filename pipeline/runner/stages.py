@@ -15,6 +15,7 @@ from pathlib import Path
 from pipeline.compare import compare
 
 from .config import sec_per_char
+from .validate import InputError, load_checked
 from .io_utils import (
     chunk_name,
     load_chunk_dir,
@@ -55,6 +56,13 @@ class Layout:
         self.state = self.out / "state"
         self.work = self.out / "work"
         self.logs = self.out / "logs"
+        self.tasks = self.out / "tasks.jsonl"
+        self.synth = self.out / "synth_results.jsonl"
+        self.length = self.out / "length_check.jsonl"
+        self.asr_results = self.out / "asr_results.jsonl"
+
+    def asr_raw(self, role: str) -> Path:
+        return self.out / f"asr_{role}.jsonl"
 
     def synth_dir(self, model: str) -> Path:
         return self.state / "synth" / model
@@ -106,7 +114,7 @@ def run_wrapper(
 # ---------------------------------------------------------------- TTS
 
 
-def synth_stage(
+def tts_stage(
     cfg: dict,
     tasks: list,
     layout: Layout,
@@ -117,18 +125,6 @@ def synth_stage(
     by_model = {}
     for task in tasks:
         by_model.setdefault(task["tts_model"], []).append(task)
-    by_id = {task["sample_id"]: task for task in tasks}
-    if progress is not None:
-        existing = [rec for model in by_model for rec in load_chunk_dir(directory = layout.synth_dir(model = model)).values()]
-        existing = [rec for rec in existing if rec["sample_id"] in by_id]
-        bad = sum(bool(length_verdict(cfg = cfg, task = by_id[rec["sample_id"]], record = rec)) for rec in existing if rec["status"] == "ok")
-        progress.start(
-            key = "length",
-            stage = "length",
-            total = len(tasks),
-            done = len(existing),
-            counters = {"out_of_range": bad, "tts_not_ok": sum(rec["status"] != "ok" for rec in existing)},
-        )
     for model in sorted(by_model):
         backend = cfg["tts_models"][model]
         chunk_size = backend.get("chunk_size", cfg.get("synth_chunk_size", 64))
@@ -166,12 +162,7 @@ def synth_stage(
                     audio_s = sum(rec["duration_s"] or 0 for rec in ok),
                     counters = {"ok": len(ok), "failed": len(records) - len(ok)},
                 )
-                bad = sum(bool(length_verdict(cfg = cfg, task = by_id[rec["sample_id"]], record = rec)) for rec in ok)
-                progress.advance(
-                    key = "length",
-                    n = len(records),
-                    counters = {"out_of_range": bad, "tts_not_ok": len(records) - len(ok)},
-                )
+    merge_synth(cfg = cfg, layout = layout)
 
 
 def _synth_chunk(
@@ -246,6 +237,20 @@ def _synth_chunk(
     return records
 
 
+def _synth_counters(targets: list) -> dict:
+    rows = [row for target in targets if target.exists() for row in read_jsonl(path = target)]
+    ok = sum(row["status"] == "ok" for row in rows)
+    return {"ok": ok, "failed": len(rows) - ok}
+
+
+def merge_synth(cfg: dict, layout: Layout) -> None:
+    """把各块文件合并成 synth_results.jsonl，按 sample_id 排序。"""
+    records = {}
+    for model in cfg.get("tts_models", {}):
+        records.update(load_chunk_dir(directory = layout.synth_dir(model = model)))
+    write_jsonl_atomic(path = layout.synth, rows = [records[key] for key in sorted(records)])
+
+
 # ---------------------------------------------------------------- 长度检查
 
 
@@ -268,6 +273,46 @@ def length_verdict(cfg: dict, task: dict, record: dict) -> str:
     return ""
 
 
+def length_stage(cfg: dict, tasks: list, layout: Layout, progress = None) -> None:
+    """读取 synth_results.jsonl，给每个合成成功的样本判定时长比例，写出 length_check.jsonl。"""
+    synth = {row["sample_id"]: row for row in load_checked(path = layout.synth, kind = "synth", hint = "先运行 tts 子命令")}
+    ids = {task["sample_id"] for task in tasks}
+    missing = ids - set(synth)
+    if missing:
+        raise InputError(f"synth_results.jsonl 缺少 {len(missing)} 个样本，先运行 tts 子命令完成合成")
+    if progress is not None:
+        progress.start(key = "length", stage = "length", total = len(tasks))
+    rows = []
+    for task in sorted(tasks, key = lambda row: row["sample_id"]):
+        record = synth[task["sample_id"]]
+        if record["status"] != "ok":
+            reason = "tts_not_ok"
+        else:
+            reason = length_verdict(cfg = cfg, task = task, record = record)
+        chars = max(1, count_chars(text = task["text"]))
+        rows.append(
+            {
+                "sample_id": task["sample_id"],
+                "lang": task["lang"],
+                "duration_s": record["duration_s"],
+                "chars": chars,
+                "sec_per_char": round(record["duration_s"] / chars, 4) if record["duration_s"] else None,
+                "ok": reason == "",
+                "reason": reason,
+            }
+        )
+    write_jsonl_atomic(path = layout.length, rows = rows)
+    if progress is not None:
+        progress.advance(
+            key = "length",
+            n = len(rows),
+            counters = {
+                "out_of_range": sum(row["reason"].startswith("length_") for row in rows),
+                "tts_not_ok": sum(row["reason"] == "tts_not_ok" for row in rows),
+            },
+        )
+
+
 # ---------------------------------------------------------------- ASR
 
 
@@ -282,6 +327,13 @@ def asr_assignments(cfg: dict, tasks: list, role: str) -> dict:
     return groups
 
 
+def merge_asr_raw(cfg: dict, layout: Layout, role: str) -> None:
+    records = {}
+    for name in cfg.get("asr_models", {}):
+        records.update(load_chunk_dir(directory = layout.asr_dir(role = role, model = name)))
+    write_jsonl_atomic(path = layout.asr_raw(role = role), rows = [records[key] for key in sorted(records)])
+
+
 def asr_stage(
     cfg: dict,
     tasks: list,
@@ -291,12 +343,16 @@ def asr_stage(
     role: str,
     progress = None,
 ) -> None:
-    synth = _load_synth(layout = layout, cfg = cfg)
-    primary_ok = {}
+    """对通过长度检查的样本运行 ASR，写出原始识别结果 asr_<role>.jsonl（不比对）。
+
+    交叉 ASR 只处理主 ASR 已经比对一致的样本，所以要先对主 ASR 的结果运行 compare 子命令。
+    """
+    synth = {row["sample_id"]: row for row in load_checked(path = layout.synth, kind = "synth", hint = "先运行 tts 子命令")}
+    length = {row["sample_id"]: row for row in load_checked(path = layout.length, kind = "length", hint = "先运行 length 子命令")}
+    primary_match = {}
     if role == "cross":
-        for name in cfg.get("asr_models", {}):
-            for sample_id, row in load_chunk_dir(directory = layout.asr_dir(role = "primary", model = name)).items():
-                primary_ok[sample_id] = row
+        results = load_checked(path = layout.asr_results, kind = "asr_results", hint = "先对主 ASR 运行 compare 子命令")
+        primary_match = {row["sample_id"]: row["match"] for row in results if row["asr_role"] == "primary"}
     for name, group in sorted(asr_assignments(cfg = cfg, tasks = tasks, role = role).items()):
         backend = cfg["asr_models"][name]
         chunk_size = backend.get("chunk_size", cfg.get("asr_chunk_size", 256))
@@ -306,27 +362,34 @@ def asr_stage(
             for chunk in chunks
         ]
         resumed = sum(len(chunk) for chunk, target in zip(chunks, targets) if target.exists())
-        keys = (f"asr_{role}:{name}", f"compare:{role}:{name}")
+        key = f"asr_{role}:{name}"
         if progress is not None:
-            counters = _asr_counters(targets = targets)
-            progress.start(key = keys[0], stage = f"asr_{role}", total = len(group), done = resumed, counters = counters)
-            progress.start(key = keys[1], stage = "compare", total = len(group), done = resumed, counters = counters)
+            progress.start(
+                key = key,
+                stage = f"asr_{role}",
+                total = len(group),
+                done = resumed,
+                counters = _asr_counters(targets = targets),
+            )
         for chunk, target in zip(chunks, targets):
             if target.exists():
                 continue
             rows = []
             for task in chunk:
-                record = synth.get(task["sample_id"])
-                if record is None or record["status"] != "ok":
+                sample_id = task["sample_id"]
+                if sample_id not in length:
+                    raise InputError(f"length_check.jsonl 缺少样本 {sample_id}，先运行 length 子命令")
+                if not length[sample_id]["ok"]:
                     continue
-                if length_verdict(cfg = cfg, task = task, record = record):
-                    continue
-                if role == "cross" and not primary_ok.get(task["sample_id"], {}).get("match"):
-                    continue
-                rows.append((task, record))
+                if role == "cross":
+                    if sample_id not in primary_match:
+                        raise InputError(f"主 ASR 的比对结果缺少样本 {sample_id}，先运行 asr --role primary 和 compare")
+                    if not primary_match[sample_id]:
+                        continue
+                rows.append((task, synth[sample_id]))
             if rows:
                 budget.consume()
-            records, timing = _asr_chunk(
+            records = _asr_chunk(
                 name = name,
                 backend = backend,
                 role = role,
@@ -337,42 +400,21 @@ def asr_stage(
                 progress = progress,
             )
             if progress is not None:
-                matched = sum(bool(rec["match"]) for rec in records)
-                audio = sum(record["duration_s"] or 0 for _, record in rows)
+                failed = sum(bool(rec["error"]) for rec in records)
                 progress.advance(
-                    key = keys[0],
+                    key = key,
                     n = len(rows),
                     skipped = len(chunk) - len(rows),
-                    audio_s = audio,
-                    busy_s = timing["asr_s"],
-                    counters = {"match": matched, "mismatch": len(records) - matched},
+                    audio_s = sum(record["duration_s"] or 0 for _, record in rows),
+                    counters = {"asr_ok": len(records) - failed, "asr_failed": failed},
                 )
-                progress.advance(
-                    key = keys[1],
-                    n = len(rows),
-                    skipped = len(chunk) - len(rows),
-                    busy_s = max(timing["compare_s"], 1e-6),
-                    counters = {"match": matched, "mismatch": len(records) - matched},
-                )
-
-
-def _synth_counters(targets: list) -> dict:
-    rows = [row for target in targets if target.exists() for row in read_jsonl(path = target)]
-    ok = sum(row["status"] == "ok" for row in rows)
-    return {"ok": ok, "failed": len(rows) - ok}
+    merge_asr_raw(cfg = cfg, layout = layout, role = role)
 
 
 def _asr_counters(targets: list) -> dict:
     rows = [row for target in targets if target.exists() for row in read_jsonl(path = target)]
-    match = sum(bool(row["match"]) for row in rows)
-    return {"match": match, "mismatch": len(rows) - match}
-
-
-def _load_synth(layout: Layout, cfg: dict) -> dict:
-    records = {}
-    for model in cfg.get("tts_models", {}):
-        records.update(load_chunk_dir(directory = layout.synth_dir(model = model)))
-    return records
+    failed = sum(bool(row["error"]) for row in rows)
+    return {"asr_ok": len(rows) - failed, "asr_failed": failed}
 
 
 def _asr_chunk(
@@ -384,9 +426,8 @@ def _asr_chunk(
     layout: Layout,
     work_dir: Path,
     progress = None,
-) -> tuple:
+) -> list:
     results = {}
-    asr_started = time.monotonic()
     if rows:
         job_dir = layout.work / f"asr-{role}-{name}-{target.stem}"
         if job_dir.exists():
@@ -420,49 +461,86 @@ def _asr_chunk(
         if not results:
             raise RunnerError(f"{name} 没有写出识别结果，日志 {layout.logs / f'asr-{name}.log'}")
         shutil.rmtree(job_dir, ignore_errors = True)
-    asr_s = time.monotonic() - asr_started
-    compare_started = time.monotonic()
     records = []
     for task, _ in rows:
         result = results.get(task["sample_id"])
-        record = {
-            "sample_id": task["sample_id"],
-            "asr_model": (result or {}).get("asr_model") or name,
-            "asr_role": role,
-            "hypothesis": (result or {}).get("hypothesis", ""),
-        }
+        error = None
         if result is None:
-            record.update(match = False, compare_detail = "asr_error: 封装没有返回该样本")
+            error = "封装没有返回该样本"
         elif result.get("error"):
-            record.update(match = False, compare_detail = f"asr_error: {result['error']}")
-        elif not str(record["hypothesis"]).strip():
-            record.update(match = False, compare_detail = "asr_empty")
-        else:
-            try:
-                outcome = compare(
-                    script = task["text"],
-                    hypothesis = record["hypothesis"],
-                    lang = task["lang"],
-                    original = task["original"],
-                )
-                record.update(match = bool(outcome.match), compare_detail = outcome.detail)
-            except Exception as error:  # 比对本身出错时按失败记录，保留原因
-                record.update(match = False, compare_detail = f"compare_error: {error}")
-        records.append(record)
-    compare_s = time.monotonic() - compare_started
+            error = str(result["error"])
+        records.append(
+            {
+                "sample_id": task["sample_id"],
+                "asr_model": (result or {}).get("asr_model") or name,
+                "asr_role": role,
+                "hypothesis": (result or {}).get("hypothesis", "") or "",
+                "error": error,
+            }
+        )
     write_jsonl_atomic(path = target, rows = records)
-    return records, {"asr_s": max(asr_s, 1e-6), "compare_s": compare_s}
-
-
-def load_asr_records(cfg: dict, layout: Layout) -> dict:
-    """返回 {(sample_id, role): 记录}。"""
-    records = {}
-    for role in ("primary", "cross"):
-        for name in cfg.get("asr_models", {}):
-            for sample_id, row in load_chunk_dir(directory = layout.asr_dir(role = role, model = name)).items():
-                records[(sample_id, role)] = row
     return records
 
 
-def load_synth_records(cfg: dict, layout: Layout) -> dict:
-    return _load_synth(layout = layout, cfg = cfg)
+# ---------------------------------------------------------------- 比对
+
+
+def compare_stage(cfg: dict, tasks: list, layout: Layout, progress = None) -> None:
+    """把 asr_primary.jsonl、asr_cross.jsonl 中尚未比对的样本与朗读稿比对，写入 asr_results.jsonl。"""
+    by_id = {task["sample_id"]: task for task in tasks}
+    done = {}
+    if layout.asr_results.exists():
+        for row in load_checked(path = layout.asr_results, kind = "asr_results"):
+            done[(row["sample_id"], row["asr_role"])] = row
+    todo = []
+    total = 0
+    for role in ("primary", "cross"):
+        path = layout.asr_raw(role = role)
+        if not path.exists():
+            continue
+        for row in load_checked(path = path, kind = "asr_raw", hint = f"先运行 asr --role {role}"):
+            if row["sample_id"] in by_id:
+                total += 1
+                if (row["sample_id"], role) not in done:
+                    todo.append(row)
+    if progress is not None:
+        progress.start(key = "compare", stage = "compare", total = total, done = total - len(todo))
+    for start in range(0, len(todo), 500):
+        began = time.monotonic()
+        batch = todo[start:start + 500]
+        for row in batch:
+            done[(row["sample_id"], row["asr_role"])] = _compare_row(task = by_id[row["sample_id"]], row = row)
+        if progress is not None:
+            matched = sum(bool(done[(row["sample_id"], row["asr_role"])]["match"]) for row in batch)
+            progress.advance(
+                key = "compare",
+                n = len(batch),
+                busy_s = max(time.monotonic() - began, 1e-6),
+                counters = {"match": matched, "mismatch": len(batch) - matched},
+            )
+    write_jsonl_atomic(path = layout.asr_results, rows = [done[key] for key in sorted(done)])
+
+
+def _compare_row(task: dict, row: dict) -> dict:
+    record = {
+        "sample_id": row["sample_id"],
+        "asr_model": row["asr_model"],
+        "asr_role": row["asr_role"],
+        "hypothesis": row["hypothesis"],
+    }
+    if row.get("error"):
+        record.update(match = False, compare_detail = f"asr_error: {row['error']}")
+    elif not str(row["hypothesis"]).strip():
+        record.update(match = False, compare_detail = "asr_empty")
+    else:
+        try:
+            outcome = compare(
+                script = task["text"],
+                hypothesis = row["hypothesis"],
+                lang = task["lang"],
+                original = task["original"],
+            )
+            record.update(match = bool(outcome.match), compare_detail = outcome.detail)
+        except Exception as error:  # 比对本身出错时按失败记录，保留原因
+            record.update(match = False, compare_detail = f"compare_error: {error}")
+    return record

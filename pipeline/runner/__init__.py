@@ -5,19 +5,29 @@
 写出识别结果、通过清单和统计。运行本流水线的 Python 只需要标准库和 PyYAML（读配置）；
 TTS、ASR 封装用各自虚拟环境的 python 以子进程运行，需要 GPU 的经 ``<工作目录>/gpu.lock``。
 
-用法（在仓库根目录运行）::
+用法（在仓库根目录运行）。每个子命令都是独立的一步，只读取上一步写在 ``--out-dir`` 里的文件，启动时按
+pipeline/CONVENTIONS.md 检查输入格式（缺文件、缺字段、语言代码不对时报输入错误，退出码 2）::
 
-    python -m pipeline.runner run \\
-        --config pipeline/runner/config_v1.yaml \\
-        --work-dir <工作目录> \\
-        --texts <文本条目 JSONL 或目录> \\
-        --voices <voices.jsonl> \\
-        --out-dir <输出目录> \\
-        [--split train|test] [--langs ja en] [--limit-per-lang 10] \\
-        [--shard K/N] [--fallback-original] [--stop-after-calls N]
+    C="--config pipeline/runner/config_v1.yaml --work-dir <工作目录> --out-dir <输出目录>"
+    python -m pipeline.runner plan $C --texts <条目 JSONL 或目录> --scripts <朗读稿 JSONL> --voices <voices.jsonl> \\
+        [--split train|test] [--langs ja en] [--limit-per-lang 10] [--fallback-original]
+    python -m pipeline.runner tts $C [--shard K/N]            # 合成，写 synth_results.jsonl 与 audio/
+    python -m pipeline.runner length $C                       # 时长比例检查，写 length_check.jsonl
+    python -m pipeline.runner asr $C --role primary [--shard K/N]   # 主 ASR，写 asr_primary.jsonl
+    python -m pipeline.runner compare $C                      # 比对，写 asr_results.jsonl
+    python -m pipeline.runner asr $C --role cross             # 交叉 ASR，只处理主 ASR 已一致的样本
+    python -m pipeline.runner compare $C
+    python -m pipeline.runner manifest $C                     # 训练清单、samples.jsonl、统计
+    python -m pipeline.runner all $C ...                      # 按上面的顺序依次执行全部（不含分片）
 
-子命令：``plan`` 只生成 tasks.jsonl；``run`` 生成任务并执行全部阶段、汇总；``report`` 只按已有的块文件重新汇总。
-``--split train`` 只用非留出音色，``--split test`` 只用留出音色，两者分别运行、分别放在不同输出目录。
+``--scripts`` 的朗读稿按 entry_id 合并进条目，``tn_status`` 为 dropped 的条目不合成。``--split train`` 只用非留出
+音色，``--split test`` 只用留出音色，两者分别运行、分别放在不同输出目录。每一步可以单独重跑：已完成的块直接跳过，
+下游文件按 sample_id 排序重写，内容不变。
+
+进度：每个阶段在每个块完成时、以及等待封装期间每 ``--progress-interval`` 秒（默认 30）写一行日志到标准错误和
+``<out-dir>/logs/progress.log``：阶段、模型、已完成数/总数、样本/秒、合成（或识别）音频秒/墙钟秒、预计剩余时间；
+同时更新 ``<out-dir>/progress.json``（各阶段数字、计数器、整体通过情况，manifest 之后含最终通过率）。
+速度含排队等待 GPU 锁的时间，续跑时已完成的块不计入速度。
 
 任务怎么生成
 ============
@@ -42,15 +52,17 @@ sample_id 为 ``<split>-<entry_id>``。
 长度检查：音频时长除以朗读稿的非空白字符数，超出 ``langs.<语言>.sec_per_char`` 的 [下限, 上限] 的样本直接判失败，
 原因是 ``length_too_long`` 或 ``length_too_short``，不送入 ASR。
 
-分片：``--shard K/N`` 只处理 sample_id 哈希对 N 取余为 K 的任务，各片可以共用一个输出目录，
-全部片完成后运行一次 ``report`` 得到整体结果。
+分片：``tts``、``asr`` 的 ``--shard K/N`` 只处理 sample_id 哈希对 N 取余为 K 的任务，各片共用一个输出目录；
+所有片的 tts 完成后运行 ``length``，再各片运行 asr，最后运行 compare 与 manifest。
 
 输出（都在 --out-dir 下，音频路径相对该目录）
 =============================================
 
 - ``tasks.jsonl``：合成任务（CONVENTIONS 的字段，外加 original、source、split、holdout 等）
-- ``audio/<sample_id>.flac``：合成音频
-- ``asr_results.jsonl``：识别结果，每个样本每个 ASR 一行，含 sample_id、asr_model、hypothesis、match、
+- ``audio/<sample_id>.flac``、``synth_results.jsonl``：合成音频与每个样本的合成结果（status、duration_s）
+- ``length_check.jsonl``：时长比例检查结果（ok、reason、sec_per_char）
+- ``asr_primary.jsonl``、``asr_cross.jsonl``：ASR 原始识别结果（hypothesis、error）
+- ``asr_results.jsonl``：比对后的识别结果，每个样本每个 ASR 一行，含 sample_id、asr_model、hypothesis、match、
   compare_detail 和 asr_role（primary 或 cross）
 - ``manifest.jsonl``：核对通过的清单（训练清单格式，另含 cross_asr_model、entry_id、mode、seed）
 - ``samples.jsonl``：全部样本的判定（status 为 pass、fail 或 pending，fail 时给出 reason）

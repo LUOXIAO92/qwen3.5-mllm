@@ -6,10 +6,11 @@
 from pathlib import Path
 
 from .io_utils import read_jsonl, write_json_atomic, write_jsonl_atomic
-from .stages import Layout, length_verdict, load_asr_records, load_synth_records
+from .stages import Layout
+from .validate import load_checked
 
 
-def judge(cfg: dict, task: dict, synth: dict, asr: dict) -> tuple:
+def judge(cfg: dict, task: dict, synth: dict, length: dict, asr: dict) -> tuple:
     """返回 (状态, 原因)。状态为 pass、fail 或 pending（阶段尚未跑到）。"""
     record = synth.get(task["sample_id"])
     if record is None:
@@ -17,9 +18,11 @@ def judge(cfg: dict, task: dict, synth: dict, asr: dict) -> tuple:
     if record["status"] != "ok":
         reason = "tts_unsupported" if record["status"] in ("skipped", "unsupported_lang") else "tts_failed"
         return "fail", reason
-    reason = length_verdict(cfg = cfg, task = task, record = record)
-    if reason:
-        return "fail", reason
+    check = length.get(task["sample_id"])
+    if check is None:
+        return "pending", "length_pending"
+    if not check["ok"]:
+        return "fail", check["reason"]
     lang_cfg = cfg.get("langs", {}).get(task["lang"], {})
     for role, label in (("primary", "asr"), ("cross", "cross")):
         if role == "cross" and not lang_cfg.get("cross_asr"):
@@ -107,13 +110,18 @@ def render_markdown(stats: dict) -> str:
 
 
 def write_report(cfg: dict, layout: Layout) -> dict:
-    tasks = read_jsonl(path = layout.out / "tasks.jsonl")
-    synth = load_synth_records(cfg = cfg, layout = layout)
-    asr = load_asr_records(cfg = cfg, layout = layout)
+    """读取 tasks、synth_results、length_check、asr_results，写出 samples、manifest 和统计。"""
+    tasks = load_checked(path = layout.tasks, kind = "tasks", hint = "先运行 plan 子命令")
+    synth = {row["sample_id"]: row for row in (load_checked(path = layout.synth, kind = "synth") if layout.synth.exists() else [])}
+    length = {row["sample_id"]: row for row in (load_checked(path = layout.length, kind = "length") if layout.length.exists() else [])}
+    asr = {}
+    if layout.asr_results.exists():
+        for row in load_checked(path = layout.asr_results, kind = "asr_results"):
+            asr[(row["sample_id"], row["asr_role"])] = row
     rows = []
     manifest = []
     for task in tasks:
-        status, reason = judge(cfg = cfg, task = task, synth = synth, asr = asr)
+        status, reason = judge(cfg = cfg, task = task, synth = synth, length = length, asr = asr)
         record = synth.get(task["sample_id"]) or {}
         row = {
             "sample_id": task["sample_id"],
@@ -157,8 +165,6 @@ def write_report(cfg: dict, layout: Layout) -> dict:
                     "seed": task["seed"],
                 }
             )
-    asr_rows = [asr[key] for key in sorted(asr)]
-    write_jsonl_atomic(path = layout.out / "asr_results.jsonl", rows = asr_rows)
     write_jsonl_atomic(path = layout.out / "samples.jsonl", rows = rows)
     write_jsonl_atomic(path = layout.out / "manifest.jsonl", rows = manifest)
     stats = build_stats(rows = rows)

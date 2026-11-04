@@ -30,6 +30,15 @@ class Progress:
         self._last_emit = 0.0
         self._lock = threading.RLock()
         self._started = time.monotonic()
+        self.frozen = {}
+        previous = self.out_dir / "progress.json"
+        if previous.exists():
+            try:
+                old = json.loads(previous.read_text(encoding = "utf-8"))
+                self.frozen = old.get("stages", {})
+                self.final = old.get("final")
+            except ValueError:
+                self.frozen = {}
 
     def start(self, key: str, stage: str, total: int, done: int = 0, counters: dict | None = None) -> None:
         with self._lock:
@@ -92,6 +101,7 @@ class Progress:
                 return
             self._last_emit = now
             numbers = {name: self._numbers(state = state) for name, state in self.stages.items()}
+            merged = {**self.frozen, **numbers}
             stamp = datetime.now().isoformat(timespec = "seconds")
             lines = []
             for name, info in numbers.items():
@@ -118,17 +128,17 @@ class Progress:
                 obj = {
                     "updated_at": stamp,
                     "elapsed_s": round(now - self._started, 1),
-                    "overall": self._overall(),
-                    "stages": numbers,
+                    "overall": self._overall(stages = merged),
+                    "stages": merged,
                     "eta_s_max_stage": max((eta for eta in remaining if eta is not None), default = None),
                     "final": self.final,
                 },
             )
 
-    def _overall(self) -> dict:
+    def _overall(self, stages: dict) -> dict:
         """整体通过率：各阶段计数器的合计，交叉 ASR 只统计主 ASR 已一致的样本。"""
         sums = {}
-        for state in self.stages.values():
+        for state in stages.values():
             bucket = sums.setdefault(state["stage"], {})
             for name, value in state["counters"].items():
                 bucket[name] = bucket.get(name, 0) + value
@@ -139,14 +149,14 @@ class Progress:
             return round(bucket.get("match", 0) / total, 4) if total else None
 
         synth = sums.get("synth", {})
+        compare = sums.get("compare", {})
         return {
             "synth_ok": synth.get("ok", 0),
             "synth_failed": synth.get("failed", 0),
             "length_out_of_range": sums.get("length", {}).get("out_of_range", 0),
-            "asr_primary_match": sums.get("asr_primary", {}).get("match", 0),
-            "asr_primary_mismatch": sums.get("asr_primary", {}).get("mismatch", 0),
-            "asr_primary_match_rate": rate("asr_primary"),
-            "asr_cross_match_rate": rate("asr_cross"),
+            "compare_match": compare.get("match", 0),
+            "compare_mismatch": compare.get("mismatch", 0),
+            "compare_match_rate": rate("compare"),
         }
 
     def finish(self, stats: dict) -> None:

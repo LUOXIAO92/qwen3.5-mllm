@@ -118,7 +118,7 @@ class Workspace:
         mapping.update({f"test-{e['entry_id']}": e["script"] for e in self.entries})
         self.texts_file.write_text(json.dumps(mapping), encoding = "utf-8")
 
-    def run(self, out_dir: Path, *extra: str, command: str = "run", env: dict | None = None) -> subprocess.CompletedProcess:
+    def run(self, out_dir: Path, *extra: str, command: str = "all", env: dict | None = None) -> subprocess.CompletedProcess:
         full_env = dict(os.environ)
         full_env.update(env or {})
         return subprocess.run(
@@ -281,12 +281,63 @@ class RunTests(unittest.TestCase):
     def test_shards_combine_to_full_run(self):
         full = self.full_run("full")
         shards = self.tmp / "shards"
-        first = self.ws.run(shards, "--shard", "0/2")
+        self.assertEqual(self.ws.run(shards, command = "plan").returncode, 0)
+        first = self.ws.run(shards, "--shard", "0/2", command = "tts")
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertGreater(json.loads((shards / "stats.json").read_text(encoding = "utf-8"))["pending"], 0)
-        second = self.ws.run(shards, "--shard", "1/2")
-        self.assertEqual(second.returncode, 0, second.stderr)
+        # 另一片还没合成，时长检查需要全部样本，应当报输入错误
+        early = self.ws.run(shards, command = "length")
+        self.assertEqual(early.returncode, 2, early.stderr)
+        self.assertEqual(self.ws.run(shards, "--shard", "1/2", command = "tts").returncode, 0)
+        for role in ("primary", "cross"):
+            self.assertEqual(self.ws.run(shards, command = "length").returncode, 0)
+            for shard in ("0/2", "1/2"):
+                proc = self.ws.run(shards, "--shard", shard, "--role", role, command = "asr")
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(self.ws.run(shards, command = "compare").returncode, 0)
+        self.assertEqual(self.ws.run(shards, command = "manifest").returncode, 0)
         self.assertEqual(outputs(full), outputs(shards))
+
+    def test_subcommands_run_separately(self):
+        out = self.tmp / "steps"
+        # 没有上一步的输出时，每个子命令都报输入错误（退出码 2）
+        for command in ("tts", "length", "asr", "compare", "manifest"):
+            proc = self.ws.run(out, command = command)
+            self.assertEqual(proc.returncode, 2, f"{command}: {proc.stderr}")
+        steps = [
+            ("plan", [], ["tasks.jsonl"]),
+            ("tts", [], ["synth_results.jsonl"]),
+            ("length", [], ["length_check.jsonl"]),
+            ("asr", ["--role", "primary"], ["asr_primary.jsonl"]),
+            ("asr", ["--role", "cross"], None),  # 缺主 ASR 的比对结果，应当报错
+            ("compare", [], ["asr_results.jsonl"]),
+            ("asr", ["--role", "cross"], ["asr_cross.jsonl"]),
+            ("compare", [], ["asr_results.jsonl"]),
+            ("manifest", [], ["manifest.jsonl", "samples.jsonl", "stats.json", "stats.md"]),
+        ]
+        for command, extra, produced in steps:
+            proc = self.ws.run(out, *extra, command = command)
+            if produced is None:
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                continue
+            self.assertEqual(proc.returncode, 0, f"{command}: {proc.stderr}")
+            for name in produced:
+                self.assertTrue((out / name).exists(), name)
+        # 单独重跑任何一步，结果不变
+        before = outputs(out)
+        for command in ("tts", "length", "compare", "manifest"):
+            self.assertEqual(self.ws.run(out, command = command).returncode, 0)
+        self.assertEqual(before, outputs(out))
+        self.assertEqual(outputs(self.full_run("full")), before)
+
+    def test_input_format_is_checked(self):
+        out = self.tmp / "bad"
+        self.assertEqual(self.ws.run(out, command = "plan").returncode, 0)
+        rows = [json.loads(line) for line in (out / "tasks.jsonl").read_text(encoding = "utf-8").splitlines()]
+        del rows[0]["voice_id"]
+        (out / "tasks.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding = "utf-8")
+        proc = self.ws.run(out, command = "tts")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("voice_id", proc.stderr)
 
 
 if __name__ == "__main__":
