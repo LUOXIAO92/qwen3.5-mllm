@@ -1,0 +1,204 @@
+# 实验 v1 的默认流水线配置。
+# 路径都相对工作目录（--work-dir）；字符串里的 {work_dir} 会展开成工作目录的绝对路径。
+
+# 任务抽取用的种子：同一份文本、音色库和配置，任何时候重新生成的任务都完全相同
+seed: 20261104
+
+# 每个封装调用处理多少条（一块），块是续跑的最小单位
+synth_chunk_size: 64
+asr_chunk_size: 256
+
+# 没有在 langs.<语言>.sec_per_char 单独配置时使用的「音频秒数 / 非空白字符数」范围 [下限, 上限]
+default_sec_per_char: [0.03, 0.30]
+
+# ---------------------------------------------------------------- TTS 模型
+# langs：该模型支持的语言；clone：能否用参考片段克隆；needs_ref_text：克隆是否需要参考文本；
+# builtin_langs：内置音色能直接说的语言；aliases：音色库 source_model 里可能出现的别名
+# gpu：false 的封装不经 gpu.lock；env_vars：运行该封装时额外设置的环境变量
+tts_models:
+  omnivoice:
+    env: envs/tts-omnivoice
+    module: pipeline.tts.omnivoice
+    langs: [zh, en, ja, ko, de, fr, ru, pt, es, it, id, ms, th, vi, fil, ar, tr, fa]
+    clone: true
+    needs_ref_text: true
+    builtin_langs: []
+    batch_size: 16
+  voxcpm2:
+    env: envs/tts-voxcpm2
+    module: pipeline.tts.voxcpm2
+    langs: [zh, en, ja, ko, de, fr, ru, pt, es, it, id, ms, th, vi, fil, ar, tr]
+    clone: true
+    needs_ref_text: false
+    builtin_langs: []
+    batch_size: 8        # 上游只能逐条合成，批量大小只影响写盘粒度
+    chunk_size: 32
+  qwen3_tts:
+    env: envs/tts-qwen3
+    module: pipeline.tts.qwen3_tts
+    aliases: [qwen3-tts, qwen3-tts-customvoice, qwen3-tts-base]
+    langs: [zh, en, ja, ko, de, fr, ru, pt, es, it]
+    clone: true
+    needs_ref_text: true
+    builtin_langs: [zh, en, ja, ko, de, fr, ru, pt, es, it]
+    batch_size: 8
+  indextts25:
+    env: envs/tts-indextts25
+    module: pipeline.tts.indextts25
+    aliases: [indextts-2.5]
+    langs: [zh, en, ja, es, ar]
+    clone: true
+    needs_ref_text: false
+    builtin_langs: []
+    batch_size: 4        # 逐条合成，批量大小只用来把同一参考音频的任务排在一起
+    chunk_size: 32
+    args: [--model-dir, "{work_dir}/src/index-tts/checkpoints"]
+  vieneu:
+    env: envs/tts-vieneu
+    module: pipeline.tts.vieneu
+    aliases: [vieneu-v3-turbo]
+    langs: [vi]
+    clone: true
+    needs_ref_text: false
+    builtin_langs: [vi]
+    batch_size: 16
+  supertonic3:           # 只有内置音色，没有按语言配置权重时不会被抽到
+    env: envs/tts-supertonic3
+    module: pipeline.tts.supertonic3
+    aliases: [supertonic-3]
+    langs: [en, ko, ja, ar, de, es, fr, id, it, pt, ru, tr, vi]
+    clone: false
+    builtin_langs: [en, ko, ja, ar, de, es, fr, id, it, pt, ru, tr, vi]
+    batch_size: 16
+    gpu: false
+
+# ---------------------------------------------------------------- ASR 模型
+asr_models:
+  qwen3_asr:
+    env: envs/asr-qwen3
+    module: pipeline.asr.qwen3_asr
+    batch_size: 16
+  whisper:
+    env: envs/asr-qwen3
+    module: pipeline.asr.whisper
+    batch_size: 16
+  whisper_fa:
+    env: envs/asr-nemo-fa
+    module: pipeline.asr.whisper_fa
+    batch_size: 16
+  nemotron_farsi:
+    env: envs/asr-nemo-fa
+    module: pipeline.asr.nemotron_farsi
+    batch_size: 16
+  gigaam:
+    env: envs/asr-gigaam
+    module: pipeline.asr.gigaam
+    batch_size: 16
+  haas_ja:
+    env: envs/asr-nemo
+    module: pipeline.asr.haas_ja
+    batch_size: 32
+    env_vars:
+      PYTHONPATH: "{work_dir}/src/Haas-ASR/src"
+  typhoon:
+    env: envs/asr-hf
+    module: pipeline.asr.typhoon
+    batch_size: 16
+  jais_asr:
+    env: envs/asr-hf
+    module: pipeline.asr.jais_asr
+    batch_size: 8
+
+# ---------------------------------------------------------------- 按语言
+# tts：可用的 TTS 模型及权重（依据 research/training-data-selection-zh.md 的推荐表）；
+# asr：主 ASR；cross_asr：可选的交叉 ASR，只对主 ASR 已一致的样本运行，两者都一致才算通过；
+# sec_per_char：「音频秒数 / 非空白字符数」的合理范围 [下限, 上限]，范围参照 FLEURS 各语言的实际语速，
+#   上限留出余量，用来拦下 TTS 失控的长音频，下限拦下被截断的短音频
+langs:
+  zh:
+    tts: {qwen3_tts: 3, omnivoice: 2}
+    asr: qwen3_asr
+    cross_asr: whisper
+    sec_per_char: [0.07, 0.60]
+  en:
+    tts: {omnivoice: 3, qwen3_tts: 2}
+    asr: qwen3_asr
+    cross_asr: whisper
+    sec_per_char: [0.03, 0.22]
+  ja:
+    tts: {omnivoice: 3, qwen3_tts: 2}
+    asr: haas_ja
+    cross_asr: qwen3_asr
+    sec_per_char: [0.07, 0.45]
+  ko:
+    tts: {qwen3_tts: 3, omnivoice: 2}
+    asr: qwen3_asr
+    cross_asr: whisper
+    sec_per_char: [0.07, 0.45]
+  de:
+    tts: {qwen3_tts: 3, omnivoice: 2, voxcpm2: 1}
+    asr: qwen3_asr
+    cross_asr: whisper
+    sec_per_char: [0.03, 0.30]
+  fr:
+    tts: {omnivoice: 3, qwen3_tts: 2}
+    asr: qwen3_asr
+    cross_asr: whisper
+    sec_per_char: [0.03, 0.22]
+  ru:
+    tts: {omnivoice: 3, voxcpm2: 2}
+    asr: gigaam
+    cross_asr: qwen3_asr
+    sec_per_char: [0.035, 0.20]
+  pt:
+    tts: {voxcpm2: 3, qwen3_tts: 2, omnivoice: 1}
+    asr: qwen3_asr
+    cross_asr: whisper
+    sec_per_char: [0.04, 0.22]
+  es:
+    tts: {qwen3_tts: 3, omnivoice: 2, voxcpm2: 1}
+    asr: qwen3_asr
+    cross_asr: whisper
+    sec_per_char: [0.04, 0.22]
+  it:
+    tts: {omnivoice: 3, qwen3_tts: 2, voxcpm2: 1}
+    asr: qwen3_asr
+    cross_asr: whisper
+    sec_per_char: [0.04, 0.24]
+  id:
+    tts: {voxcpm2: 3, omnivoice: 2}
+    asr: qwen3_asr
+    cross_asr: whisper
+    sec_per_char: [0.04, 0.24]
+  ms:
+    tts: {voxcpm2: 3, omnivoice: 2}
+    asr: whisper
+    cross_asr: qwen3_asr
+    sec_per_char: [0.03, 0.20]
+  th:
+    tts: {omnivoice: 3, voxcpm2: 2}
+    asr: typhoon
+    cross_asr: qwen3_asr
+    sec_per_char: [0.03, 0.18]
+  vi:
+    tts: {omnivoice: 3, voxcpm2: 2, vieneu: 2}
+    asr: qwen3_asr
+    cross_asr: whisper
+    sec_per_char: [0.04, 0.25]
+  fil:                     # Whisper 明显优于 Qwen3-ASR（#15 验收），不用 Qwen3-ASR 交叉
+    tts: {voxcpm2: 3, omnivoice: 2}
+    asr: whisper
+    sec_per_char: [0.04, 0.26]
+  ar:
+    tts: {indextts25: 3, omnivoice: 2}
+    asr: jais_asr
+    sec_per_char: [0.04, 0.26]
+  tr:
+    tts: {voxcpm2: 3, omnivoice: 2}
+    asr: whisper
+    sec_per_char: [0.035, 0.22]
+  fa:
+    tts: {omnivoice: 1}
+    asr: nemotron_farsi
+    cross_asr: whisper_fa
+    sec_per_char: [0.06, 0.36]
