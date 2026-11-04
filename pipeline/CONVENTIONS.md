@@ -52,6 +52,22 @@ flock /home/luoxiao/workspace/qwen3.5-asr-work/gpu.lock python -m pipeline.tts.o
 
 **核对通过的训练清单**（T13 产出）：合并上述字段，每行一个通过核对的样本，至少包含 `sample_id`、`audio_path`、`duration_s`、`lang`、`original`、`script`、`source`、`source_license`、`tts_model`、`voice_id`、`holdout`、`cross_lingual`、`asr_model`。
 
+## 训练与评测的对话格式
+
+训练（T10）和评测推理（T15）使用同一种输入，保证评测时看到的提示与训练一致。用户消息的内容依次为一段音频和一句固定指令 `Transcribe the audio.`，不给语言提示；用阶段 1 模型自带的 chat template 展开，`add_generation_prompt = True`、`enable_thinking = False`，于是助手回合以空的思考块 `<think>\n\n</think>\n\n` 开头。训练时只对其后的目标文本和结尾的 `<|im_end|>` 计算损失；评测时从同一位置开始生成。
+
+```python
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "audio", "audio": audio_path},
+            {"type": "text", "text": "Transcribe the audio."},
+        ],
+    },
+]
+```
+
 ## 模型封装的命令行接口
 
 每个 TTS、ASR 模型在 `pipeline/tts/`、`pipeline/asr/` 下有一个封装模块，在该模型自己的虚拟环境中运行，只依赖该环境中的包和标准库。
