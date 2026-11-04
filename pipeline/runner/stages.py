@@ -504,7 +504,15 @@ def compare_stage(cfg: dict, tasks: list, layout: Layout, progress = None) -> No
                 if (row["sample_id"], role) not in done:
                     todo.append(row)
     if progress is not None:
-        progress.start(key = "compare", stage = "compare", total = total, done = total - len(todo))
+        finished = [row for key, row in done.items() if key[0] in by_id]
+        matched = sum(bool(row["match"]) for row in finished)
+        progress.start(
+            key = "compare",
+            stage = "compare",
+            total = total,
+            done = total - len(todo),
+            counters = {"match": matched, "mismatch": len(finished) - matched},
+        )
     for start in range(0, len(todo), 500):
         began = time.monotonic()
         batch = todo[start:start + 500]
