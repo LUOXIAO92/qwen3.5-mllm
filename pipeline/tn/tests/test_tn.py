@@ -66,7 +66,8 @@ class DetectTest(unittest.TestCase):
         ]:
             with self.subTest(text = text):
                 self.assertIn("digit", kinds(text = text, lang = lang))
-                self.assertEqual(normalize_entry(original = text, lang = lang).status, "dropped")
+                result = normalize_entry(original = text, lang = lang, mode = "passthrough")
+                self.assertEqual(result.status, "dropped")
 
     def test_chinese_numeral_words_are_text(self):
         self.assertEqual(kinds(text = "二〇二六年有十项提名。", lang = "zh"), [])
@@ -126,7 +127,7 @@ class DetectTest(unittest.TestCase):
         self.assertIn("url", kinds(text = "Visit www.example.org today", lang = "en"))
 
     def test_note_lists_spans(self):
-        result = normalize_entry(original = "Ende 1989 und 1990 vergab Ramses III. etwas.", lang = "de")
+        result = normalize_entry(original = "Ende 1989 und 1990 vergab Ramses III. etwas.", lang = "de", mode = "passthrough")
         self.assertEqual(result.status, "dropped")
         self.assertIsNone(result.script)
         self.assertEqual(result.note, "含数字「1989」「1990」；含罗马数字「III」")
@@ -165,7 +166,7 @@ class CliTest(unittest.TestCase):
             ]
             path = self.write(folder = folder, rows = rows)
             output = folder / "out" / "scripts.jsonl"
-            code = main(argv = ["--input", str(path), "--output", str(output)])
+            code = main(argv = ["--input", str(path), "--output", str(output), "--mode", "passthrough"])
             self.assertEqual(code, 0)
             out = [json.loads(s = line) for line in output.read_text(encoding = "utf-8").splitlines()]
             self.assertEqual([r["entry_id"] for r in out], [r["entry_id"] for r in rows])

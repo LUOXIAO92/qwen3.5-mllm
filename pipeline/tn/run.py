@@ -1,14 +1,15 @@
 """命令行入口：读取文本条目，补上 script、tn_status、tn_note 后写出。
 
-    python -m pipeline.tn.run --input entries.jsonl --output scripts.jsonl
+    python -m pipeline.tn.run --input entries.jsonl --output scripts.jsonl [--mode basic|passthrough]
 
-输入字段必须符合 pipeline/CONVENTIONS.md 的文本条目格式，不符合时列出问题并以退出码 2 结束，不写任何输出。
+--mode basic（默认）把数字改写成读法，passthrough 只保留不需要改写的条目（直通版）。输入字段必须符合 pipeline/CONVENTIONS.md 的文本条目格式，不符合时列出问题并以退出码 2 结束，不写任何输出。
 输出保留输入的全部字段和顺序；同时在输出旁写一份 <输出名>.summary.json，记录每种语言三种状态的条数和比例。
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -111,8 +112,17 @@ def main(argv = None) -> int:
     parser = argparse.ArgumentParser(description = "为文本条目生成朗读稿（script、tn_status、tn_note）")
     parser.add_argument("--input", required = True, type = Path, help = "文本条目 JSONL")
     parser.add_argument("--output", required = True, type = Path, help = "输出 JSONL")
+    parser.add_argument(
+        "--mode",
+        default = "basic",
+        choices = ["basic", "passthrough"],
+        help = "basic：改写数字读法；passthrough：只保留不需要改写的条目",
+    )
     args = parser.parse_args(args = argv)
 
+    if args.mode == "basic" and importlib.util.find_spec(name = "num2words") is None:
+        print("基础读法需要 num2words（LGPL-2.1）：uv pip install num2words==0.5.14", file = sys.stderr)
+        return 2
     try:
         rows = read_entries(path = args.input)
     except InputError as exc:
@@ -121,7 +131,7 @@ def main(argv = None) -> int:
 
     out_rows = []
     for row in rows:
-        result = normalize_entry(original = row["original"], lang = row["lang"])
+        result = normalize_entry(original = row["original"], lang = row["lang"], mode = args.mode)
         out_rows.append({**row, "script": result.script, "tn_status": result.status, "tn_note": result.note})
 
     args.output.parent.mkdir(parents = True, exist_ok = True)
@@ -134,7 +144,11 @@ def main(argv = None) -> int:
     summary = summarize(rows = out_rows)
     summary_path = args.output.with_suffix(suffix = ".summary.json")
     summary_path.write_text(
-        data = json.dumps(obj = {"input": args.input.name, "langs": summary}, ensure_ascii = False, indent = 2),
+        data = json.dumps(
+            obj = {"input": args.input.name, "mode": args.mode, "langs": summary},
+            ensure_ascii = False,
+            indent = 2,
+        ),
         encoding = "utf-8",
     )
     print("lang  n  unchanged  normalized  dropped")

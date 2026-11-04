@@ -31,9 +31,10 @@ class Issue(NamedTuple):
 _NUMERIC_CATEGORIES = {"Nd", "No", "Nl"}
 _NOT_NUMERIC = {"〇"}
 
-# 符号字符：货币（Sc）、数学符号（Sm）、其他符号（So，含 °、℃、№、表情符号），以及下列标点类符号。
+# 符号字符：货币（Sc）、数学符号（Sm）、其他符号（So，含 °、℃、№、表情符号），以及下列标点类符号
+# 和序数标记 º、ª（3º、36ª）。
 _SYMBOL_CATEGORIES = {"Sc", "Sm", "So"}
-_SYMBOL_CHARS = set("%‰‱#&@§¶*٪")
+_SYMBOL_CHARS = set("%‰‱#&@§¶*٪ºª")
 
 # 中间带点的缩写：e.g.、z.B.、U.S.、TP.HCM、ق.م、Rev.W（每段 1–4 个字母）
 _DOTTED = re.compile(pattern = r"(?<![\w.])[^\W\d_]{1,4}(?:\.[^\W\d_]{1,4})+\.?(?!\w)")
@@ -43,11 +44,16 @@ _URL = re.compile(pattern = r"https?://\S+|www\.\S+|[\w.+-]+@[\w-]+\.[\w.]+")
 # 罗马数字：只由 I、V、X、L 组成的 2 个及以上字母，或含 C、D、M 的 3 个及以上字母，并且是合法写法
 _ROMAN_TOKEN = re.compile(pattern = r"(?<!\w)[IVXLCDM]{2,}(?!\w)")
 _ROMAN_VALID = re.compile(pattern = r"M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})")
+# 法语带序数后缀的罗马数字：XXe siècle、Ier、XIXe
+_FR_ROMAN_ORDINAL = re.compile(pattern = r"(?<!\w)(?P<roman>[IVXLCDM]+)(?:e|er|re|ère|ème|è)(?!\w)")
 # 泰文字母后直接跟句点（พ.ศ.、น.、ก.ม.）是缩写；ฯ（U+0E2F，ไปยาลน้อย）表示省略
 _TH_ABBREV = re.compile(pattern = f"[{chr(0x0E01)}-{chr(0x0E4E)}]\\.|{chr(0x0E2F)}")
-# 阿拉伯文、波斯文：字母后接 tatweel（U+0640，هـ、كـم，多用于缩写，偶尔用于拉长字形）或单个字母加句点（د.、م.）
+# 阿拉伯文、波斯文：字母后接 tatweel（U+0640，هـ、كـم，多用于缩写，偶尔用于拉长字形）、单个字母加句点（د.、م.），
+# 以及单独成词的 م、ه（公历、伊斯兰历年份标记，1887 م）
 _AR_LETTER = f"{chr(0x0620)}-{chr(0x064A)}{chr(0x066E)}-{chr(0x06D3)}{chr(0x06FA)}-{chr(0x06FF)}"
-_AR_ABBREV = re.compile(pattern = rf"[{_AR_LETTER}]{chr(0x0640)}+[{_AR_LETTER}]*|(?<![\w])[{_AR_LETTER}]\.")
+_AR_ABBREV = re.compile(
+    pattern = rf"[{_AR_LETTER}]{chr(0x0640)}+[{_AR_LETTER}]*|(?<![\w])[{_AR_LETTER}]\.|(?<![\w])[مه](?![\w])",
+)
 
 # 带句点的常见缩写（区分大小写，按整词匹配）。只收录不会和普通词混淆的写法，
 # 例如不收「No.」（英语回答 No.）和德语「Art.」（ihrer Art.）；_COMMON_SKIP 列出在某种语言里是普通词的写法。
@@ -65,7 +71,7 @@ _LANG_ABBREV = {
     "de": [
         "Hr.", "Fr.", "Str.", "Nr.", "bzw.", "usw.", "ggf.", "evtl.", "inkl.", "vgl.", "sog.", "Mio.",
         "Mrd.", "Tsd.", "Jh.", "Jhd.", "geb.", "gest.", "Abb.", "Bd.", "Hrsg.", "Dipl.", "Ing.", "ehem.",
-        "zzgl.", "bspw.", "insb.", "Tel.", "Abs.",
+        "zzgl.", "bspw.", "insb.", "Tel.", "Abs.", "ü.",
     ],
     "fr": [
         "M.", "MM.", "Mme", "Mmes", "Mlle", "Mlles", "Mgr", "av.", "bd", "boul.", "cf.", "env.", "p.",
@@ -73,11 +79,11 @@ _LANG_ABBREV = {
     ],
     "es": [
         "Sra.", "Srta.", "Dra.", "Ud.", "Uds.", "Vd.", "Vds.", "pág.", "págs.", "núm.", "Av.", "Avda.",
-        "Dña.", "aprox.", "Lic.", "Ing.", "Sto.", "Sta.", "art.", "cap.",
+        "Dña.", "aprox.", "Lic.", "Ing.", "Sto.", "Sta.", "art.", "cap.", "sr.", "sra.", "srta.", "dr.", "dra.",
     ],
     "pt": [
         "Sra.", "Srs.", "Sras.", "Dra.", "Exmo.", "Exma.", "Ltda.", "aprox.", "séc.", "pág.", "Av.",
-        "Sto.", "Sta.",
+        "Sto.", "Sta.", "sr.", "sra.", "srs.", "sras.", "dr.", "dra.",
     ],
     "it": [
         "Sig.", "Sigg.", "Dott.", "Ing.", "Avv.", "ecc.", "pag.", "Mons.", "sec.", "Geom.", "Rag.",
@@ -103,6 +109,8 @@ _LANG_ABBREV = {
     "vi": ["TP.", "Tp.", "Q.", "P.", "TS.", "ThS.", "GS.", "PGS.", "BS.", "KS.", "TT."],
     "fil": ["Gng.", "Bb.", "Gg.", "atbp.", "Hal.", "Sto.", "Sta."],
 }
+# 编号缩写后接数字：No. 47、Nr. 5、意大利语 n. 10、c. 890、p. 12（单独的 No. 是英语回答，不算）
+_NUMBER_ABBREV = re.compile(pattern = r"(?<![\w.])(?:No|no|Nos|nos|Nr|nr|N|[a-z])\.\s?(?=\d)")
 # 德语街道名缩写：Hauptstr.、Bahnhofstr.
 _DE_STREET = re.compile(pattern = r"(?<![\w.])\w*[sS]tr\.")
 _ABBREV_RE = {}
@@ -170,7 +178,7 @@ def find_issues(text: str, lang: str) -> list:
         issues.append(Issue(kind = "symbol", start = start, end = end, surface = text[start:end]))
     for m in _URL.finditer(string = text):
         issues.append(Issue(kind = "url", start = m.start(), end = m.end(), surface = m.group()))
-    patterns = [_DOTTED, _abbrev_re(lang = lang)]
+    patterns = [_DOTTED, _NUMBER_ABBREV, _abbrev_re(lang = lang)]
     if lang == "th":
         patterns.append(_TH_ABBREV)
     if lang in ("ar", "fa"):
@@ -184,6 +192,14 @@ def find_issues(text: str, lang: str) -> list:
     for m in _SPACED.finditer(string = text):
         if m.group(1).islower() and not _after_mark(text = text, start = m.start()):
             issues.append(Issue(kind = "abbrev", start = m.start(), end = m.end(), surface = m.group()))
+    if lang == "fr":
+        for m in _FR_ROMAN_ORDINAL.finditer(string = text):
+            roman = m.group("roman")
+            # 单个 L、C、D、M 加 e 是普通词（Le、Ce、De、Me）
+            if len(roman) == 1 and roman not in "IVX":
+                continue
+            if _ROMAN_VALID.fullmatch(string = roman):
+                issues.append(Issue(kind = "roman", start = m.start(), end = m.end(), surface = m.group()))
     for m in _ROMAN_TOKEN.finditer(string = text):
         token = m.group()
         if not _ROMAN_VALID.fullmatch(string = token):
