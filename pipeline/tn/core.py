@@ -8,7 +8,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import NamedTuple
 
+from ..compare import compare
 from .detect import describe, find_issues
+from .langs import get_rules
+from .rules import apply_rules
 
 LANGS = ("zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it", "id", "ms", "th", "vi", "fil", "ar", "tr", "fa")
 
@@ -51,19 +54,70 @@ def clean(text: str, lang: str) -> str:
     return text
 
 
-def normalize_entry(original: str, lang: str) -> TnResult:
+def _unique(items: list) -> list:
+    seen = []
+    for it in items:
+        if it not in seen:
+            seen.append(it)
+    return seen
+
+
+def _merge_reasons(reasons: list) -> list:
+    """同一原因的多处片段合并：「暂不处理「5000」」「暂不处理「2021」」→「暂不处理「5000」「2021」」。"""
+    grouped = {}
+    for reason in reasons:
+        head, sep, tail = reason.partition("「")
+        grouped.setdefault(head, [])
+        piece = sep + tail
+        if piece not in grouped[head]:
+            grouped[head].append(piece)
+    return [head + "".join(pieces) for head, pieces in grouped.items()]
+
+
+def _inside(it, spans: list) -> bool:
+    return any(a <= it.start and it.end <= b for a, b in spans)
+
+
+def normalize_entry(original: str, lang: str, mode: str = "basic") -> TnResult:
     """为一条原文生成朗读稿。
 
-    没有需要改写的片段时，朗读稿就是清理后的原文（unchanged）；有数字、符号、缩写、罗马数字或网址时
-    丢弃（dropped），tn_note 写明原因。
+    没有需要改写的片段时，朗读稿就是清理后的原文（unchanged）。mode 为 passthrough 时，有数字、符号、
+    缩写、罗马数字或网址的条目一律丢弃；为 basic 时先按该语言的规则把数字改写成读法，全部改写成功、
+    改写后不再有需要改写的片段、每处读法与原写法经 pipeline.compare 核对数值一致，才标 normalized，
+    否则丢弃。tn_note 写明改写或丢弃的原因。
     """
     if lang not in LANGS:
         raise ValueError(f"不支持的语言代码：{lang!r}")
+    if mode not in ("passthrough", "basic"):
+        raise ValueError(f"mode 只能是 passthrough 或 basic：{mode!r}")
     text = clean(text = original, lang = lang)
     if not text:
         return TnResult(script = None, status = "dropped", note = "原文为空")
     issues = find_issues(text = text, lang = lang)
-    if issues:
+    if not issues:
+        note = "转为简体" if lang == "zh" and text != clean(text = original, lang = "") else ""
+        return TnResult(script = text, status = "unchanged", note = note)
+    if mode == "passthrough":
         return TnResult(script = None, status = "dropped", note = describe(issues = issues))
-    note = "转为简体" if lang == "zh" and text != clean(text = original, lang = "") else ""
-    return TnResult(script = text, status = "unchanged", note = note)
+
+    rewrite = apply_rules(text = text, lang = lang, rules = get_rules(lang = lang))
+    # 原文中需要改写的片段（数字、符号、缩写等）必须全部落在被替换的片段里；
+    # 落在 Skip 片段里的已由规则说明原因，其余（例如「No. 47」中的 No.）另行列出
+    skipped = [span for _, span in rewrite.skips]
+    unexplained = [it for it in issues if not _inside(it = it, spans = rewrite.replaced + skipped)]
+    if rewrite.skips or unexplained:
+        reasons = _merge_reasons(reasons = [reason for reason, _ in rewrite.skips])
+        if unexplained:
+            reasons.append(describe(issues = unexplained))
+        return TnResult(script = None, status = "dropped", note = "；".join(reasons))
+    left = find_issues(text = rewrite.text, lang = lang)
+    if left:
+        return TnResult(script = None, status = "dropped", note = "改写后仍" + describe(issues = left))
+    failed = []
+    for spoken, written in rewrite.checks:
+        if not compare(script = spoken, hypothesis = written, lang = lang).match:
+            failed.append(f"「{spoken}」≠「{written}」")
+    if failed:
+        return TnResult(script = None, status = "dropped", note = "读法核对不一致：" + "、".join(failed))
+    labels = _unique(items = [f"{name}「{surface}」" for name, surface in rewrite.kinds])
+    return TnResult(script = rewrite.text, status = "normalized", note = "改写：" + "、".join(labels))
