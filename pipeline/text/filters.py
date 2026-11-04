@@ -11,6 +11,7 @@ import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 
+from .rules import check_language_rules
 from .langs import (
     CASED_LANGS,
     DEFAULT_MIN_SCRIPT_RATIO,
@@ -33,6 +34,8 @@ class FilterOptions:
     max_chars: int = 600
     max_digit_ratio: float = 0.12
     max_symbols: int = 2
+    max_bracket_groups: int = 1  # 括号组超过这个数就丢弃（维基段落里括号注释堆叠）
+    max_bracket_ratio: float = 0.25  # 括号内容占全句比例上限
 
 
 def default_options(lang: str) -> FilterOptions:
@@ -156,6 +159,15 @@ def check_text(text: str, *, lang: str, options: FilterOptions | None = None) ->
         return "punctuation"
     if _unbalanced(text):
         return "unbalanced"
+
+    reason = check_language_rules(
+        text,
+        lang = lang,
+        max_bracket_groups = options.max_bracket_groups,
+        max_bracket_ratio = options.max_bracket_ratio,
+    )
+    if reason:
+        return reason
 
     letters = [ch for ch in text if ch.isalpha()]
     if len(letters) < 2:

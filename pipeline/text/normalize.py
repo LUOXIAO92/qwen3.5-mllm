@@ -30,8 +30,24 @@ def clean_text(text: str, *, lang: str) -> str:
     text = text.translate(_INVISIBLE)
     if lang == "ru":
         text = text.replace(chr(0x0301), "")
+    if lang == "fa":
+        text = fix_persian(text)
     text = text.replace("\r", " ").replace("\n", " ")
     return _SPACES.sub(" ", text).strip()
+
+
+# 波斯语：阿拉伯字母 ي（U+064A）、ك（U+0643）统一成波斯字母 ی（U+06CC）、ک（U+06A9）。
+_FA_LETTERS = {0x064A: 0x06CC, 0x0643: 0x06A9, 0x0649: 0x06CC}
+# 零宽不连字（ZWNJ）只在两个阿拉伯文字母之间有意义；词首、词尾、连续出现、紧邻空格或标点都是错位。
+_ZWNJ_MISPLACED = re.compile("\u200c+(?![\u0600-\u06ff])|(?<![\u0600-\u06ff])\u200c+")
+_ZWNJ_RUN = re.compile("\u200c{2,}")
+
+
+def fix_persian(text: str) -> str:
+    """统一 ي/ك，删除错位的 ZWNJ（词首、词尾、连续、紧邻非字母）。"""
+    text = text.translate(_FA_LETTERS)
+    text = _ZWNJ_RUN.sub("\u200c", text)
+    return _ZWNJ_MISPLACED.sub("", text)
 
 
 @lru_cache(maxsize=1)
@@ -50,5 +66,7 @@ def norm_key(text: str, *, lang: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     if lang == "zh":
         text = _t2s().convert(text)
+    elif lang == "fa":
+        text = text.translate(_FA_LETTERS)
     text = text.casefold().translate(_KEY_STRIP)
     return "".join(ch for ch in text if unicodedata.category(ch)[0] not in "PSZC")

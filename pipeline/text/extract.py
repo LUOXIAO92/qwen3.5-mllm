@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import random
 from collections import Counter
@@ -20,9 +21,9 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from .dedup import Deduper
-from .exclusion import is_excluded, load_exclusion
+from .exclusion import is_excluded, load_blocklist, load_exclusion
 from .filters import FilterOptions, check_text, default_options
-from .langs import LANGS, WIKI_PARAGRAPH_LANGS
+from .langs import LANGS, NO_SPACE_LANGS, WIKI_PARAGRAPH_LANGS
 from .langid import LangIdentifier
 from .lengths import BINS, estimate_duration, length_bin
 from .normalize import clean_text
@@ -64,6 +65,8 @@ def extract_candidates(
     paragraphs: bool = False,
     bin_weights: dict[str, float] | None = None,
     max_per_prefix: int = 0,
+    prefix_len: int = 12,
+    blocklist: frozenset[str] = frozenset(),
     min_prob: float = 0.5,
     extra_labels: frozenset[str] = frozenset(),
     stats: Counter | None = None,
@@ -84,7 +87,7 @@ def extract_candidates(
         max_digit_ratio = options.max_digit_ratio,
         max_symbols = options.max_symbols,
     )
-    deduper = Deduper(lang = lang, max_per_prefix = max_per_prefix)
+    deduper = Deduper(lang = lang, max_per_prefix = max_per_prefix, prefix_len = prefix_len)
     reservoir = BinReservoir(caps = caps or DEFAULT_CAPS, rng = rng)
 
     def sentence_ok(sentence: str) -> bool:
@@ -92,6 +95,9 @@ def extract_candidates(
 
     for raw, ref in records:
         stats["records"] += 1
+        if ref in blocklist:
+            stats["drop_blocklist"] += 1
+            continue
         text = clean_text(raw, lang = lang)
         if paragraphs:
             runs = clean_runs(text, lang = lang, sentence_ok = sentence_ok)
@@ -151,11 +157,11 @@ def build_reader(args: argparse.Namespace, *, lang: str) -> tuple[Callable[[], I
     if args.source == "common_voice":
         from .sources.common_voice import read_common_voice
 
-        return lambda: read_common_voice(repo_dir = args.raw_dir, lang = lang), False, 0
+        return lambda: read_common_voice(repo_dir = args.raw_dir, lang = lang), False, 1
     if args.source == "tatoeba":
         from .sources.tatoeba import read_tatoeba
 
-        return lambda: read_tatoeba(raw_dir = args.raw_dir, lang = lang, seed = args.seed), False, 0
+        return lambda: read_tatoeba(raw_dir = args.raw_dir, lang = lang, seed = args.seed), False, 1
     if args.source == "wikipedia":
         from .sources.wikipedia_paragraphs import read_wikipedia_paragraphs
 
@@ -194,6 +200,7 @@ def main() -> None:
 
     langs = LANGS if args.lang == ["all"] else args.lang
     exclusion = load_exclusion(args.exclusion)
+    blocklist = frozenset(load_blocklist())
     identifier = LangIdentifier(model_path = args.langid_model)
     caps = {"short": args.cap_short, "medium": args.cap_medium, "long": args.cap_long}
     out_root = Path(args.out_dir) / args.source
@@ -204,6 +211,10 @@ def main() -> None:
             print(f"[{lang}] 该来源不覆盖，跳过", flush = True)
             continue
         reader, paragraphs, max_per_prefix = build_reader(args, lang = lang)
+        options = default_options(lang)
+        if args.source == "common_voice" and lang == "th":
+            # 泰语 Common Voice 没有句末标点，12–20 字的多是标题、地名和短语；抽样看 20 字以上才多为完整句。
+            options = dataclasses.replace(options, min_chars = 20)
         stats: Counter = Counter()
         candidates = extract_candidates(
             reader(),
@@ -213,7 +224,10 @@ def main() -> None:
             caps = caps,
             seed = args.seed,
             paragraphs = paragraphs,
+            options = options,
             max_per_prefix = max_per_prefix,
+            prefix_len = 12 if paragraphs else (14 if lang in NO_SPACE_LANGS else 28),
+            blocklist = blocklist,
             min_prob = args.min_prob,
             extra_labels = frozenset(args.extra_labels),
             stats = stats,

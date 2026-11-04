@@ -39,3 +39,14 @@ def is_excluded(text: str, *, lang: str, exclusion: dict[str, set[str]]) -> bool
     if norm_key(text, lang = lang) in banned:
         return True
     return any(norm_key(sentence, lang = lang) in banned for sentence in split_sentences(text, lang = lang))
+
+
+def load_blocklist(path: str | Path | None = None) -> set[str]:
+    """读取人工审阅排除的 source_ref 集合；默认读包内的 `data/blocklist_refs.txt`。"""
+    path = Path(path) if path else Path(__file__).parent / "data" / "blocklist_refs.txt"
+    refs = set()
+    for line in path.read_text(encoding = "utf-8").splitlines():
+        ref = line.split("#", 1)[0].strip()
+        if ref:
+            refs.add(ref)
+    return refs

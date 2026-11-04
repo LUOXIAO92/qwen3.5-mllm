@@ -18,7 +18,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from .dedup import Deduper
-from .exclusion import is_excluded, load_exclusion
+from .exclusion import is_excluded, load_blocklist, load_exclusion
 from .filters import check_text
 from .langs import LANGS
 from .lengths import BINS
@@ -119,6 +119,7 @@ def build_language(
 ) -> list[dict]:
     """合并一种语言的各来源候选，返回已编号的条目列表。"""
     rng = random.Random(f"{seed}-{lang}")
+    blocklist = load_blocklist()
     deduper = Deduper(lang = lang)
     by_source: dict[str, list[dict]] = {}
     for source in sources:
@@ -127,6 +128,8 @@ def build_language(
             continue
         rows = []
         for row in read_candidates(path):
+            if row["ref"] in blocklist:
+                continue
             if check_text(row["text"], lang = lang) is not None:
                 continue  # 过滤规则可能在抽取之后又补充过，合并时再检查一遍
             if is_excluded(row["text"], lang = lang, exclusion = exclusion):
