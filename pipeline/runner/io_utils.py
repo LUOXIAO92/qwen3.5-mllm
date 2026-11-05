@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import uuid
 from pathlib import Path
 
 
@@ -24,7 +25,7 @@ def write_jsonl_atomic(path: Path, rows: list) -> None:
     """先写临时文件再改名，保证读到的文件要么完整要么不存在。"""
     path = Path(path)
     path.parent.mkdir(parents = True, exist_ok = True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")  # 每个进程各用一个临时文件，CPU 与 GPU 两个进程同时写 progress.json 时不会互相覆盖
     with tmp.open(mode = "w", encoding = "utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii = False, sort_keys = False) + "\n")
@@ -36,7 +37,7 @@ def write_jsonl_atomic(path: Path, rows: list) -> None:
 def write_json_atomic(path: Path, obj) -> None:
     path = Path(path)
     path.parent.mkdir(parents = True, exist_ok = True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")  # 每个进程各用一个临时文件，CPU 与 GPU 两个进程同时写 progress.json 时不会互相覆盖
     tmp.write_text(json.dumps(obj, ensure_ascii = False, indent = 2) + "\n", encoding = "utf-8")
     os.replace(src = tmp, dst = path)
 
