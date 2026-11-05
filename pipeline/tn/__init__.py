@@ -43,12 +43,20 @@ tn_status（unchanged、normalized、dropped）和 tn_note（改写或丢弃的�
   的「十分」「五分」、片假名词后的编号、型号（97式）、单独的 0 丢弃。
 - ko：按量词选汉字词数词（천구백사십사년）或固有词数词（세개，1–99，整百整千用汉字词）；유월、시월；
   제 序数、만/억/천 大数、번째、배；量词后面必须是助词或词尾；名称后的数字和量词不明的数丢弃。
-- en：年份（nineteen sixty）只在 in、since 等词之后读，年代（nineteen nineties）、序数（21st）、
-  「Month D, YYYY」日期、时刻、单位、货币；「13 October」这类日在前的日期丢弃。
-- de：基数、年份（neunzehnhundert…，前后文像数量时丢弃）、「14:30 Uhr」；1 和末两位为 01 的数、序数和日期要变格，丢弃。
-- fr、es、pt、it：基数、年份、「1er octobre」「11 de mayo de 2025」日期、序数（2e、3º、36ª）、单位、货币；
-  随名词变性的数（un/une、doscientos/doscientas、dois/duas）只在确定为阳性时改写。
-- ru：只改写「2008 года」「в 1950-х годах」这类后接 год 的年份，和支配属格的词之后、复数属格名词之前的基数。
+- en：年份（nineteen sixty，按前后的词判断四位数是年份还是数量）、年代（1990s、'90s、mid-1960s）、序数、
+  「October 13, 1960」「13 October 1960」（the thirteenth of October）日期、时刻、单位、货币（含 $1.1 billion）；
+  缩写（etc.、e.g.、Dr. Smith、St. Louis、Jr.）、字母缩写（U.S. → U S）、&，君主序号（Henry the Eighth）和
+  War、Part、Type 后的罗马数字（World War Two）。
+- de：序数和日期按冠词、介词和名词的性数选词尾（am zehnten August、der dritten Liga、seit fünfundzwanzigstem
+  August），年份（2001 → zweitausendeins）、年代（neunzehnhundertachtziger Jahre）、复合词（dreißig-jährige）、
+  「4.40 Uhr」、Mio.、Mrd.、§、Nr. 等缩写，君主序号按格读（unter Heinrich dem Achten）；「1」在名词前仍丢弃。
+- fr、es、pt、it：随名词变性的数按名词词表和阴性词尾选词形（vingt et une voix、doscientas personas、
+  duas mil pessoas），名词后的编号读阳性（Fórmula uno）；世纪与君主序号（XVIIe siècle、siglo veinte、Felipe
+  segundo、Louis quatorze、Pio dodicesimo）、名词前的罗马序数（Segunda Guerra Mundial）、常用缩写、以空格分千位
+  的数、意语 anni '80 与 l'8 dicembre、法语时刻（21 h 30）。
+- ru：用 pymorphy3 分析后面名词的格、数、性，确定基数的格（в пяти домах、более шестисот тысяч копий、
+  погибли двадцать пять человек）；年份（г.、гг.、год）、日期（тринадцатого сентября）、带词尾的序数（23-м）、
+  -летний 复合词、罗马数字（в девятнадцатом веке、Пётр Первый）、单位与百分号、т. е.、н. э. 等缩写。
 - id、ms、th、vi、tr、fa：数词不变形，基数、年份、日期按数值读。id/ms：ke-21、1970-an、pukul 17.30、
   RM50、-10 derajat；th：14.30 น.、พ.ศ. 2500、99.50 บาท、句末误加的句点；vi：thứ nhất、tháng tư、
   lúc 6:30（sáu giờ ba mươi phút）、km 等单位、-10°C；tr：撇号后缀按元音和谐接到读法上（2006'da → iki bin
@@ -64,13 +72,15 @@ tn_status（unchanged、normalized、dropped）和 tn_note（改写或丢弃的�
 
 中文的繁简转换调用 OpenCC 1.4.2（Apache-2.0），直通版的其余语言只用标准库。基础读法的英语、德语、法语、
 西班牙语、葡萄牙语、意大利语、俄语数词调用 num2words 0.5.14（LGPL-2.1，以依赖方式调用，不随项目分发），
-其余语言的读法在 numwords.py 中实现。工作目录的 envs/tn 是装有这两个包的虚拟环境（uv venv 基于
-Python 3.14，uv pip install num2words==0.5.14 opencc==1.4.2）。
+其余语言的读法在 numwords.py 中实现。俄语另用 pymorphy3 2.0.6（MIT，词典数据来自 OpenCorpora）分析名词的格和性。
+工作目录的 envs/tn 是装有这两个包的虚拟环境（uv venv 基于 Python 3.14，uv pip install num2words==0.5.14
+opencc==1.4.2），俄语还需要 uv pip install pymorphy3==2.0.6。
 
 测试
 ====
 
-    python -m unittest pipeline.tn.tests.test_tn pipeline.tn.tests.test_basic pipeline.tn.tests.test_cjk
+    python -m unittest pipeline.tn.tests.test_tn pipeline.tn.tests.test_basic pipeline.tn.tests.test_cjk \
+        pipeline.tn.tests.test_european
 
 已知局限
 ========
