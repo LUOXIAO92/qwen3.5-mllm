@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from .rules import check_language_rules
+from .web_rules import check_web_rules
 from .langs import (
     CASED_LANGS,
     DEFAULT_MIN_SCRIPT_RATIO,
@@ -36,6 +37,7 @@ class FilterOptions:
     max_symbols: int = 2
     max_bracket_groups: int = 1  # 括号组超过这个数就丢弃（维基段落里括号注释堆叠）
     max_bracket_ratio: float = 0.25  # 括号内容占全句比例上限
+    web: bool = False  # 网页来源：额外启用样板、社交、电话、价格等规则（web_rules.py）
 
 
 def default_options(lang: str) -> FilterOptions:
@@ -168,6 +170,11 @@ def check_text(text: str, *, lang: str, options: FilterOptions | None = None) ->
     )
     if reason:
         return reason
+
+    if options.web:
+        reason = check_web_rules(text, lang = lang)
+        if reason:
+            return reason
 
     letters = [ch for ch in text if ch.isalpha()]
     if len(letters) < 2:

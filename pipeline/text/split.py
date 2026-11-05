@@ -3,7 +3,7 @@
 规则切分的原则：宁可少切，不可错切。缩写（`U.S.`、`St.`、`geb.`、`св.`）、单个字母
 （首字母、`z. B.`）、带内部句点的缩写（`J.-C.`、`e.g.`）、罗马数字（`Mieszko III.`）和
 德语等语言的序数（`am 18. April`）后面的句点都不当作句末；不切的后果只是两句连在一起，
-而错切会让片段以半句结尾。泰语没有句末标点，整段当作一句。
+而错切会让片段以半句结尾。泰语没有句末标点，用 PyThaiNLP 的 crfcut（按空格处的统计模型）切分；没有安装 PyThaiNLP 时整段当作一句。
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ _ABBREVIATIONS = {
     "тт", "лат", "греч", "фр", "итал", "исп", "пр", "напр", "букв", "букв", "ср", "т", "п", "д", "н", "э", "им",
     # 印尼语、马来语、土耳其语、越南语
     "bpk", "ibu", "hj", "dll", "dsb", "yg", "dkk", "tgl", "sdr", "jl", "prof", "dr", "ir", "drs",
-    "bkz", "sn", "tel",
+    "bkz", "sn", "tel", "kec", "kab", "kel", "prov", "dgn", "yth", "ybs", "tsb", "spd", "skm", "tbk", "hlm", "jln",
 }
 
 # 点前是这些序数的语言：1–2 位数字加句点是序数（am 18. April），不是句末。
@@ -57,10 +57,18 @@ def split_sentences(text: str, *, lang: str) -> list[str]:
     if not text:
         return []
     if lang == "th":
-        return [text]
+        return _split_thai(text)
     if lang in {"zh", "ja"}:
         return _split_cjk(text)
     return _split_latin(text, lang = lang)
+
+
+def _split_thai(text: str) -> list[str]:
+    try:
+        from pythainlp.tokenize import sent_tokenize
+    except ImportError:
+        return [text]
+    return [sentence.strip() for sentence in sent_tokenize(text, engine = "crfcut") if sentence.strip()]
 
 
 def _split_cjk(text: str) -> list[str]:
@@ -107,7 +115,7 @@ def _split_latin(text: str, *, lang: str) -> list[str]:
     for match in _LATIN_END.finditer(text):
         end = match.end(1)
         mark = match.group(1)
-        if mark.startswith(".") and len(mark) == 1 and is_abbreviation(text[start:match.start(1)], lang = lang):
+        if mark.rstrip(_CLOSERS) == "." and is_abbreviation(text[start:match.start(1)], lang = lang):
             continue
         following = text[match.end():match.end() + 1]
         if following and following.islower():

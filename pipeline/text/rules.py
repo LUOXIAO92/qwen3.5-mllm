@@ -75,6 +75,8 @@ _TH_LABEL = re.compile(r"\s[-–—:]\s|:")
 
 
 def _repeated_sentence(text: str, *, lang: str) -> bool:
+    if lang == "th":
+        return False  # 泰语按统计模型在空格处切分，短语重复（"สุดยอด ! สุดยอด !"）是合法的叠用
     sentences = split_sentences(text, lang = lang)
     if len(sentences) < 2:
         return False
