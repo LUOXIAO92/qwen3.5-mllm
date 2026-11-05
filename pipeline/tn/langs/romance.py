@@ -19,8 +19,8 @@ import re
 from ..rules import Number, Rule, Skip, alternation
 from .base import Lang, word_after, word_before
 from .euro import (
-    abbreviation_rules, initialism_rule, number_word_guard, number_words, roman_value, space_thousands_pattern,
-    unit_follows,
+    abbreviation_rules, currency_scale_guard, fraction_guard, hms_guard, initialism_rule, number_word_guard,
+    number_words, range_guard, roman_value, score_guard, space_thousands_pattern, unit_follows,
 )
 
 # 两个字母的 CD、DC、MC 等多为缩写，不算罗马数字（与 detect 一致）
@@ -126,7 +126,14 @@ class Romance(Lang):
     def rules(self) -> list:
         words = number_words(card = self.card, ordinal = lambda n: self.ordinal_words(n = n) or "")
         words |= {"un", "une", "uno", "una", "um", "uma"}
-        early = [number_word_guard(words = words, conjunctions = self.conjunctions)]
+        early = [
+            range_guard(),
+            fraction_guard(),
+            number_word_guard(words = words, conjunctions = self.conjunctions),
+            hms_guard(),
+            score_guard(),
+            currency_scale_guard(symbols = self.currencies, scales = self.scales),
+        ]
         early += abbreviation_rules(table = self.abbreviations, starters = self.starters) if self.abbreviations else []
         if self.number_abbreviations:
             early.append(Rule(

@@ -142,6 +142,79 @@ def dotted_decimal_guard() -> Rule:
     )
 
 
+# 各语言的数量级词（小写，含缩写），用于 currency_scale_guard
+SCALE_WORDS = {
+    "thousand", "thousands", "million", "millions", "billion", "billions", "trillion", "trillions", "k", "m", "mn",
+    "bn", "b", "tn", "crore", "lakh", "mil", "millón", "millon", "millones", "billón", "billones", "milhão",
+    "milhões", "bilhão", "bilhões", "trilhão", "trilhões", "mila", "mille", "milione", "milioni", "miliardo",
+    "miliardi", "milliard", "milliards", "md", "mds", "tausend", "millionen", "milliarde", "milliarden", "mio",
+    "mrd", "tsd",
+}
+
+
+def currency_scale_guard(symbols, scales) -> Rule:
+    """货币符号加数后面的数量级词没有按登记的写法出现（$550 Millones、$5 Billion、$5k、€ 5 Mrd.），丢弃。
+
+    登记的写法（$550 millones、$5 million）由货币规则读作「数 + 数量级词 + 货币」；大小写不同、未登记或
+    直接连写的数量级词如果放过，货币规则只读到数，会得到「quinientos cincuenta dólares Millones」这样语序错误的读法。
+    """
+    from ..rules import Skip
+
+    syms = "|".join(re.escape(pattern = s) for s in sorted(symbols, key = len, reverse = True))
+    pattern = re.compile(pattern = rf"(?<![A-Za-z])(?:{syms})\s?\d[\d.,]*(?P<sp>\s?)(?P<word>[^\W\d_]+)")
+
+    def handle(m, ctx):
+        word = m.group("word")
+        if not m.group("sp") or (word.lower() in SCALE_WORDS and word not in scales):
+            return Skip(reason = f"货币金额后的数量级词写法未登记「{m.group()}」")
+        return None
+
+    return Rule(pattern = pattern, handle = handle)
+
+
+def range_guard() -> Rule:
+    """数的范围（1500–1600、10 000 – 20 000、5–30-jährige、Nr. 5–7），与公共保护规则相同，但排在各语言的早期规则之前，
+    避免空格千分位、编号缩写、复合词等规则只改写范围的一端。"""
+    from ..rules import DASHES, Skip
+
+    num = r"(?:\d{1,3}(?: \d{3})+|\d+(?:[.,]\d+)*)"
+    dash = re.escape(pattern = DASHES)
+    return Rule(
+        pattern = re.compile(pattern = rf"(?<![\d.,\w]){num}\s*[{dash}]\s*{num}(?![\d])"),
+        handle = lambda m, ctx: Skip(reason = f"范围或编号「{m.group()}」"),
+    )
+
+
+def fraction_guard() -> Rule:
+    """日期写法（03.11.2026）和分数、斜线（1/2-Liter、1/2 h），同样排在早期规则之前。"""
+    from ..rules import Skip
+
+    return Rule(
+        pattern = re.compile(pattern = r"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}|\d+\s*/\s*\d+"),
+        handle = lambda m, ctx: Skip(reason = f"日期、分数或斜线写法「{m.group()}」"),
+    )
+
+
+def score_guard() -> Rule:
+    """比分、比例与后面的词用连字符相连（4:2-Sieg、17:10-Favorit）：先于复合词规则丢弃，避免只改写冒号后的数。"""
+    from ..rules import Skip
+
+    return Rule(
+        pattern = re.compile(pattern = r"(?<![\d.,:])\d+\s?[:：]\s?\d+(?=[-‐‑][^\W\d_])"),
+        handle = lambda m, ctx: Skip(reason = f"比分或比例与后面的词相连「{m.group()}」"),
+    )
+
+
+def hms_guard() -> Rule:
+    """时:分:秒（2:12:00、1:23:45 Uhr）多为比赛用时，读作时刻或时长都不可靠，丢弃。"""
+    from ..rules import Skip
+
+    return Rule(
+        pattern = re.compile(pattern = r"(?<![\d.,:])\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?(?![\d:])"),
+        handle = lambda m, ctx: Skip(reason = f"时:分:秒写法的读法不固定「{m.group()}」"),
+    )
+
+
 def words_before(text: str, start: int, n: int = 3) -> list:
     """前面最多 n 个词（小写，最近的在前），遇到句末标点停止。"""
     head = text[:start]
