@@ -44,9 +44,17 @@ def _opencc() -> tuple:
     return hk2t, tw2s
 
 
+# tw2s 把表示「写作」的「著」也改成了「着」（所著、显著、原著、著称），这里改回来
+_ZHU_FIXES = re.compile(
+    pattern = r"(?:显|卓|昭|原|名|巨|编|译|专|遗|论|拙|土|合)着|着(?:称|述|录)|所着(?![重眼想手陆迷急火凉实落色意])"
+    r"|(?<![一-鿿])着有|着书立说",
+)
+
+
 def to_simplified(text: str) -> str:
     hk2t, tw2s = _opencc()
-    return tw2s.convert(text = hk2t.convert(text = text))
+    text = tw2s.convert(text = hk2t.convert(text = text))
+    return _ZHU_FIXES.sub(repl = lambda m: m.group().replace("着", "著"), string = text)
 
 
 def clean(text: str, lang: str) -> str:
