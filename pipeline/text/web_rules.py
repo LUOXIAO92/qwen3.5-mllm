@@ -104,7 +104,9 @@ _DEPENDENT_START = {
     "en": re.compile(r"^(here (is|are)|the following|below (is|are)|see below)\b", re.IGNORECASE),
     "de": re.compile(r"^(hier (ist|sind)|folgende[rsmn]?|nachfolgend|im folgenden)\b", re.IGNORECASE),
 }
-_QUESTION_ANSWER = re.compile(r"^\s*(q|a|q&a|hỏi|đáp|soal|jawab|soru|cevap|سؤال|جواب)\s*[:：]", re.IGNORECASE)
+_QUESTION_ANSWER = re.compile(r"^\s*(?:[A-ZÀ-Ý]{1,2}\.?\s*:|(?:q|a|q&a|hỏi|đáp|soal|jawab|soru|cevap|سؤال|جواب)\s*[:：])", re.IGNORECASE)
+# 行尾断词留下的 "inca- pacidade"：连字符后接空格再接小写字母。
+_BROKEN_HYPHEN = re.compile(r"[a-zà-ÿ]{2}- [a-zà-ÿ]{2}")
 
 
 def url_is_spam(url: str) -> bool:
@@ -172,6 +174,8 @@ def check_web_rules(text: str, *, lang: str) -> str | None:
         return "heading_number"
     if lang in _DEPENDENT_START and _DEPENDENT_START[lang].search(text):
         return "dependent_start"
+    if lang not in NO_SPACE_LANGS and _BROKEN_HYPHEN.search(text):
+        return "broken_hyphen"
     if _EMPHASIS.search(text):
         return "emphasis"
     if _EMOJI.search(text):

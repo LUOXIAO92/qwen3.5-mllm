@@ -87,6 +87,9 @@ def test_boilerplate_only_active_for_web_entries():
         ("THE BEST OFFER YOU WILL SEE THIS WEEK IN THE CITY FOR SURE.", "en", "shouting"),
         ("Para saintis merekrut 88 peserta untuk penyelidikan.Mereka membahagikan peserta kepada dua kumpulan.", "ms", "glued_sentence"),
         ("Jumlah pembiayaan peribadi ditingkatkan kepada sehingga lima ribu ringgit susulan kenyataan terkini …", "ms", "ellipsis_end"),
+        ("P: Que tipo de mercado é adequado para usar o Grid Trading hoje em dia?", "pt", "caption"),
+        ("R.: O diagnóstico é feito pelo médico a partir dos dados da história contada.", "pt", "caption"),
+        ("A lesão dos flexores profundos causa uma inca- pacidade de flexão das articulações.", "pt", "broken_hyphen"),
         ("ピルスナービールのおすすめ10選!", "ja", "cjk_ascii_punct"),
         ("千百年来,在构成人们实用需求方面充当着重要角色，同时也表明了它的价值。", "zh", "cjk_ascii_punct"),
         ("【特集】試したくなる新しいスマートフォンの選び方を紹介します。", "ja", "tag_bracket"),
@@ -268,3 +271,9 @@ def test_thai_sentence_split_when_pythainlp_available():
 def test_splitter_does_not_cut_abbreviation_in_brackets():
     sentences = split_sentences("Bazı tabirciler, rüyada Nuh (A.S.) gören kişiye müjde verir. İkinci cümle burada.", lang = "tr")
     assert len(sentences) == 2 and sentences[0].endswith("verir.")
+
+
+def test_hplt_persian_segment_code_accepted():
+    doc = _doc(NA = 0.9)
+    doc["lang"], doc["prob"], doc["seg_langs"] = ["pes_Arab"], [0.98], ["fas_Arab"] * 4
+    assert hplt_doc_ok(doc, genres = ("NA",), glotlid_code = "pes_Arab") == "na"

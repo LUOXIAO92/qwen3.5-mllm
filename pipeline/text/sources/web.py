@@ -90,7 +90,9 @@ def hplt_doc_ok(
     if glotlid_code and (langs[0] != glotlid_code or probs[0] < min_lang_prob):
         return None
     segments = doc.get("seg_langs") or []
-    if glotlid_code and segments and sum(code == glotlid_code for code in segments) / len(segments) < min_target_fraction:
+    # 波斯语：文档语种标 pes_Arab，段落语种标 fas_Arab，两个代码都算目标语言。
+    accepted = {glotlid_code, glotlid_code.replace("pes_", "fas_")}
+    if glotlid_code and segments and sum(code in accepted for code in segments) / len(segments) < min_target_fraction:
         return None
     return main.lower()
 
