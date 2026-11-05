@@ -18,6 +18,7 @@ from functools import lru_cache
 from ..numwords import tr_cardinal, tr_digits, tr_ordinal
 from ..rules import DASHES, Rule, Skip
 from .base import Lang
+from .extras import negative_rule
 
 VOWELS = "aeıioöuü"
 BACK = "aıou"
@@ -165,10 +166,7 @@ class Tr(Lang):
                 pattern = re.compile(pattern = rf"{num}{apostrophe}\s"),
                 handle = lambda m, ctx: Skip(reason = f"数字后的撇号与后缀分开「{m.group().strip()}」"),
             ),
-            Rule(
-                pattern = re.compile(pattern = rf"(?<![\w.,{dash}])[-−](?P<num>{num})(?=\s?(?:derece|°))"),
-                handle = self.negative,
-            ),
+            negative_rule(lang = self, minus = "eksi", words = ("derece",)),
             Rule(
                 pattern = re.compile(pattern = r"(?<![\w.])(?P<roman>[IVX]{1,4})\.\s(?=(?P<next>[A-ZÇĞİÖŞÜ][a-zçğıöşü]+))"),
                 handle = self.roman_ordinal,
@@ -251,14 +249,6 @@ class Tr(Lang):
                 return Skip(reason = f"撇号后缀与数词读音不和谐「{m.group()}」")
         ctx.kind(name = "时刻", surface = m.group())
         return (saat or "") + spoken
-
-    def negative(self, m, ctx):
-        spoken = self.say_number(written = m.group("num"), ctx = ctx)
-        if isinstance(spoken, Skip):
-            return spoken
-        ctx.checks[-1] = ("eksi " + spoken, m.group())
-        ctx.kind(name = "负数", surface = m.group())
-        return "eksi " + spoken
 
     def roman_ordinal(self, m, ctx):
         value = _ROMAN.get(m.group("roman"))

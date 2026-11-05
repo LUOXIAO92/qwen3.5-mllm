@@ -14,8 +14,9 @@ from __future__ import annotations
 import re
 
 from ..numwords import idms_cardinal, idms_digits
-from ..rules import DASHES, Rule, Skip
+from ..rules import Rule, Skip
 from .base import Lang
+from .extras import long_plain_rule, negative_rule
 
 TIME_WORDS = ("pagi", "siang", "sore", "petang", "malam", "WIB", "WITA", "WIT")
 
@@ -46,14 +47,7 @@ class Id(Lang):
         """负数先于公共保护规则运行（公共规则把 -10 当作负号或连字符丢弃）。"""
         if self.minus is None:
             return super().rules()
-        dash = re.escape(pattern = DASHES)
-        negative = Rule(
-            pattern = re.compile(
-                pattern = rf"(?<![\w.,{dash}])[-−](?P<num>{self.num})(?=\s?(?:°|derajat|darjah))",
-            ),
-            handle = self.negative,
-        )
-        return [negative] + super().rules()
+        return [negative_rule(lang = self, minus = self.minus, words = ("derajat",))] + super().rules()
 
     def extra_rules(self) -> list:
         hours = "|".join(self.hour_words)
@@ -67,10 +61,7 @@ class Id(Lang):
             ),
             Rule(pattern = re.compile(pattern = r"(?<![\w-])ke-(?P<num>\d{1,3})(?!\d|[.,]\d)"), handle = self.ordinal),
             Rule(pattern = re.compile(pattern = r"(?<![\w.,-])(?P<num>\d{2,4})-an(?![\w-])"), handle = self.decade),
-            Rule(
-                pattern = re.compile(pattern = r"(?<![\w.,])(?P<num>[1-9]\d{4,5})(?![\d.,])(?=\s[^\W\d_])"),
-                handle = self.long_plain,
-            ),
+            long_plain_rule(lang = self),
         ]
 
     def time(self, m, ctx):
@@ -100,22 +91,6 @@ class Id(Lang):
             return Skip(reason = f"年代写法无法确定「{m.group()}」")
         ctx.kind(name = "年代", surface = m.group())
         return ctx.num(spoken = self.card(n = n), written = m.group("num")) + "an"
-
-    def long_plain(self, m, ctx):
-        value = int(m.group("num"))
-        ctx.kind(name = "基数", surface = m.group())
-        return ctx.num(spoken = self.card(n = value), written = m.group("num"))
-
-    def negative(self, m, ctx):
-        n = self.parse(written = m.group("num"))
-        if n is None:
-            return Skip(reason = f"数字写法无法确定「{m.group()}」")
-        spoken = self.say(n = n, ctx = ctx)
-        if isinstance(spoken, Skip):
-            return spoken
-        ctx.checks[-1] = (self.minus + " " + spoken, m.group())
-        ctx.kind(name = "负数", surface = m.group())
-        return self.minus + " " + spoken
 
 
 LANG = Id
