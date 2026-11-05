@@ -29,7 +29,8 @@ from ..numwords import n2w
 from ..rules import Rule, Skip, alternation
 from .base import Lang, word_before
 from .euro import (
-    abbreviation_rules, dotted_decimal_guard, number_word_guard, number_words, roman_value, sentence_end_after,
+    abbreviation_rules, dotted_decimal_guard, fraction_guard, hms_guard, number_word_guard, number_words,
+    range_guard, roman_value, score_guard, sentence_end_after,
 )
 
 CASE_NAMES = {
@@ -243,7 +244,14 @@ class Ru(Lang):
         words = set()
         for case in CASE_NAMES:
             words |= number_words(card = lambda n, case = case: card_form(n = n, case = case))
-        early = [dotted_decimal_guard(), number_word_guard(words = words, conjunctions = ("и",))]
+        early = [
+            range_guard(),
+            fraction_guard(),
+            dotted_decimal_guard(),
+            hms_guard(),
+            score_guard(),
+            number_word_guard(words = words, conjunctions = ("и",)),
+        ]
         early += abbreviation_rules(table = ABBREVIATIONS, starters = STARTERS) + [
             Rule(
                 pattern = re.compile(pattern = r"(?<![\w.])см\.(?=\s+[а-яА-Я])"),
@@ -478,6 +486,13 @@ class Ru(Lang):
         if m.group("num").startswith("0") or n == 0:
             return Skip(reason = f"序数写法无法确定「{m.group()}」")
         noun = self.noun_after(text = ctx.text, end = m.end())
+        # 词尾 -х、-м、-ми 也用来写基数的格（24-х часов → двадцати четырёх，к 2-м часам → двум，8-ми → восьми）。
+        # 基数后的名词是复数；以 2–4 结尾的数和带 -ми 的非整十数，后面没有名词或名词可能是复数时无法区分，丢弃
+        few = 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14
+        if (few and suf in ("х", "м", "ми")) or (suf == "ми" and n % 10 != 0):
+            numbers = {number for _, number, _, _ in noun_parses(word = noun.lower())} if noun else {"plur"}
+            if "plur" in numbers or not numbers:
+                return Skip(reason = f"带词尾的数可能是基数也可能是序数「{m.group()}」")
         options = set()
         if noun:
             for case, number, gender, anim in noun_parses(word = noun.lower() if noun[0].islower() else noun):

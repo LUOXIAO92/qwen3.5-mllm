@@ -55,6 +55,8 @@ NORMALIZED = {
         ("Baldwin IV's deathbed.", "Baldwin the Fourth's deathbed."),
         ('He had 1500 dollars in the 1998 elections.', 'He had one thousand five hundred dollars in the nineteen ninety-eight elections.'),
         ('Between 1999 and 2000 it grew.', 'Between nineteen ninety-nine and two thousand it grew.'),
+        ('It cost $5 million.', 'It cost five million dollars.'),
+        ('The meeting starts at 9:30.', 'The meeting starts at nine thirty.'),
     ],
     'de': [
         ('Am 10. August 1990 wurde er im 19. Jahrhundert geboren.', 'Am zehnten August neunzehnhundertneunzig wurde er im neunzehnten Jahrhundert geboren.'),
@@ -172,6 +174,8 @@ NORMALIZED = {
         ('Город получил от Фридриха II статус вольного.', 'Город получил от Фридриха Второго статус вольного.'),
         ('Ему исполнилось 22 года.', 'Ему исполнилось двадцать два года.'),
         ('С 622 по 750 год правили арабы.', 'С шестьсот двадцать второго по семьсот пятидесятый год правили арабы.'),
+        ('В 1990-х годах и в 20-х числах.', 'В тысяча девятьсот девяностых годах и в двадцатых числах.'),
+        ('Он занял 5-е место на 23-м этапе.', 'Он занял пятое место на двадцать третьем этапе.'),
     ],
     'pt': [
         ('Havia 22 pessoas e 2 mil pessoas no século XX, com D. Pedro I e Isabel II.', 'Havia vinte e duas pessoas e duas mil pessoas no século vinte, com Dom Pedro primeiro e Isabel segunda.'),
@@ -250,6 +254,7 @@ NORMALIZED = {
         ('Ganó 1 millón de dólares.', 'Ganó un millón de dólares.'),
         ('Hubo 200 mil votos y 2 millones de personas.', 'Hubo doscientos mil votos y dos millones de personas.'),
         ('Entre 2001 y 2002 creció.', 'Entre dos mil uno y dos mil dos creció.'),
+        ('Costó $550 millones.', 'Costó quinientos cincuenta millones de dólares.'),
     ],
     'it': [
         ("Negli anni '80 Pio XII ed Elisabetta II vissero nel XX secolo.", 'Negli anni ottanta Pio dodicesimo ed Elisabetta seconda vissero nel ventesimo secolo.'),
@@ -300,6 +305,10 @@ DROPPED = {
         ('Mr. smith arrived.', '含缩写'),
         ('In 2020 one person died.', '数字后紧跟数词，读出来会连成另一个数'),
         ('It cost 20 two-seat cars.', '数字后紧跟数词，读出来会连成另一个数'),
+        ('It cost $5 Billion.', '货币金额后的数量级词写法未登记'),
+        ('It cost $5k.', '货币金额后的数量级词写法未登记'),
+        ("Shigematsu's 2:12:00 marathon world record in 1965.", '时:分:秒写法的读法不固定'),
+        ('See No. 5–7 and c. 1500–1600.', '范围或编号'),
     ],
     'de': [
         ('Er hatte etwa 1740 die Straße gebaut.', '四位数是年份还是数量需要上下文'),
@@ -313,6 +322,12 @@ DROPPED = {
         ('Die Formel-1 fährt.', '型号或编号'),
         ('Er war bis 1998 Leiter der Abteilung.', '四位数是年份还是数量需要上下文'),
         ('1880 ein Haus wurde gebaut.', '数字后紧跟数词，读出来会连成另一个数'),
+        ('Es kostete $550 Millionen.', '货币金额后的数量级词写法未登记'),
+        ('Um 1:23:45 Uhr kam er an.', '时:分:秒写法的读法不固定'),
+        ('Beim 4:2-Sieg am 20. Mai 1990 spielte er.', '比分或比例与后面的词相连'),
+        ('Es waren 10 000 – 20 000 Menschen.', '范围或编号'),
+        ('Für 5–30-jährige Kinder.', '范围或编号'),
+        ('Ein 1/2-Liter-Glas.', '日期、分数或斜线写法'),
     ],
     'fr': [
         ('Il en a 21.', '数词的阴阳性取决于名词'),
@@ -324,6 +339,10 @@ DROPPED = {
         ('Elle a 41 dioptries.', '数词的阴阳性取决于名词'),
         ('La version courante est la 3.8. Il existe aussi iOS 4.0.', '数字中的点读法不固定（版本号或外来写法）'),
         ('En 2020 une loi fut votée.', '数字后紧跟数词，读出来会连成另一个数'),
+        ('Il a coûté $5 Milliards.', '货币金额后的数量级词写法未登记'),
+        ('Il a couru en 2:12:00 en 1965.', '时:分:秒写法的读法不固定'),
+        ('Il y avait 10 000 – 20 000 personnes.', '范围或编号'),
+        ('Il a couru 1/2 h.', '日期、分数或斜线写法'),
     ],
     'ru': [
         ('Впереди ограничение 40, а следом', '俄语数词的格取决于上下文'),
@@ -339,6 +358,9 @@ DROPPED = {
         ('В 1990 один из них умер.', '数字后紧跟数词，读出来会连成另一个数'),
         ('Сегодня исполняется 191 год Льюису.', '数后接 год 可能是年数而不是年份'),
         ('Телефон вышел 19 декабря 2007 г .', '俄语数词的格取决于上下文'),
+        ('Он пробежал за 2:12:00 в 1965 году.', '时:分:秒写法的读法不固定'),
+        ('Пользоваться ванной можно будет по истечении всего 24-х часов.', '带词尾的数可能是基数也可能是序数'),
+        ('К 2-м часам всё закончилось.', '带词尾的数可能是基数也可能是序数'),
     ],
     'pt': [
         ('Havia 22.', '数词的阴阳性取决于名词'),
@@ -347,6 +369,9 @@ DROPPED = {
         ('Eram 2 a 2.', '数词的阴阳性取决于名词'),
         ('Ele tem 22 caixinhas.', '数词的阴阳性取决于名词'),
         ('Foi substituído por 120 homens.', 'por 后的数读起来像 por ciento、por cento'),
+        ('Custou $550 Milhões.', '货币金额后的数量级词写法未登记'),
+        ('Correu em 2:12:00 em 1965.', '时:分:秒写法的读法不固定'),
+        ('Eram 10 000 – 20 000 pessoas.', '范围或编号'),
     ],
     'es': [
         ('Tenía 21.', '数词的阴阳性取决于名词'),
@@ -357,6 +382,10 @@ DROPPED = {
         ('Se vendieron 21 casitas.', '数词的阴阳性取决于名词'),
         ('En 2030 y una más.', '数字后紧跟数词，读出来会连成另一个数'),
         ('Fue sustituido por 120 hombres.', 'por 后的数读起来像 por ciento、por cento'),
+        ('El Club fue vendido en $550 Millones.', '货币金额后的数量级词写法未登记'),
+        ('Costó € 2 Mil.', '货币金额后的数量级词写法未登记'),
+        ('Corrió en 2:12:00 en 1965.', '时:分:秒写法的读法不固定'),
+        ('Había 10 000 – 20 000 personas.', '范围或编号'),
     ],
     'it': [
         ("Il '500-'600 fu ricco.", '撇号省略的年份'),
@@ -367,6 +396,10 @@ DROPPED = {
         ('Il racconto Centaurus II', '罗马数字的读法取决于上下文'),
         ('Ci sono 31 persone.', '阴性数词的读法不固定'),
         ('Vinse 21 partite.', '阴性数词的读法不固定'),
+        ('Costò $550 Milioni.', '货币金额后的数量级词写法未登记'),
+        ('Corse in 2:12:00 nel 1965.', '时:分:秒写法的读法不固定'),
+        ('Erano 10 000-20 000 persone.', '范围或编号'),
+        ("Dall'8-10 dicembre.", '范围或编号'),
     ],
 }
 

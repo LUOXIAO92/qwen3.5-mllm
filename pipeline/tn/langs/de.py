@@ -23,8 +23,8 @@ from ..numwords import n2w
 from ..rules import Number, Rule, Skip, alternation
 from .base import Lang, word_after, word_before
 from .euro import (
-    abbreviation_rules, initialism_rule, number_word_guard, number_words, roman_value, sentence_end_after,
-    space_thousands_pattern, unit_follows,
+    abbreviation_rules, currency_scale_guard, fraction_guard, hms_guard, initialism_rule, number_word_guard,
+    number_words, range_guard, roman_value, score_guard, sentence_end_after, space_thousands_pattern, unit_follows,
 )
 
 MONTHS = (
@@ -250,7 +250,14 @@ class De(Lang):
     def rules(self) -> list:
         words = number_words(card = self.card, ordinal = lambda n: n2w(n = n, lang = "de", to = "ordinal"))
         words |= {"ein", "eine", "einen", "einem", "einer", "eines", "erster", "ersten", "erste", "erstes"}
-        early = [number_word_guard(words = words, conjunctions = ("und",))]
+        early = [
+            range_guard(),
+            fraction_guard(),
+            number_word_guard(words = words, conjunctions = ("und",)),
+            hms_guard(),
+            score_guard(),
+            currency_scale_guard(symbols = self.currencies, scales = ()),
+        ]
         early += abbreviation_rules(table = ABBREVIATIONS, starters = STARTERS) + [
             Rule(
                 pattern = re.compile(
@@ -291,7 +298,7 @@ class De(Lang):
     def extra_rules(self) -> list:
         return [
             Rule(
-                pattern = re.compile(pattern = r"(?<![\d.,])(?P<h>\d{1,2})[:.](?P<mm>\d{2})\s?Uhr\b"),
+                pattern = re.compile(pattern = r"(?<![\d.,:])(?P<h>\d{1,2})[:.](?P<mm>\d{2})\s?Uhr\b"),
                 handle = self.time,
             ),
             Rule(pattern = re.compile(pattern = r"(?<![\d.,])(?P<h>\d{1,2})\s?Uhr\b"), handle = self.time),

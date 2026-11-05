@@ -17,7 +17,8 @@ from ..numwords import n2w
 from ..rules import UNKNOWN_UNITS, Rule, Skip, alternation
 from .base import Lang, word_after, word_before
 from .euro import (
-    abbreviation_rules, initialism_rule, number_word_guard, number_words, roman_value, sentence_end_after,
+    abbreviation_rules, currency_scale_guard, fraction_guard, hms_guard, initialism_rule, number_word_guard,
+    number_words, range_guard, roman_value, score_guard, sentence_end_after,
 )
 
 MONTHS = (
@@ -194,12 +195,17 @@ class En(Lang):
     def rules(self) -> list:
         """缩写、年代简写和 mid-1960s 要在公共保护规则之前处理（保护规则会把 '90、mid-1960 当作撇号年份和型号）。"""
         early = [
+            range_guard(),
+            fraction_guard(),
             Rule(pattern = re.compile(pattern = r"['’](?P<d>[1-9]0)s\b"), handle = self.short_decade),
             Rule(pattern = re.compile(pattern = r"\bmid-(?P<num>1\d{3}|20\d{2})(?P<s>s)?\b"), handle = self.mid_year),
             Rule(pattern = re.compile(pattern = r"(?<![\w.])c\.\s?(?P<num>\d{3,4})(?![\d]|[.,]\d)"), handle = self.circa),
         ]
         words = number_words(card = self.card, ordinal = lambda n: n2w(n = n, lang = "en", to = "ordinal"))
         early.append(number_word_guard(words = words, conjunctions = ("and",)))
+        early.append(hms_guard())
+        early.append(score_guard())
+        early.append(currency_scale_guard(symbols = self.currencies, scales = self.scales))
         early += abbreviation_rules(table = ABBREVIATIONS, starters = STARTERS)
         early.append(Rule(pattern = re.compile(pattern = r"(?<![\w.])(?:Jr|Sr)\.(?![^\W\d_])"), handle = self.junior))
         early.append(initialism_rule(starters = STARTERS))
@@ -247,7 +253,7 @@ class En(Lang):
             Rule(pattern = re.compile(pattern = r"(?<![\d.,])(?P<num>\d+)(?P<suf>st|nd|rd|th)\b"), handle = self.ordinal),
             Rule(pattern = re.compile(pattern = r"(?<![\d.,])(?P<num>1\d{2}0|20\d0)s\b"), handle = self.decade),
             Rule(pattern = re.compile(pattern = r"(?<![\d.,'’])(?P<d>[2-9]0)s\b"), handle = self.bare_decade),
-            Rule(pattern = re.compile(pattern = r"(?<![\d.,])(?P<h>\d{1,2}):(?P<mm>\d{2})(?![\d:])"), handle = self.time),
+            Rule(pattern = re.compile(pattern = r"(?<![\d.,:])(?P<h>\d{1,2}):(?P<mm>\d{2})(?![\d:])"), handle = self.time),
             Rule(pattern = re.compile(pattern = rf"(?P<num>{self.num})-(?P<word>[a-z]+)"), handle = self.compound),
             Rule(pattern = re.compile(pattern = r"(?<![\d.,])(?P<num>\d{4})(?![\d]|[.,]\d)"), handle = self.four_digits),
         ]
