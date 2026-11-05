@@ -48,7 +48,7 @@ RANGE_WORDS = ("至", "到", "左右", "以上", "以下", "以内", "上下", "
 FOUR_DIGIT_AFTER = tuple(w for w in MEASURE_AFTER if w not in RANGE_WORDS)
 # 后面是这些词时，整百的「N年」可能表示年数
 SPAN_AFTER = ("前", "后", "間", "间", "多", "来", "之久", "历史", "左右", "以上")
-# 前面是这些词时，整千的「2000年」可能表示年数
+# 前面是这些词时，整百的「1500年」「2000年」可能表示年数
 SPAN_BEFORE = ("约", "近", "超过", "长达", "历时", "历经", "经过", "达", "有", "共", "前", "逾", "数", "几")
 # 这些词后面的数字是编号，可能逐位读
 CODE_BEFORE = (
@@ -138,7 +138,7 @@ class Zh(Lang):
             cjk.colon_punct_rule(),
             cjk.citation_rule(num = num),
             Rule(
-                pattern = re.compile(pattern = rf"(?<=[《〈『「“]){num}(?=[{cjk.HAN}])"),
+                pattern = re.compile(pattern = rf"(?<=[《〈『「“]){num}"),
                 handle = self.title_start,
             ),
             Rule(
@@ -188,10 +188,11 @@ class Zh(Lang):
             before = text[:m.start()].rstrip()
             ambiguous = (
                 before.endswith("前")
-                or (n.value % 1000 == 0 and (n.value != 2000 or before.endswith(SPAN_BEFORE)))
-                or (n.value % 100 == 0 and after.startswith(SPAN_AFTER))
+                or (n.value % 1000 == 0 and n.value != 2000)
+                or (n.value % 100 == 0 and (after.startswith(SPAN_AFTER) or before.endswith(SPAN_BEFORE)))
+                or after.lstrip("的").startswith(("历史", "之久"))
             )
-            # 公元前 3000 年、2000 年前、约 2000 年：可能是年数（三千年），也可能是年份（二零零零年）
+            # 公元前 3000 年、2000 年前、约 1500 年、1500 年的历史：可能是年数（一千五百年），也可能是年份（一五零零年）
             if ambiguous:
                 return Skip(reason = f"四位数是年份还是年数需要上下文「{m.group()}年」")
             return self.year_digits(written = n.int_digits, ctx = ctx)

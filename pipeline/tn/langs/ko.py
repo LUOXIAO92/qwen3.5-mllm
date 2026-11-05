@@ -2,7 +2,8 @@
 
 - 汉字词数词：年、月（6월、10월读유월、시월）、日、分、秒、层、回、号、位、度、岁（세）、世纪、周、
   韩元与外币、外来语单位（킬로미터、페이지、라운드）、体育计数（승、패、이닝、경기）等；「제」后面的数，
-  「1억 5천만」这类带만、억、조、천、백的大数，「100여 종」中「여」前的数，括号里的四位年份，都用汉字词。
+  「1억 5천만」这类带만、억、조、천、백的大数，「100여 종」中「여」前的数，括号里的四位年份和年号年数
+  （1884년(고종 21)），都用汉字词。
 - 固有词数词：개、명、마리、살、시간、가지、곳、차례 等，只用于 1–99；1–12 点的「시」；「번째」（1 读
   「첫」）；10 以内的「배」。整百、整千（100명、1,000개）和小数（6.5개）用汉字词，其余三位以上的数丢弃。
 - 量词后面紧跟的必须是空格、标点、助词或词尾（개의、명씩、시경）。量词与后面的字连成别的词时
@@ -25,16 +26,16 @@ from .base import Lang
 # 기（架/期）、종（种）、건（件）、골（球）随用法换读法，不收录。
 NATIVE_COUNTERS = (
     "개", "명", "마리", "살", "잔", "병", "가지", "채", "척", "켤레", "벌", "그루", "송이", "시간", "군데", "곳",
-    "사람", "차례", "칸", "마디", "끼", "자루", "그릇", "조각", "바퀴", "걸음", "달",
+    "사람", "차례", "칸", "마디", "끼", "자루", "그릇", "조각", "바퀴", "걸음", "달", "종류",
 )
 # 用汉字词数词的量词和单位
 SINO_COUNTERS = (
     "년대", "년간", "년째", "년생", "년도", "년", "개월", "개국", "개소", "개년", "개항", "개조", "개사", "월", "일간",
     "일", "층", "분기", "분", "초", "원", "회", "호선", "호기", "호실", "호점", "호", "도", "량", "위", "등급", "등", "급", "학년",
-    "학기", "세기", "세대", "세", "주년", "주", "번지", "인분", "인조", "인승", "인칭", "인자", "인", "일자", "화", "차전", "차",
+    "학기", "세기", "세대", "세", "주년", "주", "번지", "인분", "인조", "인승", "인칭", "인자", "인당", "인방", "인", "일자", "화", "차전", "차원", "차선", "차",
     "단계", "단", "부작", "부", "군단", "군", "사단", "여단", "연대", "대대", "중대", "소대", "함대", "대손", "대조",
     "대째", "대륙", "대강", "표", "집", "촌", "축", "심", "평", "품", "교시", "절", "동", "계", "승",
-    "패", "무", "타점", "이닝", "실점", "득점", "경기", "연승", "연패", "연속", "강", "루타", "루수", "루", "순위",
+    "패", "무", "할", "푼", "형", "타점", "이닝", "실점", "득점", "경기", "연승", "연패", "연속", "강", "루타", "루수", "루", "순위",
     "라운드", "시즌", "퍼센트포인트", "퍼센트", "킬로미터", "센티미터", "밀리미터", "나노미터", "미터", "킬로그램",
     "밀리그램", "그램", "킬로톤", "메가톤", "톤", "리터", "밀리리터", "헥타르", "에이커", "마일", "피트", "인치",
     "야드", "파운드", "비트", "바이트", "킬로바이트", "메가바이트", "기가바이트", "페이지", "광년", "볼트", "와트",
@@ -43,8 +44,8 @@ SINO_COUNTERS = (
 )
 # 量词后面可以紧跟的字：助词、词尾的第一个字
 ENDING_START = "의이가은는을를에와과도만까부보처씩쯤경께째간뿐밖나마로으였인일입라란랑여때다면전후"
-# 汉字词量词后面另外可以紧跟的字（3월말、5회초、3년차、1층짜리、6부대、1년정도、15년형）
-SINO_EXTRA_START = "말초중차짜생대정형급"
+# 汉字词量词后面另外可以紧跟的字（3월말、5회초、3년차、1층짜리、6부대、1년정도、15년형、3년동안、6군단장、1839년작）
+SINO_EXTRA_START = "말초중차짜생대정형급동장작"
 # 数字直接接助词时按汉字词读
 PARTICLES = (
     "이다", "이며", "이고", "이라는", "이라고", "라는", "라고", "입니다", "이", "가", "은", "는", "을", "를", "의",
@@ -53,6 +54,7 @@ PARTICLES = (
 # 数字前面的词以这些字结尾（助词、词尾）或就是这些词时，数字是数值本身，不是名称后的编号
 VALUE_BEFORE_ENDINGS = "는은가이을를에와과고면서기다며도의로"
 VALUE_BEFORE_WORDS = ("약", "총", "각", "단", "및", "또는", "평균", "최대", "최소", "무려", "불과", "겨우", "단지", "즉")
+VALUE_BEFORE_PUNCT = "([{“‘\"'「『《〈,，·"
 SPECIAL_MONTHS = {6: "유월", 10: "시월"}
 BIG_UNITS = {"만": 10 ** 4, "억": 10 ** 8, "조": 10 ** 12}
 SMALL_UNITS = {"천": 1000, "백": 100}
@@ -111,7 +113,16 @@ class Ko(Lang):
                 handle = lambda m, ctx: Skip(reason = f"时刻的 24 小时制读法不固定「{m.group()}」"),
             ),
             Rule(pattern = re.compile(pattern = r"(?<=[(（])\d{4}(?=[)）])"), handle = self.bracket_year),
+            Rule(
+                pattern = re.compile(pattern = r"(?P<pre>[(（][가-힣]{1,4}\s)(?P<num>\d{1,3})(?=[)）])"),
+                handle = self.reign_year,
+            ),
             Rule(pattern = re.compile(pattern = rf"(?<=제)(?P<sp>\s?)(?P<num>{num})"), handle = self.ordinal_je),
+            Rule(
+                # 「2030세대」「4050세대」：两个年龄段并写，逐位读（이공삼공）
+                pattern = re.compile(pattern = r"(?<!\d)\d{4}(?=\s?세대)"),
+                handle = lambda m, ctx: Skip(reason = f"年龄段并写的读法不固定「{m.group()}세대」"),
+            ),
             Rule(
                 pattern = re.compile(pattern = rf"{num}\s?{unit}(?:\s?{num}\s?{unit})*"),
                 handle = self.big_number,
@@ -157,6 +168,14 @@ class Ko(Lang):
             return Skip(reason = f"括号里的四位数读法不确定「{m.group()}」")
         return self.sino(n = n, ctx = ctx, kind = "年份", surface = m.group())
 
+    def reign_year(self, m, ctx):
+        """「1884년(고종 21)」：括号里年号后的年数，用汉字词读。"""
+        n = self.parse(written = m.group("num"))
+        if n is None:
+            return Skip(reason = f"数字写法无法确定「{m.group()}」")
+        out = self.sino(n = n, ctx = ctx, kind = "年数", surface = m.group().lstrip("(（"))
+        return out if isinstance(out, Skip) else m.group("pre") + out
+
     def ordinal_je(self, m, ctx):
         """「제56회」「제2공화국」：제 后面的序数用汉字词。"""
         n = self.parse(written = m.group("num"))
@@ -166,10 +185,20 @@ class Ko(Lang):
         return out if isinstance(out, Skip) else m.group("sp") + out
 
     def big_number(self, m, ctx):
-        """「1억 5천만」「4만」「2천」：带만、억、조、천、백的数，按韩语的四位分组算出数值，用汉字词读。"""
+        """「1억 5천만」「4만」「2천」：带만、억、조、천、백的数，按韩语的四位分组算出数值，用汉字词读。
+
+        各组的大单位（억、만）必须从大到小，组内的천、백也必须从大到小，并且前面只有一位数；
+        「600만 700만」「5천 6천」这类并列的数不是一个数，丢弃。
+        """
+        prev = ctx.text[m.start() - 1:m.start()]
+        if "가" <= prev <= "힣" and prev not in VALUE_BEFORE_ENDINGS + "약총각":
+            # 「갤노트7만 공급되었다」：粘在名称后的数字，「만」可能是助词
+            return Skip(reason = f"名称后的数字可能按外语读或是编号「{prev}{m.group()}」")
         parts = re.findall(pattern = rf"({self.num})\s?([천백]?)([만억조]?)", string = m.group())
         total = 0
         small = 0
+        last_big = None
+        last_small = None
         for written, small_unit, big_unit in parts:
             n = self.parse(written = written)
             if n is None:
@@ -180,13 +209,20 @@ class Ko(Lang):
                 spoken = self.say(n = n, ctx = ctx)
                 ctx.kind(name = "汉字词数词", surface = m.group())
                 return spoken + big_unit
-            value = n.value * SMALL_UNITS.get(small_unit, 1)
-            if not big_unit:
-                small += value
-                continue
-            small += value
-            total += small * BIG_UNITS[big_unit]
-            small = 0
+            small_value = SMALL_UNITS.get(small_unit, 1)
+            ordered = (
+                (not small_unit or (n.value < 10 and (last_small is None or small_value < last_small)))
+                and (not big_unit or last_big is None or BIG_UNITS[big_unit] < last_big)
+            )
+            if not ordered:
+                return Skip(reason = f"并列的数或写法不合规的大数「{m.group()}」")
+            last_small = small_value if small_unit else last_small
+            small += n.value * small_value
+            if big_unit:
+                total += small * BIG_UNITS[big_unit]
+                small = 0
+                last_big = BIG_UNITS[big_unit]
+                last_small = None
         total += small
         ctx.kind(name = "汉字词数词", surface = m.group())
         # pipeline.compare 读不懂「1천 6백만」这类天、百后面再接数字的写法，核对读法与算出的数值
@@ -258,9 +294,10 @@ class Ko(Lang):
     # ------------------------------------------------------------------
 
     def value_position(self, text: str, start: int) -> bool:
-        """数字是否处在数值的位置：句首、标点后，或前一个词以助词、词尾结尾。"""
+        """数字是否处在数值的位置：句首、左括号引号逗号后，或前一个词以助词、词尾结尾。
+        紧跟在连字符、斜线后（코로나바이러스감염증-19）或直接粘在文字后（갤노트7）的数字是名称的一部分。"""
         before = text[:start]
-        if not before or not (before[-1].isspace() or before[-1].isalnum()):
+        if not before or before[-1] in VALUE_BEFORE_PUNCT:
             return True
         if not before[-1].isspace():
             return False
