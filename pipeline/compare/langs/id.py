@@ -24,8 +24,12 @@ def fill_malay_family(spec: LangSpec, units: list, zeros: list, bigs: list) -> N
     spec.add(words = "pertama", morphs = ordinal(morph = add(value = 1)))
 
 
+# 年代后缀 -an 只接在这些词后：tujuh puluhan（70 年代）、sepuluhan、seribu sembilan ratus sembilan puluhan
+_DECADE_STEMS = ("puluh", "sepuluh", "belas", "ratus", "ribu")
+
+
 def malay_affixes(word: str, spec: LangSpec):
-    """ke- 序数前缀与 -nya 后缀：kedua、ketiganya。"""
+    """ke- 序数前缀、-nya 后缀与年代后缀 -an：kedua、ketiganya、puluhan（与 1970-an 对应）。"""
     suffix = ""
     stem = word
     if stem.endswith("nya") and len(stem) > 5:
@@ -33,6 +37,8 @@ def malay_affixes(word: str, spec: LangSpec):
         yield "", stem, suffix, False
     if stem.startswith("ke") and len(stem) > 4:
         yield "ke", stem[2:], suffix, False
+    if word.endswith("an") and word[:-2].endswith(_DECADE_STEMS):
+        yield "", word[:-2], "an", False
 
 
 def build() -> LangSpec:

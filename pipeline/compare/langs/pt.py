@@ -44,7 +44,13 @@ def _gendered(stems: list) -> list:
 
 
 def build() -> LangSpec:
-    spec = LangSpec(code = "pt", dec_comma = True, ordinal_all_parts = True)
+    spec = LangSpec(
+        code = "pt",
+        dec_comma = True,
+        ordinal_all_parts = True,
+        big_compound = True,
+        digits_after_big = True,
+    )
     spec.add(words = "zero", morphs = zero())
     for v, words in UNITS.items():
         spec.add(words = words, morphs = add(value = v))

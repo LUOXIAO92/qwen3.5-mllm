@@ -3,15 +3,39 @@
 读法变体在比较时合并：mốt/một、tư/bốn（mươi 之后）、lăm/nhăm/năm（十位之后）、lẻ/linh、
 ngàn/nghìn、tỉ/tỷ、bẩy/bảy。năm 紧跟在十位之后时不作「五」（hai mươi năm 是「二十年」），
 十位后的五读作 lăm。
+
+「hai trăm năm」可以是 205，也可以是 200 加「năm」（年），读音相同，比对时两种切分都尝试（_splits）。
 """
 
+from ..extend import word_num
 from ..numerals import (
     LangSpec, add, big, gap, place, with_fold, zero,
 )
 
+_BEFORE_YEAR = {"trăm", "nghìn", "ngàn", "triệu", "tỷ", "tỉ"}
+
+
+def _splits(num) -> list:
+    words = num.display.split(" ")
+    if len(words) < 2 or words[-1] != "năm" or words[-2] not in _BEFORE_YEAR:
+        return []
+    head = word_num(
+        value = num.value - 5,
+        surface = num.surface[:-len("năm")],
+        display = " ".join(words[:-1]),
+        kinds = num.kinds,
+    )
+    year = word_num(
+        value = 5,
+        surface = "năm",
+        display = "năm",
+        kinds = num.kinds,
+    )
+    return [[head, year]]
+
 
 def build() -> LangSpec:
-    spec = LangSpec(code = "vi", dec_comma = True)
+    spec = LangSpec(code = "vi", dec_comma = True, splitter = _splits)
     spec.add(words = "không", morphs = zero())
     # không trăm：百位为零（hai nghìn không trăm hai mươi sáu）
     spec.add(words = "không trăm", morphs = add(value = 0, places = {2}))

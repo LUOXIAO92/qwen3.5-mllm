@@ -1,7 +1,7 @@
 """意大利语数词。复合词（duemilaventisei、millenovecentottantaquattro）按部件切分。"""
 
 from ..numerals import (
-    ORD_ONLY, LangSpec, add, big, ordinal, place, teen10, zero,
+    ABBR_FOLD, ORD_ONLY, LangSpec, add, big, ordinal, place, teen10, with_fold, zero,
 )
 
 UNITS = {
@@ -30,7 +30,12 @@ def _esimo(stem: str) -> list:
 
 
 def build() -> LangSpec:
-    spec = LangSpec(code = "it", compound = True, dec_comma = True)
+    spec = LangSpec(
+        code = "it",
+        compound = True,
+        dec_comma = True,
+        big_compound = True,
+    )
     spec.add(words = "zero", morphs = zero())
     for v, words in UNITS.items():
         spec.add(words = words, morphs = add(value = v))
@@ -47,9 +52,13 @@ def build() -> LangSpec:
     spec.add(words = "mila", morphs = big(value = 1000, implicit_one = False))
     spec.add(words = ["milione", "milioni"], morphs = big(value = 10 ** 6))
     spec.add(words = ["miliardo", "miliardi"], morphs = big(value = 10 ** 9))
+    # 数量缩写：5 mln、3 mld
+    for word, value in (("mln", 10 ** 6), ("mld", 10 ** 9)):
+        spec.add(words = word, morphs = with_fold(morph = big(value = value, implicit_one = False), fold = ABBR_FOLD + word))
 
     for v, stem in ORD_UNITS.items():
-        spec.add(words = [stem + e for e in ENDINGS], morphs = ordinal(morph = add(value = v)))
+        # primo、secondo 不进复合数词（第 21 是 ventunesimo）：「trenta secondi」是 30 秒
+        spec.add(words = [stem + e for e in ENDINGS], morphs = ordinal(morph = add(value = v, alone = v <= 2)))
     spec.add(words = ["decim" + e for e in ENDINGS], morphs = ordinal(morph = teen10()))
     for v, stem in ORD_UNIT_STEMS.items():
         spec.add(words = _esimo(stem = stem), morphs = ordinal(morph = add(value = v, after = "any")))

@@ -50,7 +50,12 @@ def _affixes(word: str, spec: LangSpec):
 
 
 def build() -> LangSpec:
-    spec = LangSpec(code = "en", split_affixes = _affixes)
+    spec = LangSpec(
+        code = "en",
+        split_affixes = _affixes,
+        digits_after_big = True,
+        big_compound = True,
+    )
     fill(spec = spec)
     # a hundred、a thousand：a 只在后面紧跟位值词时作「一」
     spec.add(words = "a", morphs = add(value = 1, needs = frozenset({"place", "big"})))

@@ -51,7 +51,12 @@ def _multiword() -> dict:
 
 
 def build() -> LangSpec:
-    spec = LangSpec(code = "fr", dec_comma = True, space_groups = True)
+    spec = LangSpec(
+        code = "fr",
+        dec_comma = True,
+        space_groups = True,
+        big_compound = True,
+    )
     spec.add(words = "zéro", morphs = zero())
     for v, words in UNITS.items():
         spec.add(words = words, morphs = add(value = v))
@@ -71,8 +76,12 @@ def build() -> LangSpec:
         last_ords = ["vingtième", "vingtièmes"] if last == "vingts" else _ord_word(word = last)
         spec.add(words = [head + " " + o for o in last_ords], morphs = ordinal(morph = add(value = v, places = {1, 0})))
 
-    spec.add(words = ["premier", "première", "premiers", "premières"], morphs = ordinal(morph = add(value = 1)))
-    spec.add(words = ["second", "seconde", "seconds", "secondes"], morphs = ordinal(morph = add(value = 2)))
+    # premier、second 不进复合数词（第 21 是 vingt et unième，第 32 是 trente-deuxième）：
+    # 「mille premiers」是 1000 加 premiers，「trente secondes」是 30 秒
+    first = ordinal(morph = add(value = 1, alone = True))
+    second = ordinal(morph = add(value = 2, alone = True))
+    spec.add(words = ["premier", "première", "premiers", "premières"], morphs = first)
+    spec.add(words = ["second", "seconde", "seconds", "secondes"], morphs = second)
     # unième 只出现在 vingt et unième 这类复合序数中
     spec.add(words = _ord_word(word = "un"), morphs = ordinal(morph = add(value = 1, after = "any")))
     for v, words in UNITS.items():
@@ -92,7 +101,7 @@ def build() -> LangSpec:
     spec.add_pct(words = "pour cent")
     spec.add_minus(words = "moins")
     spec.add_ordinal_suffix(
-        pattern = r"(?:ères|èmes|emes|ers|res|ère|ème|eme|er|re|es|e)(?![^\W\d_])",
+        pattern = r"(?:ères|èmes|emes|ers|res|ère|ème|eme|er|re|es|e|è)(?![^\W\d_])",
         kinds = ORD_ONLY,
     )
     return spec

@@ -1,7 +1,7 @@
 """德语数词。复合词（zweitausendsechsundzwanzig）按词表部件切分；序数带全部词尾。"""
 
 from ..numerals import (
-    CARD_OR_ORD, LangSpec, add, big, conn, ordinal, place, teen10, zero,
+    ABBR_FOLD, CARD_OR_ORD, LangSpec, add, big, conn, ordinal, place, teen10, with_fold, zero,
 )
 
 UNITS = {
@@ -47,6 +47,8 @@ def build() -> LangSpec:
         compound = True,
         dec_comma = True,
         unit_before_tens = True,
+        split_words_need_scale = True,
+        big_compound = True,
     )
     spec.add(words = "null", morphs = zero())
     for v, words in UNITS.items():
@@ -83,4 +85,7 @@ def build() -> LangSpec:
     spec.add_minus(words = "minus")
     # 「am 3. Mai」：数字后的句点可能是序数标记，也可能是句号
     spec.add_ordinal_suffix(pattern = r"\.(?= +[^\W\d_])", kinds = CARD_OR_ORD)
+    # 数量缩写：5 Mio.、3 Mrd.、12 Tsd.
+    for word, value in (("mio", 10 ** 6), ("mrd", 10 ** 9), ("tsd", 1000)):
+        spec.add(words = word, morphs = with_fold(morph = big(value = value, implicit_one = False), fold = ABBR_FOLD + word))
     return spec

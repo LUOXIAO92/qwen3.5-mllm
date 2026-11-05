@@ -12,5 +12,9 @@ LANGS = ("zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it", "id", "ms",
 def get_spec(lang: str):
     if lang not in LANGS:
         raise ValueError(f"不支持的语言代码：{lang!r}，可用：{' '.join(LANGS)}")
+    from ..units import build_extras
+
     module = importlib.import_module(name = f".{lang}", package = __name__)
-    return module.build()
+    spec = module.build()
+    spec.ext = build_extras(spec = spec)
+    return spec

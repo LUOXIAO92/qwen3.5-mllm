@@ -4,7 +4,7 @@
 """
 
 from ..numerals import (
-    CARD_ONLY, CARD_OR_ORD, ORD_ONLY, LangSpec, add, big, big_lex, ordinal, teen10, zero,
+    ABBR_FOLD, CARD_ONLY, CARD_OR_ORD, ORD_ONLY, LangSpec, add, big, big_lex, ordinal, teen10, with_fold, zero,
 )
 from ..parse import Mark, Num, Text
 
@@ -79,6 +79,7 @@ def build() -> LangSpec:
         code = "ru",
         dec_comma = True,
         space_groups = True,
+        digits_after_big = True,
         post = _post,
     )
     spec.add(words = "ноль нуль ноля нуля нолю нулю нолем нулем ноле нуле".split(), morphs = zero())
@@ -117,6 +118,9 @@ def build() -> LangSpec:
     spec.add_ordinal_suffix(pattern = r"-(?:ти|ми|х|и)(?![^\W\d_])", kinds = CARD_OR_ORD)
     ord_endings = "ый|ий|ой|ая|ое|ые|ого|ему|ому|ым|им|ом|ем|ую|ых|их|ыми|ими|ей|ья|ье|ьи|го|му|й|я|е|ю|м"
     spec.add_ordinal_suffix(pattern = r"-(?:" + ord_endings + r")(?![^\W\d_])", kinds = ORD_ONLY)
+    # 数量缩写：12 тыс.、5 млн、3 млрд
+    for word, value in (("тыс", 1000), ("млн", 10 ** 6), ("млрд", 10 ** 9)):
+        spec.add(words = word, morphs = with_fold(morph = big(value = value, implicit_one = False), fold = ABBR_FOLD + word))
     return spec
 
 

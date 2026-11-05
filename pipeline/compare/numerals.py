@@ -14,6 +14,9 @@ from typing import Callable, NamedTuple
 
 from .normalize import normalize_text
 
+# 数量缩写（Mio.、млн）的比较用词形：与全称按数值比较，见 core._eq
+ABBR_FOLD = "~"
+
 CARD = "card"
 ORD = "ord"
 CARD_ONLY = frozenset({CARD})
@@ -63,6 +66,10 @@ class Morph:
     conn_before: frozenset | None = None
     linker: bool = False
     fold: str | None = None
+    # 数词体系（韩语 sino 汉字词、native 固有词，阿拉伯数字为 digit），同一组内不能混用，见 NumState._system_ok
+    system: str | None = None
+    # 只能单独成数、不进复合数词的词（法语 premier、second，意大利语 primo、secondo）
+    alone: bool = False
 
 
 def label(m: Morph) -> str:
@@ -161,7 +168,7 @@ class NumState:
 
     __slots__ = (
         "total", "last_big", "cur", "places", "last", "last_val", "last_places",
-        "ord", "pending", "need", "n", "frac", "teen",
+        "ord", "pending", "need", "n", "frac", "teen", "system", "closed",
     )
 
     def __init__(self, frac: bool = False):
@@ -178,6 +185,8 @@ class NumState:
         self.n = 0
         self.frac = frac
         self.teen = False
+        self.system = None
+        self.closed = False
 
     def _copy(self) -> "NumState":
         s = NumState.__new__(NumState)
@@ -208,6 +217,18 @@ class NumState:
         if self.last == "zero":
             return None
         if self.frac and cls not in ("add", "zero"):
+            return None
+        if self.closed or (m.alone and self.n > 0):
+            return None
+        if (
+            spec.ordinal_all_parts
+            and m.ordinal
+            and cls == "add"
+            and self.n > 0
+            and not self.ord
+            and self.pending is None
+        ):
+            # 西语、葡语的复合序数每一部分都是序数：「treinta segundos」是 30 加 segundos（秒），不是第 32
             return None
         if self.need is not None and lab not in self.need:
             return None
@@ -300,9 +321,27 @@ class NumState:
         s.n += 1
         if m.ordinal:
             s.ord = True
+        if m.system is not None:
+            s.system = m.system
+        if m.alone:
+            s.closed = True
         return s
 
+    def _system_ok(self, m: Morph) -> bool:
+        """同一组内不混用两套数词：韩语「십세」不是 13，而是「십」（10）加量词「세」（岁）。
+
+        只有汉字词的百位以上后面可以接固有词（백스물셋），阿拉伯数字后面可以接汉字词位值（5천、1천6백만），
+        不能接固有词（「만50세」的「세」是量词）。大单位之后开始新的一组，不受限制。
+        """
+        if m.system is None or self.system is None or m.system == self.system or not self.places:
+            return True
+        if {self.system, m.system} == {"digit", "sino"}:
+            return True
+        return self.system == "sino" and m.system == "native" and self.last == "place" and self.last_val >= 100
+
     def _add(self, m: Morph, lab: str, pend, spec):
+        if not self._system_ok(m = m):
+            return None
         value, places = m.value, m.places
         if self.teen:
             value += 10
@@ -331,6 +370,8 @@ class NumState:
         return self.last_big is None or 10 ** max(places) < self.last_big
 
     def _place(self, m: Morph, pend, spec):
+        if not self._system_ok(m = m):
+            return None
         mult = m.value
         exp = len(str(mult)) - 1
         coef_pend_ok = pend is None or pend.linker
@@ -382,6 +423,9 @@ class NumState:
 
     def _big(self, m: Morph, pend, spec):
         mult = m.value
+        if self.places and self.system == "native":
+            # 韩语固有词不能作「만」「억」的系数（「두만」是「두」加「만」）
+            return None
         if self.last_big is not None and mult >= self.last_big:
             # 西语 mil millones、中文 万亿：已有部分整体乘上更大的单位
             if spec.big_compound and self.n > 0 and pend is None and self.value() < mult:
@@ -393,6 +437,7 @@ class NumState:
                 s.last = "big"
                 s.last_val = s.total
                 s.last_places = _EMPTY
+                s.system = None
                 return self._finish(s = s, m = m)
             return None
         if self.places:
@@ -413,6 +458,7 @@ class NumState:
         s.last = "big"
         s.last_val = c * mult
         s.last_places = _EMPTY
+        s.system = None
         return self._finish(s = s, m = m)
 
     def _big_lex(self, m: Morph, pend):
@@ -426,6 +472,7 @@ class NumState:
         s.last = "big"
         s.last_val = m.coef * m.value
         s.last_places = _EMPTY
+        s.system = None
         return self._finish(s = s, m = m)
 
     def _teen_suffix(self, pend):
@@ -485,10 +532,15 @@ class LangSpec:
     ordinal_all_parts: bool = False   # 复合序数每一部分都是序数（西语 vigésimo primero）
     ordinal_unit_head: bool = False   # 序数个位后面还能接十位（阿拉伯语 الحادي والعشرون）
     big_compound: bool = False        # 大单位可以叠用（西语 mil millones、中文 万亿）
+    split_words_need_scale: bool = False  # 分开写的词只在接位值词、大单位时才组成一个数（德语数词连写）
     digits_after_big: bool = False    # 大单位后可以接阿拉伯数字（中文 1万2000）
     pct_symbol_prefix: bool = False   # 百分号读在数前（中文 百分之、土耳其语 yüzde）
     split_affixes: Callable | None = None
     post: Callable | None = None
+    # 比对时一个读法数的其他切分（韩语「육십일」也可以是 60 加「일」）：输入 Num，返回若干种切分，每种是一串 Num
+    splitter: Callable | None = None
+    # 比对时用的单位、货币、时刻词表和书写变体合并规则（units.Extras），由 langs.get_spec 挂上
+    ext: object = None
     pieces: dict = field(default_factory = dict)
     bound: set = field(default_factory = set)
     multiword: dict = field(default_factory = dict)
@@ -641,13 +693,29 @@ class LangSpec:
         results.sort(key = len)
         return results
 
-    def scan_keys(self) -> set:
-        """扫描无空格文本时要识别的全部词（数词语素和小数点、百分号、负号的读法）。"""
-        keys = self._cache.get("\0scan")
+    def scan_keys(self, ext: bool = False) -> set:
+        """扫描无空格文本时要识别的全部词（数词语素和小数点、百分号、负号的读法）。
+
+        ext 为 True 时（比对）还包括单位和时刻的读法，让「千米」「마일」整体成为一个词，不被拆出数词「千」「일」。
+        """
+        name = "\0scan-ext" if ext else "\0scan"
+        keys = self._cache.get(name)
         if keys is None:
             keys = set(self.pieces) | self.sep_words | set(self.pct_words) | self.minus_words
-            self._cache["\0scan"] = keys
+            if ext and self.ext is not None:
+                keys |= {w.replace(" ", "") for w in self.ext.units}
+                keys |= self.ext.hour | self.ext.minute | self.ext.half
+            self._cache[name] = keys
         return keys
+
+    def max_key(self, ext: bool = False) -> int:
+        """scan_keys 中最长的词的长度。"""
+        name = "\0maxkey-ext" if ext else "\0maxkey"
+        value = self._cache.get(name)
+        if value is None:
+            value = max((len(k) for k in self.scan_keys(ext = ext)), default = 1)
+            self._cache[name] = value
+        return value
 
 
 def _surface(text: str, seq: tuple) -> str:
