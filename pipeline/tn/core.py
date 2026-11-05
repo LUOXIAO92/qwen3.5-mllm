@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import unicodedata
 from functools import lru_cache
-from pathlib import Path
 from typing import NamedTuple
 
 from ..compare import compare
@@ -30,18 +29,24 @@ class TnResult(NamedTuple):
 
 
 @lru_cache(maxsize = 1)
-def _zh_t2s() -> dict:
-    """繁简单字对照表，与 pipeline/compare 共用同一份数据（来自 OpenCC，Apache-2.0）。"""
-    path = Path(__file__).resolve().parent.parent / "compare" / "data" / "zh_t2s.txt"
-    table = {}
-    for line in path.read_text(encoding = "utf-8").splitlines():
-        if len(line) == 2 and not line.startswith("#"):
-            table[ord(line[0])] = line[1]
-    return table
+def _opencc() -> tuple:
+    """OpenCC（Apache-2.0）的两个转换器：先把香港异体字转成标准繁体，再按台湾用字和词组转成简体。
+
+    词组级转换能区分「乾隆」与「乾净」、「著名」与「看著」，单字表做不到。
+    """
+    try:
+        import opencc
+    except ImportError as exc:
+        raise RuntimeError("中文繁简转换需要 OpenCC（Apache-2.0）：uv pip install opencc==1.4.2") from exc
+    # 不启用 tofu risk 词典：它把少数字转成扩展区的简化字（䭔 → 𫗰），TTS 的词表多半没有这些字
+    hk2t = opencc.OpenCC(config = "hk2t", include_tofu_risk_dictionaries = False)
+    tw2s = opencc.OpenCC(config = "tw2s", include_tofu_risk_dictionaries = False)
+    return hk2t, tw2s
 
 
 def to_simplified(text: str) -> str:
-    return text.translate(_zh_t2s())
+    hk2t, tw2s = _opencc()
+    return tw2s.convert(text = hk2t.convert(text = text))
 
 
 def clean(text: str, lang: str) -> str:
