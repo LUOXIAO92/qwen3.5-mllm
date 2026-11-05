@@ -115,7 +115,7 @@ def _split_latin(text: str, *, lang: str) -> list[str]:
     for match in _LATIN_END.finditer(text):
         end = match.end(1)
         mark = match.group(1)
-        if mark.startswith(".") and len(mark) == 1 and is_abbreviation(text[start:match.start(1)], lang = lang):
+        if mark.rstrip(_CLOSERS) == "." and is_abbreviation(text[start:match.start(1)], lang = lang):
             continue
         following = text[match.end():match.end() + 1]
         if following and following.islower():

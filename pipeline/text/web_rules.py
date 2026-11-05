@@ -39,7 +39,7 @@ _BOILERPLATE_WORDS = {
     "id": ["hak cipta", "baca juga", "klik", "hubungi kami", "berlangganan", "kebijakan privasi", "komentar", "bagikan", "selengkapnya", "baca selengkapnya", "simak juga", "pesan sekarang", "promo", "diskon", "gratis ongkir", "tag:"],
     "ms": ["hak cipta", "baca juga", "klik", "hubungi kami", "langgan", "dasar privasi", "komen", "kongsi", "selanjutnya", "baca lagi", "promosi", "diskaun", "harga"],
     "th": ["ลิขสิทธิ์", "อ่านต่อ", "คลิก", "ติดต่อ", "สมัครสมาชิก", "ราคา", "สั่งซื้อ", "แชร์", "ติดตาม", "ไลน์", "คอมเมนต์", "ความคิดเห็น", "ลงทะเบียน", "เข้าสู่ระบบ", "โปรโมชั่น", "ส่วนลด", "สล็อต", "บาคาร่า", "แทงบอล", "คาสิโน", ],
-    "vi": ["bản quyền", "đọc thêm", "xem thêm", "liên hệ", "đăng ký", "hotline", "bạn đang xem", "bình luận", "chia sẻ", "đặt hàng", "khuyến mãi", "giảm giá", "mua ngay", "nhà cái", "cờ bạc", "lô đề", "sòng bài", "kèo", "đăng nhập", "tin liên quan"],
+    "vi": ["bản quyền", "đọc thêm", "xem thêm", "liên hệ", "đăng ký", "hotline", "bạn đang xem", "bình luận", "chia sẻ", "đặt hàng", "khuyến mãi", "giảm giá", "mua ngay", "nhà cái", "cờ bạc", "lô đề", "sòng bài", "kèo", "xsmb", "xsmn", "xổ số", "soi cầu", "đánh số con gì", "cá cược", "đăng nhập", "tin liên quan"],
     "fil": ["karapatang-ari", "basahin", "i-click", "mag-subscribe", "mag-ugnay", "komento", "ibahagi", "presyo", "diskwento", "mag-log in", "pindutin", "sundan", "bisitahin"],
     "ar": ["جميع الحقوق محفوظة", "اقرأ أيضا", "اقرأ أيضاً", "اقرأ المزيد", "اشترك", "اتصل بنا", "اضغط", "تابعنا", "تعليق", "شارك", "السعر", "اطلب", "تسجيل الدخول", "للتواصل", "واتس", "إعلان", "تحميل"],
     "tr": ["tüm hakları saklıdır", "devamını oku", "abone ol", "tıklayın", "tıkla", "iletişim", "gizlilik", "yorum", "paylaş", "fiyat", "sipariş", "indirim", "bahis", "canlı", "kayıt ol", "giriş yap", "kampanya", "sepete"],
@@ -90,6 +90,20 @@ _SPAM_URL = re.compile(
 _GLUED_SENTENCE = re.compile(r"(?<=[a-zà-ɏạ-ỹа-яё])[.!?](?=[A-ZÀ-ÞА-ЯЁẠ-Ỹ])")
 # 以省略号结尾：列表页的摘要预览，后半句被截掉。
 _ELLIPSIS_END = re.compile(r"(…|\.\.\.)[\"'”’»)]*$")
+# 中日文里的 ASCII 感叹号、问号、分号：全角标点才是正文的写法，半角多见于标题和口号（"おすすめ10選!"）。
+_CJK_ASCII_PUNCT = re.compile(r"[!?;]|(?<=[぀-鿿])[,:]")
+# 【特集】之类的栏目标签。
+_CJK_TAG_BRACKET = re.compile(r"[【】〖〗]")
+# 以「空格 + 数字 + 句点」结尾：带序号的小标题（"의학의 발전 2."）。
+_HEADING_NUMBER = re.compile(r"\s\d{1,2}\.$")
+# 句子开头就指向后文的列表引子（ko「다음은」、ja「以下は」、en "Here are"），这类句子单独朗读不完整。
+_DEPENDENT_START = {
+    "ko": re.compile(r"^(다음은|다음의|아래는|아래의)"),
+    "ja": re.compile(r"^(以下は|以下の|次の|下記の|下記は)"),
+    "zh": re.compile(r"^(以下是|以下为|如下|下面是|下列)"),
+    "en": re.compile(r"^(here (is|are)|the following|below (is|are)|see below)\b", re.IGNORECASE),
+    "de": re.compile(r"^(hier (ist|sind)|folgende[rsmn]?|nachfolgend|im folgenden)\b", re.IGNORECASE),
+}
 _QUESTION_ANSWER = re.compile(r"^\s*(q|a|q&a|hỏi|đáp|soal|jawab|soru|cevap|سؤال|جواب)\s*[:：]", re.IGNORECASE)
 
 
@@ -150,6 +164,14 @@ def check_web_rules(text: str, *, lang: str) -> str | None:
         return "glued_sentence"
     if _ELLIPSIS_END.search(text):
         return "ellipsis_end"
+    if lang in {"zh", "ja"} and _CJK_ASCII_PUNCT.search(text):
+        return "cjk_ascii_punct"
+    if lang in {"zh", "ja", "ko"} and _CJK_TAG_BRACKET.search(text):
+        return "tag_bracket"
+    if _HEADING_NUMBER.search(text):
+        return "heading_number"
+    if lang in _DEPENDENT_START and _DEPENDENT_START[lang].search(text):
+        return "dependent_start"
     if _EMPHASIS.search(text):
         return "emphasis"
     if _EMOJI.search(text):

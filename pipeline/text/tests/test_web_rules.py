@@ -87,6 +87,13 @@ def test_boilerplate_only_active_for_web_entries():
         ("THE BEST OFFER YOU WILL SEE THIS WEEK IN THE CITY FOR SURE.", "en", "shouting"),
         ("Para saintis merekrut 88 peserta untuk penyelidikan.Mereka membahagikan peserta kepada dua kumpulan.", "ms", "glued_sentence"),
         ("Jumlah pembiayaan peribadi ditingkatkan kepada sehingga lima ribu ringgit susulan kenyataan terkini …", "ms", "ellipsis_end"),
+        ("ピルスナービールのおすすめ10選!", "ja", "cjk_ascii_punct"),
+        ("千百年来,在构成人们实用需求方面充当着重要角色，同时也表明了它的价值。", "zh", "cjk_ascii_punct"),
+        ("【特集】試したくなる新しいスマートフォンの選び方を紹介します。", "ja", "tag_bracket"),
+        ("의학의 발전 2.", "ko", "heading_number"),
+        ("다음은 20세기를 흔든 인도의 정치 위인의 명언입니다.", "ko", "dependent_start"),
+        ("Here are the best ways to save money on your next holiday trip.", "en", "dependent_start"),
+        ("Bạn có biết nằm mơ thấy chim tu hú đánh số con gì để trúng lớn hôm nay?", "vi", "boilerplate"),
         ("Buy cheap shoes buy cheap shoes buy cheap shoes buy cheap shoes online now.", "en", "repetitive"),
     ],
 )
@@ -98,6 +105,10 @@ def test_pattern_rules_drop(text, lang, reason):
 def test_glued_and_ellipsis_keep_normal_text():
     assert web_check("Dr. Smith holds a doctorate from the university in Boston.", "en") is None
     assert web_check("Он сказал, что придёт позже... Но так и не пришёл.", "ru") is None  # 句中省略号不算
+
+
+def test_cjk_ascii_comma_between_digits_is_fine():
+    assert web_check("该公司去年的营业收入达到了三千万元，其中海外市场的贡献约有1,200万元。", "zh") is None
 
 
 def test_phone_rule_keeps_ordinary_numbers():
@@ -252,3 +263,8 @@ def test_thai_sentence_split_when_pythainlp_available():
     sentences = split_sentences("สำหรับคุณภรรยาเมื่อทราบว่าตัวเองกำลังตั้งครรภ์ คุณสามีเองก็เช่นเดียวกัน คงรู้สึกดีใจไม่น้อยไปกว่าคุณภรรยาเป็นแน่", lang = "th")
     assert len(sentences) >= 2
 
+
+
+def test_splitter_does_not_cut_abbreviation_in_brackets():
+    sentences = split_sentences("Bazı tabirciler, rüyada Nuh (A.S.) gören kişiye müjde verir. İkinci cümle burada.", lang = "tr")
+    assert len(sentences) == 2 and sentences[0].endswith("verir.")
