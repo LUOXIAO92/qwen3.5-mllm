@@ -30,9 +30,10 @@ LIANG_AFTER = (
     "侧", "端", "方", "面", "派", "党", "票", "股", "成", "款", "栋", "幢", "户", "轮", "任", "周年", "种类",
     "杯", "碗", "瓶", "盒", "包", "袋", "箱", "桶", "滴", "群", "伙", "副", "扇", "列", "发", "道", "门", "样",
     "类", "千米", "厘米", "毫米", "千克", "公顷", "亩", "英里", "英尺", "海里", "美元", "欧元", "英镑", "日元",
+    "公分", "公尺", "星期", "具", "站",
 )
 # 「2」读「二」：日期、编号、楼层
-ER_AFTER = ("月", "日", "号", "楼")
+ER_AFTER = ("月", "日", "号", "楼", "世纪")
 # 「2年」后面是这些字时读「两年」
 LIANG_YEAR_AFTER = ("后", "前", "间", "内", "多", "来", "半", "时间", "以", "之", "左右", "里")
 # 三位以上的数后面紧跟这些量词、单位、货币时按数值读，紧跟其他汉字时多为编号（911事件、110号舰）
@@ -263,15 +264,23 @@ class Zh(Lang):
         return self.say(n = n, ctx = ctx)
 
     def two(self, m, ctx, n):
-        """单独的 2：序数、日期、编号读「二」，量词前读「两」，没有把握时丢弃。"""
+        """单独的 2：序数、日期、编号读「二」，量词前读「两」，没有把握时丢弃。
+
+        并列的数（2、3号月台，第1、2名）看整串后面的量词和前面的「第」：后面是日期、编号或前面有「第」读「二」；
+        后面是量词时，2 在串首读「两」（2、3个），在串中丢弃（1、2个可读「一两个」也可读「一、二个」）。
+        """
         text, start, end = ctx.text, m.start(), m.end()
         before, after = text[:start], text[end:]
-        if re.search(pattern = r"\d\s?[、，,和及或至到~]\s?$", string = before):
-            # 「1、2个」「第1、2名」：前面并列的数决定读法
+        following = re.match(pattern = r"(?:\s?[、，,和及或至到~]\s?\d+)+", string = after)
+        tail = after[following.end():] if following else after
+        tail = tail.lstrip()
+        preceding = re.search(pattern = r"(?:\d+\s?[、，,和及或至到~]\s?)+$", string = before)
+        head = before[:preceding.start()] if preceding else before
+        if head.endswith("第") or tail.startswith(ER_AFTER) or (tail.startswith("线") and re.search(pattern = r"\d面$", string = head)):
+            return ctx.num(spoken = "二" if not tail.startswith("线") else "两", written = n.written)
+        if preceding:
             return Skip(reason = "并列的「2」读「两」还是「二」需要上下文")
-        if before.endswith("第") or after.startswith(ER_AFTER):
-            return ctx.num(spoken = "二", written = n.written)
-        if after.startswith(LIANG_AFTER):
+        if tail.startswith(LIANG_AFTER):
             return ctx.num(spoken = "两", written = n.written)
         if after[:1] in ("》", "」", "』", "”", "）", ")") or after.startswith("之"):
             # 《古惑仔2之猛龙过江》《东京巴士指南2》：作品的续集编号
