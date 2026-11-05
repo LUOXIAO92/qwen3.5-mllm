@@ -4,7 +4,7 @@
 compare 先按写法比较，不一致时把两边都换成读音再比较一次，任一次一致即判一致。
 
 含汉字的词取 UniDic 的假名读音（kana），只由假名写成的词直接用原来的假名，以免形态分析把写错的假名
-（「なた」）当成别的词形（「なった」）。之后把长音的几种写法统一成「ー」（コウ、コオ、コー；ケイ、ケー），
+（「なた」）当成别的词形（「なった」）。之后在词内把长音的几种写法统一成「ー」（コウ、コオ、コー；ケイ、ケー），
 并合并发音相同的假名：ヴァ/バ、ヂ/ジ、ヅ/ズ。所以同音词（交響曲、公共局）和 UniDic 登记的送假名
 变体（嬉い、引渡し）也判为读音相同。
 
@@ -126,10 +126,10 @@ def to_reading(text: str) -> str:
         after_numeral = False
         kana = _feature(word = word, name = "kana")
         if _is_kana(text = surface) or word.is_unk or not kana:
-            out.append(surface.translate(_HIRAGANA_TO_KATAKANA))
-        else:
-            out.append(kana)
+            kana = surface.translate(_HIRAGANA_TO_KATAKANA)
+        # 长音只在词内统一：「先生」センセイ 与「せんせー」一致，「て・いる」与「て・える」不一致
+        out.append(_long_vowels(text = kana))
     reading = "".join(out)
     for old, new in _KANA_FOLD:
         reading = reading.replace(old, new)
-    return _long_vowels(text = reading)
+    return reading.replace("ーー", "ー")

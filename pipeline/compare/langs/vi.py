@@ -7,7 +7,7 @@ ngàn/nghìn、tỉ/tỷ、bẩy/bảy。năm 紧跟在十位之后时不作「�
 「hai trăm năm」可以是 205，也可以是 200 加「năm」（年），读音相同，比对时两种切分都尝试（_splits）。
 """
 
-from ..extend import split_variants, word_num
+from ..extend import word_num
 from ..numerals import (
     LangSpec, add, big, gap, place, with_fold, zero,
 )
@@ -17,7 +17,7 @@ _BEFORE_YEAR = {"trăm", "nghìn", "ngàn", "triệu", "tỷ", "tỉ"}
 
 def _splits(num) -> list:
     words = num.display.split(" ")
-    if len(words) < 2 or words[-1] != "năm" or words[-2] not in _BEFORE_YEAR or "card" not in num.kinds:
+    if len(words) < 2 or words[-1] != "năm" or words[-2] not in _BEFORE_YEAR:
         return []
     head = word_num(
         value = num.value - 5,
@@ -34,12 +34,8 @@ def _splits(num) -> list:
     return [[head, year]]
 
 
-def _variants(items: list) -> list:
-    return split_variants(items = items, splitter = _splits)
-
-
 def build() -> LangSpec:
-    spec = LangSpec(code = "vi", dec_comma = True, variants = _variants)
+    spec = LangSpec(code = "vi", dec_comma = True, splitter = _splits)
     spec.add(words = "không", morphs = zero())
     # không trăm：百位为零（hai nghìn không trăm hai mươi sáu）
     spec.add(words = "không trăm", morphs = add(value = 0, places = {2}))

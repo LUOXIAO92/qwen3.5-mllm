@@ -7,7 +7,8 @@
   kinds   基数 card、序数 ord；不带序数标记的阿拉伯数字两者都允许
   frac    是否位于小数点之后
   surface 读法的比较用词形（已合并已知书写变体、去掉空格）
-  split   是否是比对时另行切分出来的数（见 extend.split_variants）
+  split   是否是比对时另行切分出来的数
+  alts    比对时的其他切分（「육십일」= 육십 + 일，「五千米」= 五千 + 米），见 extend.py
 符号记号 Mark：小数点 sep、百分号 pct、负号 minus，区分符号写法 sym 与读法 word。
 比对时（ext = True）还有单位 unit（ids 为单位编号集合）和时刻 time 两种记号，见 units.py、extend.py。
 """
@@ -15,11 +16,12 @@
 from __future__ import annotations
 
 import itertools
+import re
 import unicodedata
 from dataclasses import dataclass
 
 from .normalize import normalize_text
-from .units import DOLLAR_PREFIXES, SYMBOL_CHARS
+from .units import CENTURY_WORDS, DOLLAR_PREFIXES, ROMAN_SUFFIXES, SQUARE_CHARS, SQUARE_MARKS, SYMBOL_CHARS
 from .numerals import (
     CARD_ONLY, CARD_OR_ORD, CONN_CLITIC, ORD_ONLY, LangSpec, NumState, add, places_of,
 )
@@ -43,8 +45,12 @@ class Num:
     surface: str
     display: str
     lead: str = ""
-    # 由 spec.variants 切出的数（韩语「육십일」切成「육십」「일」）；不参与逐段拼接（年份式读法）
+    # 比对时另行切分出来的数（韩语「육십일」切成「육십」「일」）；不参与逐段拼接（年份式读法）
     split: bool = False
+    # 比对时这个数（连同后面 span - 1 个单元）的其他读法：((span, 比较单元序列), ...)，见 extend.py
+    alts: tuple = ()
+    # 比对时由罗马数字（Henry VIII、XIXe siècle）换来的数
+    roman: bool = False
 
 
 @dataclass(frozen = True, slots = True)
@@ -59,7 +65,7 @@ class Tok:
     """切分阶段的记号。kind：word、char、digit、sep、pct、minus、bound、alt，
     比对时另有 usym（货币、度数符号）和 colon（数字之间的冒号）。"""
 
-    __slots__ = ("kind", "text", "frac", "kinds", "alts")
+    __slots__ = ("kind", "text", "frac", "kinds", "alts", "roman", "brk")
 
     def __init__(self, kind, text = "", frac = False, kinds = CARD_ONLY, alts = None):
         self.kind = kind
@@ -67,6 +73,8 @@ class Tok:
         self.frac = frac
         self.kinds = kinds
         self.alts = alts
+        self.roman = False
+        self.brk = False
 
     def __repr__(self):
         return f"Tok({self.kind}, {self.text!r})"
@@ -94,6 +102,84 @@ def _is_letter(ch: str) -> bool:
 # 数字串
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 罗马数字（比对时）
+# ---------------------------------------------------------------------------
+
+ROMAN_MARK = "\ue010"
+_ROMAN_RUN = re.compile(pattern = r"(?<![^\W\d_])(?P<r>[IVXL]+)(?P<suf>[^\W\d_]*)")
+_ROMAN_VALUE = {"I": 1, "V": 5, "X": 10, "L": 50}
+_ROMAN_TABLE = [(50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")]
+_CYRILLIC_NEXT = re.compile(pattern = r"\.?\s?[\u0400-\u04ff]")
+_INITIAL_NEXT = re.compile(pattern = r"\.?\s?(?P<c>[^\W\d_])(?![^\W\d_])")
+_NUMERO = re.compile(pattern = r"(?<![^\W\d_])([nN])\.?\s?[º°]")
+
+
+def roman_value(text: str) -> int | None:
+    """规范写法的罗马数字（1–89，只用 I V X L）的值，不是时返回 None。"""
+    total = 0
+    for k, ch in enumerate(text):
+        v = _ROMAN_VALUE[ch]
+        total += -v if k + 1 < len(text) and _ROMAN_VALUE[text[k + 1]] > v else v
+    rest, rebuilt = total, []
+    for v, sym in _ROMAN_TABLE:
+        while rest >= v:
+            rebuilt.append(sym)
+            rest -= v
+    return total if 0 < total < 90 and "".join(rebuilt) == text else None
+
+
+def _word_before(text: str, start: int) -> str:
+    """start 之前的一个词（跳过空格和缩写的点：「s. V」前面的词是 s）。"""
+    k = start - 1
+    while k >= 0 and text[k] in " \u00a0\t":
+        k -= 1
+    if k >= 0 and text[k] == "." and k - 1 >= 0 and text[k - 1].isalpha():
+        k -= 1
+    end = k + 1
+    while k >= 0 and (text[k].isalpha() or text[k] in "'’-"):
+        k -= 1
+    return text[k + 1:end]
+
+
+def roman_spans(text: str, lang: str) -> list:
+    """文本中的罗马数字：[(起点, 终点, 值, 后缀), ...]，只认大写的 I V X L。
+
+    单个字母（I、V、X）只在前面紧跟首字母大写的词时认作罗马数字（Pedro I、Louis X），英语的 I 不认，
+    首字母缩写（H.I.V.、B.V.）中的字母不认；俄语句中前面是西里尔字母的词也可以（в V веке）。
+    后缀只收该语言的序数后缀（XIXe、XIº），带后缀的单个字母（Ve、Ier）不受上面的限制。
+    """
+    out = []
+    for m in _ROMAN_RUN.finditer(string = text):
+        r, suf = m.group("r"), m.group("suf")
+        value = roman_value(text = r)
+        if value is None or (suf and suf not in ROMAN_SUFFIXES.get(lang, ())):
+            continue
+        if len(r) == 1 and not suf:
+            before = _word_before(text = text, start = m.start())
+            if r == "L" or (lang == "en" and r == "I") or not (before or lang == "ru"):
+                continue
+            nxt = _INITIAL_NEXT.match(string = text, pos = m.end())
+            if nxt is not None and nxt.group("c").isupper():
+                # 首字母缩写（H.I.V.、B.V.、T I A）中的单个字母
+                continue
+            after_word = _CYRILLIC_NEXT.match(string = text, pos = m.end())
+            cyrillic = lang == "ru" and ("\u0400" <= before[-1:] <= "\u04ff" or after_word is not None)
+            century = before.lower().rstrip(".") in CENTURY_WORDS.get(lang, ())
+            if not (cyrillic or century or (len(before) >= 2 and before[0].isupper())):
+                continue
+        out.append((m.start(), m.start() + len(r), value, suf))
+    return out
+
+
+def mark_roman(text: str, lang: str) -> str:
+    """把罗马数字换成「标记 + 阿拉伯数字」，切分时成为带 roman 标记的数字记号。"""
+    spans = roman_spans(text = text, lang = lang)
+    for start, end, value, _ in reversed(spans):
+        text = text[:start] + ROMAN_MARK + str(value) + text[end:]
+    return text
+
+
 def _digit_tok(digits: str, frac: bool = False) -> Tok:
     """数字记号。不带序数标记的整数既可对应基数也可对应序数（「3 May」读作 May third）。"""
     return Tok(
@@ -110,8 +196,10 @@ def _read_digits(s: str, i: int) -> int:
     return i
 
 
-def _read_number(s: str, i: int, spec: LangSpec):
-    """读取以 i 开头的数字串（含千分位和小数点），返回 (结束位置, 候选切分列表)。"""
+def _read_number(s: str, i: int, spec: LangSpec, ext: bool = False):
+    """读取以 i 开头的数字串（含千分位和小数点），返回 (结束位置, 候选切分列表)。
+
+    ext 为 True 时（比对），不习惯以空格分千位的语言也把「35 000」读成一个数，同时保留分开读的候选。"""
     j = _read_digits(s = s, i = i)
     groups = [s[i:j]]
     seps = []
@@ -124,7 +212,7 @@ def _read_number(s: str, i: int, spec: LangSpec):
             seps.append(ch)
             j = k
             continue
-        if (ch in _SPACE_GROUP or (ch == " " and spec.space_groups)) and len(groups[-1]) <= 3:
+        if (ch in _SPACE_GROUP or (ch == " " and (spec.space_groups or ext))) and len(groups[-1]) <= 3:
             k = _read_digits(s = s, i = j + 1)
             if k - (j + 1) == 3:
                 groups.append(s[j + 1:k])
@@ -132,7 +220,12 @@ def _read_number(s: str, i: int, spec: LangSpec):
                 j = k
                 continue
         break
-    return j, _interpret(groups = groups, seps = seps, spec = spec)
+    alts = _interpret(groups = groups, seps = seps, spec = spec)
+    if ext and not spec.space_groups and " " in seps and all(sp == " " for sp in seps):
+        split = [_digit_tok(digits = g) for g in groups]
+        if split not in alts:
+            alts.append(split)
+    return j, alts
 
 
 def _interpret(groups: list, seps: list, spec: LangSpec) -> list:
@@ -196,7 +289,11 @@ def _interpret(groups: list, seps: list, spec: LangSpec) -> list:
 # ---------------------------------------------------------------------------
 
 def tokenize(text: str, spec: LangSpec, ext: bool = False) -> list:
-    """切分文本。ext 为 True 时（比对）货币、度数符号和数字之间的冒号单独成为记号，否则按标点处理。"""
+    """切分文本。ext 为 True 时（比对）货币、度数符号和数字之间的冒号单独成为记号，否则按标点处理；
+    上标的平方、立方（km²、㎢）在 NFKC 之前换成私用区字符，保留为单位符号的一部分。"""
+    if ext:
+        text = mark_roman(text = text.translate(SQUARE_MARKS), lang = spec.code)
+        text = _NUMERO.sub(repl = r"\1°", string = text)
     s = normalize_text(text = text, lang = spec.code)
     toks = []
     buf = []
@@ -208,16 +305,27 @@ def tokenize(text: str, spec: LangSpec, ext: bool = False) -> list:
         word = "".join(buf)
         buf.clear()
         if spec.scan:
-            toks.extend(_scan(span = word, spec = spec))
+            toks.extend(_scan(span = word, spec = spec, ext = ext))
         else:
             toks.append(Tok(kind = "word", text = word))
 
     i = 0
+    roman_next = False
     while i < n:
         ch = s[i]
+        if ext and ch == ROMAN_MARK:
+            flush()
+            roman_next = True
+            i += 1
+            continue
         if _is_digit(ch = ch):
             flush()
-            j, alts = _read_number(s = s, i = i, spec = spec)
+            j, alts = _read_number(
+                s = s,
+                i = i,
+                spec = spec,
+                ext = ext,
+            )
             end = _attach_ordinal(
                 s = s,
                 j = j,
@@ -228,11 +336,16 @@ def tokenize(text: str, spec: LangSpec, ext: bool = False) -> list:
                 # 西、葡、意语的「20°」可以是序数，也可以是度数
                 alts.append([_digit_tok(digits = alts[0][0].text), Tok(kind = "usym", text = "°")])
             j = end
+            if roman_next:
+                for alt in alts:
+                    for t in alt:
+                        t.roman = t.kind == "digit"
+                roman_next = False
             single = len(alts) == 1 and len(alts[0]) == 1
             toks.append(alts[0][0] if single else Tok(kind = "alt", alts = alts))
             i = j
             continue
-        if _is_letter(ch = ch):
+        if _is_letter(ch = ch) or (ext and ch in SQUARE_CHARS):
             buf.append(ch)
             i += 1
             continue
@@ -242,6 +355,11 @@ def tokenize(text: str, spec: LangSpec, ext: bool = False) -> list:
         if ch.isspace():
             if not spec.scan:
                 flush()
+            i += 1
+            continue
+        if ext and ch == "°" and "".join(buf) == "n":
+            # 编号缩写 n°（numéro、número、numero）
+            buf.append(ch)
             i += 1
             continue
         if ext and ch in SYMBOL_CHARS:
@@ -268,6 +386,8 @@ def tokenize(text: str, spec: LangSpec, ext: bool = False) -> list:
                 toks.append(Tok(kind = "minus", text = "-"))
             elif ch != "−" and not _is_digit(ch = prev) and not nxt_digit:
                 pass  # 词之间的连字符按空格处理
+            elif ext and ch != "−" and _is_digit(ch = prev) and i + 1 < n and _is_letter(ch = s[i + 1]):
+                pass  # 比对时数字与词之间的连字符也按空格处理：50-million、17-летний
             else:
                 toks.append(_BOUND)
             i += 1
@@ -296,15 +416,16 @@ def _attach_ordinal(s: str, j: int, alts: list, spec: LangSpec) -> int:
     return j
 
 
-def _scan(span: str, spec: LangSpec) -> list:
+def _scan(span: str, spec: LangSpec, ext: bool = False) -> list:
     """无空格语言：在字符串中按最长匹配找出数词语素和特殊词，其余逐字成为 char。"""
-    keys = spec.scan_keys()
+    keys = spec.scan_keys(ext = ext)
+    longest = spec.max_key(ext = ext) if ext else spec._max_piece
     out = []
     i = 0
     n = len(span)
     while i < n:
         hit = None
-        for length in range(min(spec._max_piece, n - i), 0, -1):
+        for length in range(min(longest, n - i), 0, -1):
             piece = span[i:i + length]
             if piece in keys:
                 need = spec.lookahead.get(piece)
@@ -365,7 +486,12 @@ def _digit_morph(digits: str, needs = None):
     value = int(digits)
     if value == 0:
         return None
-    return add(value = value, places = places_of(value = value), needs = needs)
+    return add(
+        value = value,
+        places = places_of(value = value),
+        needs = needs,
+        system = "digit",
+    )
 
 
 def parse_number(toks: list, start: int, spec: LangSpec, frac: bool = False, first = None):
@@ -395,10 +521,19 @@ def parse_number(toks: list, start: int, spec: LangSpec, frac: bool = False, fir
             if j >= len(toks):
                 continue
             tok = toks[j]
+            if tok.brk:
+                continue
             cands = []
             if tok.kind == "word":
                 for a in spec.analyses(word = tok.text):
                     if a.prefix and not a.conn_prefix:
+                        continue
+                    if (
+                        spec.split_words_need_scale
+                        and st.last != "big"
+                        and a.morphs[0].cls not in ("place", "big", "big_lex")
+                    ):
+                        # 德语数词连写：「vierzig achten」是两个词，「zwei tausend」才组成一个数
                         continue
                     s2 = st
                     if a.conn_prefix:
@@ -411,11 +546,16 @@ def parse_number(toks: list, start: int, spec: LangSpec, frac: bool = False, fir
             elif (
                 tok.kind == "digit"
                 and spec.digits_after_big
-                and st.last == "big"
+                and st.last in ("big", "place")
                 and not tok.frac
                 and "card" in tok.kinds
             ):
-                m = _digit_morph(digits = tok.text)
+                if st.last == "big" or len(tok.text) == max(st.last_places):
+                    # 1万2000、3천800：数字填满大单位或位值词下面的各位
+                    m = _digit_morph(digits = tok.text)
+                else:
+                    # 2千4百万、1천6백만：位值词后的数字后面还要接位值词
+                    m = _digit_morph(digits = tok.text, needs = _MULT_NEEDS)
                 s2 = st.step(m = m, spec = spec) if m is not None else None
                 if s2 is not None:
                     cands.append((s2, None))
@@ -606,7 +746,7 @@ def _digit_item(toks: list, i: int, spec: LangSpec, items: list, frac_ctx: bool)
     t = toks[i]
     frac = t.frac or frac_ctx
     joiner = "" if spec.scan else " "
-    if not frac and t.kinds != ORD_ONLY:
+    if not frac and t.kinds != ORD_ONLY and not t.roman:
         m = _digit_morph(digits = t.text, needs = _MULT_NEEDS)
         res = None
         if m is not None:
@@ -617,7 +757,7 @@ def _digit_item(toks: list, i: int, spec: LangSpec, items: list, frac_ctx: bool)
                 first = m,
             )
         if res is not None and res[0] > i + 1:
-            end, st, _ = res
+            end, st, path = res
             value = st.value()
             items.append(Num(
                 value = value,
@@ -629,6 +769,9 @@ def _digit_item(toks: list, i: int, spec: LangSpec, items: list, frac_ctx: bool)
                 display = joiner.join(tok.text for tok in toks[i:end]),
                 lead = t.text,
             ))
+            if path and path[-1] is not None and path[-1].suffix:
+                # 「25 ribuan」的 -an 与读法「dua puluh lima ribuan」一样保留
+                items.append(Text(text = path[-1].suffix))
             return end
     kinds = t.kinds
     end = i + 1
@@ -643,6 +786,7 @@ def _digit_item(toks: list, i: int, spec: LangSpec, items: list, frac_ctx: bool)
         frac = frac,
         surface = t.text,
         display = t.text,
+        roman = t.roman,
     ))
     return end
 
@@ -682,11 +826,43 @@ def _place_percent(items: list, spec: LangSpec) -> list:
     return out
 
 
+MAX_CONN_BREAKS = 3
+
+
+def _conn_breaks(toks: list, spec: LangSpec) -> list:
+    """数字写法的候选，以及在数词之间的连接词处断开的候选。
+
+    「one thousand five hundred and ten thousand」可以是 1500 and 10000，「dois mil e dois mil e dezenove」
+    可以是 2000 e 2019：连接词既可以在一个数之内，也可以连接两个数，读音相同，两种都尝试。
+    """
+    variants = _expand(toks = toks)
+    if spec.scan:
+        return variants
+    spots = []
+    for k in range(1, len(toks) - 1):
+        tok = toks[k]
+        if tok.kind != "word" or not any(m.cls == "conn" for a in spec.analyses(word = tok.text) for m in a.morphs):
+            continue
+        if _numeral_start(tok = toks[k - 1], spec = spec) and _numeral_start(tok = toks[k + 1], spec = spec):
+            spots.append(k)
+    spots = spots[:MAX_CONN_BREAKS]
+    choices = [[k] for k in spots] + ([spots] if len(spots) > 1 else [])
+    out = list(variants)
+    for chosen in choices:
+        broken = list(toks)
+        for k in chosen:
+            brk = Tok(kind = "word", text = toks[k].text)
+            brk.brk = True
+            broken[k] = brk
+        out.extend(_expand(toks = broken)[:2])
+    return out
+
+
 def analyze(text: str, spec: LangSpec, ext: bool = False) -> list:
     """返回文本的比较单元序列；数字写法有歧义时返回多种候选。
 
     ext 为 True 时用于比对：另外统一单位、货币、时刻的读法与符号写法，合并书写变体，
-    并加入语言自己的候选切分（spec.variants）。评测打分用 ext = False，结果与原来相同。
+    并给读法数挂上其他切分（Num.alts）。评测打分用 ext = False。
     """
     if not ext:
         toks = tokenize(text = text, spec = spec)
@@ -696,7 +872,7 @@ def analyze(text: str, spec: LangSpec, ext: bool = False) -> list:
     toks = tokenize(text = text, spec = spec, ext = True)
     conflict = spec.ext is not None and bool(spec.sep_words & spec.ext.hour)
     out = []
-    for variant in _expand(toks = toks):
+    for variant in _conn_breaks(toks = toks, spec = spec):
         for time_first in ((True, False) if conflict else (True,)):
             items = parse_items(
                 toks = variant,
@@ -707,9 +883,4 @@ def analyze(text: str, spec: LangSpec, ext: bool = False) -> list:
             items = extend_items(items = items, spec = spec)
             if items not in out:
                 out.append(items)
-    if spec.variants is not None:
-        for items in list(out):
-            for extra in spec.variants(items = items):
-                if extra not in out:
-                    out.append(extra)
     return out[:MAX_EXT_VARIANTS]

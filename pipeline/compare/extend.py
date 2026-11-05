@@ -13,10 +13,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import unicodedata
 
-from .parse import Mark, Num, Text
+from .parse import Mark, Num, Text, parse_items, tokenize
 from .units import fold_latin
 
 
@@ -68,16 +69,24 @@ def extend_items(items: list, spec) -> list:
     if ext is None:
         return items
     joiner = "" if spec.scan else " "
+    items = _scale_after_decimal(items = items, spec = spec)
+    items = _compound_suffix(items = items, spec = spec, ext = ext)
     items = _time_and_units(items = items, ext = ext, joiner = joiner)
     items = _place_prefix(items = items)
-    return _fold_text(items = items, spec = spec, ext = ext)
+    items = _abbreviations(items = items, ext = ext, joiner = joiner)
+    items = _fold_text(items = items, spec = spec, ext = ext)
+    return _attach_alts(items = items, spec = spec)
 
 
 # ---------------------------------------------------------------------------
-# 数词的其他切分（供 spec.variants 使用）
+# 数词的其他切分
 # ---------------------------------------------------------------------------
 
-MAX_SPLIT_SPOTS = 3
+# 中文「千米」「千克」等以「千」开头的单位：「五千米」也可以是「五千」加「米」
+ZH_KILO = {
+    "千米": ("米", "m"), "千克": ("克", "g"), "千瓦": ("瓦", "watt"), "千伏": ("伏", "volt"),
+    "千赫": ("赫", "hertz"), "千赫兹": ("赫兹", "hertz"),
+}
 
 
 def word_num(value: int, surface: str, display: str, kinds) -> Num:
@@ -94,41 +103,190 @@ def word_num(value: int, surface: str, display: str, kinds) -> Num:
     )
 
 
-def split_variants(items: list, splitter) -> list:
-    """对读法写成的数尝试其他切分，返回额外的候选。
+def reparse_num(text: str, spec) -> Num | None:
+    """一段读法单独成为一个数时返回这个数（split = True），否则返回 None。"""
+    items = parse_items(toks = tokenize(text = text, spec = spec), spec = spec)
+    if len(items) == 1 and isinstance(items[0], Num) and items[0].origin == "word":
+        return dataclasses.replace(items[0], split = True)
+    return None
 
-    splitter(num) 返回该数的若干种切分，每种是一串 Num；读音不变，只是数的边界不同
-    （韩语「육십일」= 60 + 일，越南语「hai trăm năm」= 200 + năm）。最多展开 MAX_SPLIT_SPOTS 个数。
-    """
-    spots = []
-    for k, it in enumerate(items):
-        if isinstance(it, Num) and it.origin == "word" and not it.frac:
-            options = [opt for opt in splitter(num = it) if opt]
-            if options:
-                spots.append((k, options))
-        if len(spots) >= MAX_SPLIT_SPOTS:
-            break
-    if not spots:
-        return []
+
+def reparse(text: str, spec) -> int | None:
+    """一段读法单独成为一个数时的值，否则返回 None。"""
+    num = reparse_num(text = text, spec = spec)
+    return None if num is None else num.value
+
+
+def _context_alts(items: list, k: int, it: Num, ext) -> list:
+    """阿拉伯数字或罗马数字写法在读法中多出的词：Henry VIII ↔ Henry the Eighth，11 May ↔ the eleventh of May。"""
+    alts = []
+    if it.roman:
+        alts.extend((1, (*article.replace(" ", ""), it)) for article in ext.roman_articles)
+    if ext.months and it.origin == "digit" and not it.frac and len(it.digits) <= 2 and 1 <= it.value <= 31:
+        nxt = items[k + 1] if k + 1 < len(items) else None
+        prev = items[k - 1] if k > 0 else None
+        if isinstance(nxt, Text) and nxt.text in ext.months:
+            alts.append((1, (*"the", it, *"of")))
+            alts.append((1, (it, *"of")))
+        if isinstance(prev, Text) and prev.text in ext.months:
+            alts.append((1, (*"the", it)))
+    return alts
+
+
+def _attach_alts(items: list, spec) -> list:
+    """给数挂上其他切分（Num.alts），比较时与另一边逐段对应，读音不变。"""
     out = []
-    choices = [[None] + options for _, options in spots]
-    positions = [k for k, _ in spots]
-
-    def build(level: int, picked: list) -> None:
-        if level == len(choices):
-            if any(p is not None for p in picked):
-                chosen = dict(zip(positions, picked))
-                variant = []
-                for k, it in enumerate(items):
-                    replacement = chosen.get(k)
-                    variant.extend([it] if replacement is None else replacement)
-                out.append(variant)
-            return
-        for option in choices[level]:
-            build(level = level + 1, picked = picked + [option])
-
-    build(level = 0, picked = [])
+    for k, it in enumerate(items):
+        if isinstance(it, Num) and it.origin == "digit":
+            alts = _context_alts(
+                items = items,
+                k = k,
+                it = it,
+                ext = spec.ext,
+            )
+            out.append(dataclasses.replace(it, alts = tuple(alts)) if alts else it)
+            continue
+        if not (isinstance(it, Num) and it.origin == "word" and not it.frac and "card" in it.kinds):
+            out.append(it)
+            continue
+        alts = []
+        if spec.splitter is not None:
+            alts.extend((1, tuple(parts)) for parts in spec.splitter(num = it) if parts)
+        nxt = items[k + 1] if k + 1 < len(items) else None
+        if spec.code == "zh" and isinstance(nxt, Mark) and nxt.kind == "unit" and nxt.origin == "word" and nxt.surface in ZH_KILO:
+            base, unit_id = ZH_KILO[nxt.surface]
+            value = reparse(text = it.display + "千", spec = spec)
+            if value is not None:
+                head = word_num(
+                    value = value,
+                    surface = it.surface + "千",
+                    display = it.display + "千",
+                    kinds = it.kinds,
+                )
+                mark = Mark(
+                    kind = "unit",
+                    origin = "word",
+                    surface = base,
+                    ids = frozenset({unit_id}),
+                )
+                alts.append((2, (head, mark)))
+        if alts:
+            it = dataclasses.replace(it, alts = tuple(alts))
+        out.append(it)
     return out
+
+
+# ---------------------------------------------------------------------------
+# 数词与后缀连写的词、缩写
+# ---------------------------------------------------------------------------
+
+def _scale_after_decimal(items: list, spec) -> list:
+    """小数后的大单位词（1.7 billion、38,2 Mio.、dois vírgula cinco milhões）也成为一个数，
+    这样后面的单位（dollars）和写在数前的货币符号都能找到它。"""
+    out = []
+    for it in items:
+        if isinstance(it, Text) and out and isinstance(out[-1], Num) and out[-1].frac:
+            for a in spec.analyses(word = it.text):
+                if len(a.morphs) == 1 and a.morphs[0].cls == "big" and not a.prefix and not a.suffix:
+                    it = Num(
+                        value = a.morphs[0].value,
+                        digits = str(a.morphs[0].value),
+                        origin = "word",
+                        kinds = frozenset({"card"}),
+                        frac = False,
+                        surface = a.surface,
+                        display = it.text,
+                    )
+                    break
+        out.append(it)
+    return out
+
+
+def _compound_suffix(items: list, spec, ext) -> list:
+    """「семнадцатилетний」「hundertjährige」「neunzehnhundertachtziger」拆成数和后缀，与 17-летний、1980er 对应。"""
+    if not (ext.compound_any or ext.compound_decade):
+        return items
+    out = []
+    for it in items:
+        split = None
+        if isinstance(it, Text) and " " not in it.text:
+            for decade, suffixes in ((False, ext.compound_any), (True, ext.compound_decade)):
+                for suffix in suffixes:
+                    stem = it.text[:-len(suffix)]
+                    if not it.text.endswith(suffix) or len(stem) < 3:
+                        continue
+                    num = _stem_num(stem = stem, spec = spec)
+                    if num is not None and (not decade or (num.value >= 10 and num.value % 10 == 0)):
+                        split = [dataclasses.replace(num, split = False), Text(text = suffix)]
+                        break
+                if split:
+                    break
+        out.extend(split or [it])
+    return out
+
+
+def _stem_num(stem: str, spec) -> Num | None:
+    """词干是一个读法数时返回它；俄语的复合词干（двадцатипяти）试着切成两段。"""
+    num = reparse_num(text = stem, spec = spec)
+    if num is not None or spec.compound:
+        return num
+    for p in range(3, len(stem) - 2):
+        num = reparse_num(text = stem[:p] + " " + stem[p:], spec = spec)
+        if num is not None:
+            return dataclasses.replace(num, display = stem)
+    return None
+
+
+def _abbreviations(items: list, ext, joiner: str) -> list:
+    """缩写与符号（Mr.、z. B.、т. е.、&、No. 5）及其读法换成缩写记号，读法对写法时按读法集合比较。"""
+    if not ext.abbr:
+        return items
+    out = []
+    k = 0
+    n = len(items)
+    while k < n:
+        it = items[k]
+        if isinstance(it, Mark) and it.kind == "usym":
+            readings = ext.abbr.get(it.surface)
+            number_only = it.surface in ext.abbr_number
+            if readings is not None and (not number_only or (k + 1 < n and isinstance(items[k + 1], Num))):
+                out.append(Mark(
+                    kind = "abbr",
+                    origin = "sym",
+                    surface = it.surface,
+                    ids = readings,
+                ))
+            k += 1
+            continue
+        if isinstance(it, Text):
+            best = None
+            for vocab, origin in ((ext.abbr, "sym"), (ext.abbr_words, "word")):
+                word, end = _take(
+                    items = items,
+                    k = k,
+                    vocab = vocab,
+                    joiner = joiner,
+                    max_len = ext.abbr_chars,
+                )
+                if word is None:
+                    continue
+                if word in ext.abbr_number and not (end < n and isinstance(items[end], Num)):
+                    continue
+                if best is None or end > best[1]:
+                    best = (word, end, origin, vocab[word])
+            if best is not None:
+                word, end, origin, readings = best
+                out.append(Mark(
+                    kind = "abbr",
+                    origin = origin,
+                    surface = word.replace(" ", ""),
+                    ids = readings,
+                ))
+                k = end
+                continue
+        out.append(it)
+        k += 1
+    return [it for it in out if not (isinstance(it, Mark) and it.kind == "usym")]
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +358,8 @@ def _time_and_units(items: list, ext, joiner: str) -> list:
                     surface = it.surface,
                     ids = entry[1],
                 ))
+            elif it.surface in ext.abbr:
+                out.append(it)   # &、§ 交给缩写处理
             k += 1
             continue
         if isinstance(it, Text) and isinstance(prev, Num):
@@ -219,7 +379,13 @@ def _time_and_units(items: list, ext, joiner: str) -> list:
                     joiner = joiner,
                     max_len = 3,
                 )
-                if hour is None and conn is not None and conn_end < n and _minute_num(it = items[conn_end]):
+                minutes_follow = conn is not None and _conn_minutes(
+                    items = items,
+                    k = conn_end,
+                    ext = ext,
+                    joiner = joiner,
+                )
+                if hour is None and minutes_follow:
                     # 西语 las tres y quince、葡语 três e quinze：连接词在小时和分钟之间
                     hour, hour_end = conn, conn_end
             unit, unit_end = _take(
@@ -229,6 +395,16 @@ def _time_and_units(items: list, ext, joiner: str) -> list:
                 joiner = joiner,
                 max_len = unit_len,
             )
+            abbr, abbr_end = _take(
+                items = items,
+                k = k,
+                vocab = ext.abbr,
+                joiner = joiner,
+                max_len = ext.abbr_chars,
+            )
+            if abbr is not None and abbr_end > unit_end:
+                # 「514 v. Chr.」的 v 是缩写的一部分，不是伏特
+                unit = None
             if hour is not None and hour_end >= unit_end:
                 k = _emit_time(
                     items = items,
@@ -242,6 +418,9 @@ def _time_and_units(items: list, ext, joiner: str) -> list:
                 continue
             if unit is not None:
                 origin, ids = ext.units[unit]
+                if origin == "sym":
+                    # 「1912 M.」的 M 也可以是 monsieur
+                    ids = ids | ext.abbr.get(unit, frozenset())
                 out.append(Mark(
                     kind = "unit",
                     origin = origin,
@@ -264,6 +443,23 @@ def _time_and_units(items: list, ext, joiner: str) -> list:
         out.append(it)
         k += 1
     return out
+
+
+def _conn_minutes(items: list, k: int, ext, joiner: str) -> bool:
+    """没有「时」类词时，连接词后的 items[k] 只有后面跟着「分」类词才当作分钟（três e quinze minutos、
+    سه و پانزده دقیقه）。其余情况连接词保持原样，由比较时冒号记号对连接词处理（core._conn_step），
+    因为「19 e 20」这类写法分不清是时刻还是并列的数（séculos XIX e XX），两边必须得到同样的结论。"""
+    n = len(items)
+    if k >= n or not _minute_num(it = items[k]):
+        return False
+    word, _ = _take(
+        items = items,
+        k = k + 1,
+        vocab = ext.minute,
+        joiner = joiner,
+        max_len = 8,
+    )
+    return word is not None
 
 
 def _emit_time(
@@ -317,7 +513,9 @@ def _emit_time(
             k = conn_end
         if k < n and _minute_num(it = items[k]):
             minutes = items[k]
-            if not (minutes.origin == "digit" and minutes.digits == "00"):
+            if minutes.origin == "digit" and minutes.digits == "00":
+                out.append(Mark(kind = "time00", origin = "sym", surface = "00"))
+            else:
                 out.append(minutes)
             k += 1
             if minutes.origin == "word" and minutes.value == 0 and k < n and _is_int(it = items[k]) and items[k].value < 10:
@@ -360,7 +558,19 @@ def _number_end(items: list, k: int) -> int:
         k += 1
         while k < n and isinstance(items[k], Num) and items[k].frac:
             k += 1
+    if k < n and _scale_word(it = items[k]):
+        k += 1
     return k
+
+
+def _scale_word(it) -> bool:
+    """单独一个大单位词（billion、millones）：值为 1000 的幂。"""
+    if not (isinstance(it, Num) and it.origin == "word" and not it.frac and it.value >= 1000):
+        return False
+    value = it.value
+    while value % 1000 == 0:
+        value //= 1000
+    return value == 1 and " " not in it.display
 
 
 def _place_prefix(items: list) -> list:

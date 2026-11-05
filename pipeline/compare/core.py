@@ -10,7 +10,8 @@ from typing import NamedTuple
 from . import ja_reading
 from .langs import get_spec
 from .normalize import normalize_text
-from .parse import Mark, Num, Text, analyze
+from .numerals import ABBR_FOLD
+from .parse import Mark, Num, Text, analyze, roman_spans
 
 # 一个阿拉伯数字最多和几个连续的读法记号拼接比较（例如 nineteen eighty-four ↔ 1984）
 MAX_CONCAT = 8
@@ -47,7 +48,10 @@ def _eq(a, b) -> bool:
         return a == b
     if isinstance(a, Num) and isinstance(b, Num):
         if a.origin == "word" and b.origin == "word":
-            # 两边都是读法：要求词形一致（只合并词表中登记的书写变体）
+            # 两边都是读法：要求词形一致（只合并词表中登记的书写变体）；
+            # 数量缩写（Mio.、млн）与全称（Millionen、миллионов）按数值比较
+            if ABBR_FOLD in a.surface or ABBR_FOLD in b.surface:
+                return a.value == b.value and a.kinds & b.kinds and a.frac == b.frac
             return a.surface == b.surface
         if not (a.kinds & b.kinds) or a.frac != b.frac:
             return False
@@ -55,11 +59,14 @@ def _eq(a, b) -> bool:
             return a.digits == b.digits
         return a.value == b.value and _zeros_ok(digits = a.digits) and _zeros_ok(digits = b.digits)
     if isinstance(a, Mark) and isinstance(b, Mark):
+        if {a.kind, b.kind} == {"unit", "abbr"} and "sym" in (a.origin, b.origin):
+            # 「M.」在数后是米，也可以是 monsieur：符号写法的编号集合里带着缩写的读法
+            return bool(a.ids & b.ids)
         if a.kind != b.kind:
             return False
         if a.origin == "word" and b.origin == "word":
             return a.surface == b.surface
-        if a.kind == "unit":
+        if a.kind in ("unit", "abbr"):
             return bool(a.ids & b.ids)
         if a.kind == "time" and a.origin == "sym" and b.origin == "sym":
             # 「14:30 Uhr」与「14:30」：冒号、h 之外读出的词要相同
@@ -83,8 +90,8 @@ def _regroup_ok(x, seq) -> bool:
 
 
 def _as_text(it) -> str:
-    """单位的读法记号也可以按普通文字比较（「yen dari」对「yendari」，比较时忽略空白）。"""
-    if isinstance(it, Mark) and it.origin == "word" and it.kind == "unit":
+    """单位、缩写的读法记号也可以按普通文字比较（「yen dari」对「yendari」，比较时忽略空白）。"""
+    if isinstance(it, Mark) and it.origin == "word" and it.kind in ("unit", "abbr"):
         return it.surface
     return ""
 
@@ -94,9 +101,45 @@ def _text_run(units: list, start: int, text: str) -> bool:
     return end <= len(units) and all(isinstance(u, str) for u in units[start:end]) and "".join(units[start:end]) == text
 
 
+def _alt_steps(x, a_len: int, b: list, i: int, j: int, lang: str) -> list:
+    """x = a[i] 是带其他切分的数时，按每种切分与 b[j:] 的开头比较，返回可以到达的 (i, j)。"""
+    if not isinstance(x, Num) or not x.alts:
+        return []
+    out = []
+    for span, parts in x.alts:
+        if i + span > a_len:
+            continue
+        for k in range(1, min(len(parts) + 1, len(b) - j) + 1):
+            if _match_units(a = list(parts), b = b[j:j + k], lang = lang):
+                out.append((i + span, j + k))
+    return out
+
+
 def _skippable(it) -> bool:
-    """冒号写法的时刻记号（后面没有读出的词）可以不对应任何东西：「5:30」对「five thirty」。"""
-    return isinstance(it, Mark) and it.kind == "time" and it.surface == ":"
+    """冒号写法的时刻记号（后面没有读出的词）可以不对应任何东西：「5:30」对「five thirty」；
+    符号写法的分钟 00 也可以不读（14:00 对 vierzehn Uhr）。"""
+    return isinstance(it, Mark) and ((it.kind == "time" and it.surface == ":") or it.kind == "time00")
+
+
+def _conn_step(x, b: list, j: int, lang: str) -> int:
+    """冒号写法的时刻对读法中小时与分钟之间的连接词（3:15 对 tres y quince）：返回对上的单元数，0 表示对不上。"""
+    if not (isinstance(x, Mark) and x.kind == "time" and x.surface == ":") or j >= len(b):
+        return 0
+    conns = get_spec(lang = lang).ext.conn
+    y = b[j]
+    if isinstance(y, Mark) and y.origin == "word" and y.surface in conns:
+        return 1
+    for word in conns:
+        if _text_run(units = b, start = j, text = word):
+            return len(word)
+    return 0
+
+
+def _zero_minutes(x, seq) -> bool:
+    """符号写法的分钟 00 对读出的「zéro zéro」「oh oh」。"""
+    if not (isinstance(x, Mark) and x.kind == "time00") or not seq:
+        return False
+    return all(isinstance(w, Num) and w.origin == "word" and w.value == 0 for w in seq) and len(seq) == 2
 
 
 def _concat_ok(d, seq) -> bool:
@@ -150,6 +193,42 @@ def _match_units(a: list, b: list, lang: str) -> bool:
             succ.append((i + 1, j))
         if _skippable(it = y):
             succ.append((i, j + 1))
+        if _zero_minutes(x = x, seq = b[j:j + 2]):
+            succ.append((i + 1, j + 2))
+        step = _conn_step(
+            x = x,
+            b = b,
+            j = j,
+            lang = lang,
+        )
+        if step:
+            succ.append((i + 1, j + step))
+        step = _conn_step(
+            x = y,
+            b = a,
+            j = i,
+            lang = lang,
+        )
+        if step:
+            succ.append((i + step, j + 1))
+        if _zero_minutes(x = y, seq = a[i:i + 2]):
+            succ.append((i + 2, j + 1))
+        succ.extend(_alt_steps(
+            x = x,
+            a_len = n,
+            b = b,
+            i = i,
+            j = j,
+            lang = lang,
+        ))
+        succ.extend((p, q) for q, p in _alt_steps(
+            x = y,
+            a_len = m,
+            b = a,
+            i = j,
+            j = i,
+            lang = lang,
+        ))
         text = _as_text(it = x)
         if text and _text_run(units = b, start = j, text = text):
             succ.append((i + 1, j + len(text)))
@@ -362,6 +441,8 @@ def _support(original: str, spec) -> set:
         v = _roman_value(s = r)
         if v:
             support.add(str(v))
+    for _, _, v, _ in roman_spans(text = unicodedata.normalize("NFKC", original), lang = spec.code):
+        support.add(str(v))
     return support
 
 

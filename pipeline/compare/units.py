@@ -23,10 +23,25 @@ from dataclasses import dataclass, field
 # 符号写法（各语言通用）。键为规范化后的写法：小写，「km/h」中的斜线切分后成为「km h」。
 # ---------------------------------------------------------------------------
 
+# 平方、立方：切分前把「²」「³」「㎢」「㎡」换成私用区字符 U+E002、U+E003（NFKC 会把它们变成普通数字）
+SQUARE_MARKS = str.maketrans({
+    "²": "\ue002", "³": "\ue003",
+    "㎢": "km\ue002", "㎡": "m\ue002", "㎠": "cm\ue002", "㎥": "m\ue003",
+})
+SQUARE_CHARS = "\ue002\ue003"
+
 SYMBOLS = {
-    "km": "km", "m": "m", "cm": "cm", "mm": "mm",
-    "kg": "kg", "g": "g", "mg": "mg",
+    "km": "km", "m": "m", "cm": "cm", "mm": "mm", "nm": "nm", "μm": "um",
+    "kg": "kg", "g": "g", "mg": "mg", "t": "ton",
+    "l": "liter", "ml": "ml",
+    "km\ue002": "km2", "m\ue002": "m2", "cm\ue002": "cm2", "m\ue003": "m3",
+    "ha": "hectare",
+    "mi": "mi", "ft": "ft", "lb": "lb", "lbs": "lb", "mph": "mph",
     "km h": "km/h", "kmh": "km/h",
+    "v": "volt", "kv": "kilovolt",
+    "w": "watt", "kw": "kilowatt", "mw": ("megawatt", "milliwatt"), "gw": "gigawatt", "kwh": "kwh",
+    "hz": "hertz", "khz": "kilohertz", "mhz": "megahertz", "ghz": "gigahertz",
+    "kb": "kb", "mb": "mb", "gb": "gb", "tb": "tb",
     "°": "deg", "°c": "degc", "°f": "degf",
     "h": "hour", "min": "minute",
     "$": "dollar", "us$": "dollar", "usd": "dollar",
@@ -43,8 +58,14 @@ SYMBOLS = {
     "r$": "real", "brl": "real",
 }
 
+# 罗马数字后面可以紧跟的序数后缀（XIXe、XIº）
+ROMAN_SUFFIXES = {
+    "fr": ("e", "er", "re", "es", "ers", "res", "ème", "èmes", "eme", "è"),
+    "es": ("º", "ª", "o", "a"), "pt": ("º", "ª", "o", "a"), "it": ("º", "ª", "o", "a"),
+}
+
 # 单字符的符号（切分时单独成为记号）；「°」后紧跟 c、f 时合成「°c」「°f」
-SYMBOL_CHARS = "$€£¥₩₫฿₺₽₱₹°"
+SYMBOL_CHARS = "$€£¥₩₫฿₺₽₱₹°&§"
 # 「R$」「US$」：字母紧接「$」
 DOLLAR_PREFIXES = {"r", "us"}
 
@@ -54,10 +75,20 @@ PREFIX = {
     "usd", "eur", "gbp", "jpy", "cny", "rmb", "krw", "vnd", "thb", "brl",
 }
 
-# 各语言自己的符号写法（「mi」在西语、意大利语中是普通词，只用于英语；俄语「г」常表示「год」，不收）
+# 不作单位符号的写法：「mi」在西语、意大利语、法语中是普通词（mi casa、mi-temps），「t」「l」是法语、
+# 意大利语的省略形式，「ha」是西语、意大利语、葡语的动词
+NOT_SYMBOLS = {
+    "es": {"mi", "ha"}, "it": {"mi", "ha", "t", "l"}, "fr": {"mi", "t", "l"}, "pt": {"ha"}, "fil": {"mi"},
+}
+
+# 各语言自己的符号写法（俄语「г」常表示「год」，不收）
 LANG_SYMBOLS = {
-    "en": {"mi": "mi", "ft": "ft", "lb": "lb", "lbs": "lb", "mph": "mph"},
-    "ru": {"км": "km", "м": "m", "см": "cm", "мм": "mm", "кг": "kg", "руб": "ruble", "км ч": "km/h"},
+    "ru": {
+        "км": "km", "м": "m", "см": "cm", "мм": "mm", "кг": "kg", "руб": "ruble", "км ч": "km/h",
+        "км\ue002": "km2", "м\ue002": "m2", "т": "ton", "л": "liter", "га": "hectare",
+        "г": "year_ru", "гг": "year_ru", "в": "century_ru", "вв": "century_ru",
+        "квт": "kilowatt", "мвт": "megawatt", "гц": "hertz", "кгц": "kilohertz", "мгц": "megahertz",
+    },
     "id": {"rp": "rupiah", "rm": "ringgit"},
     "ms": {"rm": "ringgit", "rp": "rupiah"},
     "tr": {"tl": "lira"},
@@ -112,6 +143,28 @@ READINGS = {
         "ruble": ["ruble", "rubles", "rouble", "roubles"],
         "hour": ["hour", "hours"],
         "minute": ["minute", "minutes"],
+        "nm": ["nanometer", "nanometers", "nanometre", "nanometres"],
+        "um": ["micrometer", "micrometers", "micrometre", "micrometres", "micron", "microns"],
+        "ton": ["ton", "tons", "tonne", "tonnes"],
+        "liter": ["liter", "liters", "litre", "litres"],
+        "ml": ["milliliter", "milliliters", "millilitre", "millilitres"],
+        "hectare": ["hectare", "hectares"],
+        "km2": ["square kilometer", "square kilometers", "square kilometre", "square kilometres"],
+        "m2": ["square meter", "square meters", "square metre", "square metres"],
+        "volt": ["volt", "volts"],
+        "kilovolt": ["kilovolt", "kilovolts"],
+        "watt": ["watt", "watts"],
+        "kilowatt": ["kilowatt", "kilowatts"],
+        "megawatt": ["megawatt", "megawatts"],
+        "gigawatt": ["gigawatt", "gigawatts"],
+        "hertz": ["hertz"],
+        "kilohertz": ["kilohertz"],
+        "megahertz": ["megahertz"],
+        "gigahertz": ["gigahertz"],
+        "kb": ["kilobyte", "kilobytes"],
+        "mb": ["megabyte", "megabytes"],
+        "gb": ["gigabyte", "gigabytes"],
+        "tb": ["terabyte", "terabytes"],
     },
     "de": {
         "km": ["kilometer", "kilometern", "kilometers"],
@@ -130,6 +183,18 @@ READINGS = {
         "yen": ["yen"],
         "hour": ["stunde", "stunden"],
         "minute": ["minute", "minuten"],
+        "ton": ["tonne", "tonnen"],
+        "liter": ["liter", "litern"],
+        "hectare": ["hektar"],
+        "km2": ["quadratkilometer", "quadratkilometern"],
+        "m2": ["quadratmeter", "quadratmetern"],
+        "volt": ["volt"],
+        "kilovolt": ["kilovolt"],
+        "watt": ["watt"],
+        "kilowatt": ["kilowatt"],
+        "megawatt": ["megawatt"],
+        "hertz": ["hertz"],
+        "megahertz": ["megahertz"],
     },
     "fr": {
         "km": ["kilomètre", "kilomètres"],
@@ -142,12 +207,23 @@ READINGS = {
         "degc": ["degré celsius", "degrés celsius"],
         "degf": ["degré fahrenheit", "degrés fahrenheit"],
         "km/h": ["kilomètres par heure", "kilomètre par heure", "kilomètres heure", "kilomètre heure"],
-        "dollar": ["dollar", "dollars"],
-        "euro": ["euro", "euros"],
-        "pound": ["livre", "livres", "livre sterling", "livres sterling"],
+        "dollar": ["dollar", "dollars", "de dollars"],
+        "euro": ["euro", "euros", "d'euros"],
+        "pound": ["livre", "livres", "livre sterling", "livres sterling", "de livres"],
         "yen": ["yen", "yens"],
         "hour": ["heure", "heures"],
         "minute": ["minute", "minutes"],
+        "ton": ["tonne", "tonnes"],
+        "liter": ["litre", "litres"],
+        "hectare": ["hectare", "hectares"],
+        "km2": ["kilomètre carré", "kilomètres carrés"],
+        "m2": ["mètre carré", "mètres carrés"],
+        "volt": ["volt", "volts"],
+        "watt": ["watt", "watts"],
+        "kilowatt": ["kilowatt", "kilowatts"],
+        "megawatt": ["mégawatt", "mégawatts"],
+        "hertz": ["hertz"],
+        "megahertz": ["mégahertz"],
     },
     "es": {
         "km": ["kilómetro", "kilómetros"],
@@ -160,13 +236,24 @@ READINGS = {
         "degc": ["grado celsius", "grados celsius", "grado centígrado", "grados centígrados"],
         "degf": ["grado fahrenheit", "grados fahrenheit"],
         "km/h": ["kilómetros por hora", "kilómetro por hora"],
-        "dollar": ["dólar", "dólares"],
-        "peso": ["peso", "pesos"],
-        "euro": ["euro", "euros"],
-        "pound": ["libra", "libras"],
+        "dollar": ["dólar", "dólares", "de dólares"],
+        "peso": ["peso", "pesos", "de pesos"],
+        "euro": ["euro", "euros", "de euros"],
+        "pound": ["libra", "libras", "de libras"],
         "yen": ["yen", "yenes"],
         "hour": ["hora", "horas"],
         "minute": ["minuto", "minutos"],
+        "ton": ["tonelada", "toneladas"],
+        "liter": ["litro", "litros"],
+        "hectare": ["hectárea", "hectáreas"],
+        "km2": ["kilómetro cuadrado", "kilómetros cuadrados"],
+        "m2": ["metro cuadrado", "metros cuadrados"],
+        "volt": ["voltio", "voltios"],
+        "watt": ["vatio", "vatios"],
+        "kilowatt": ["kilovatio", "kilovatios"],
+        "megawatt": ["megavatio", "megavatios"],
+        "hertz": ["hercio", "hercios", "hertz"],
+        "megahertz": ["megahercio", "megahercios"],
     },
     "pt": {
         "km": ["quilômetro", "quilômetros", "quilómetro", "quilómetros"],
@@ -179,13 +266,24 @@ READINGS = {
         "degc": ["grau celsius", "graus celsius"],
         "degf": ["grau fahrenheit", "graus fahrenheit"],
         "km/h": ["quilômetros por hora", "quilómetros por hora", "quilômetro por hora", "quilómetro por hora"],
-        "dollar": ["dólar", "dólares"],
-        "real": ["real", "reais"],
-        "euro": ["euro", "euros"],
-        "pound": ["libra", "libras"],
+        "dollar": ["dólar", "dólares", "de dólares"],
+        "real": ["real", "reais", "de reais"],
+        "euro": ["euro", "euros", "de euros"],
+        "pound": ["libra", "libras", "de libras"],
         "yen": ["iene", "ienes"],
         "hour": ["hora", "horas"],
         "minute": ["minuto", "minutos"],
+        "ton": ["tonelada", "toneladas"],
+        "liter": ["litro", "litros"],
+        "hectare": ["hectare", "hectares"],
+        "km2": ["quilômetro quadrado", "quilômetros quadrados", "quilómetro quadrado", "quilómetros quadrados"],
+        "m2": ["metro quadrado", "metros quadrados"],
+        "volt": ["volt", "volts"],
+        "watt": ["watt", "watts"],
+        "kilowatt": ["quilowatt", "quilowatts"],
+        "megawatt": ["megawatt", "megawatts"],
+        "hertz": ["hertz"],
+        "megahertz": ["megahertz"],
     },
     "it": {
         "km": ["chilometro", "chilometri"],
@@ -199,12 +297,23 @@ READINGS = {
         "degc": ["grado celsius", "gradi celsius", "grado centigrado", "gradi centigradi"],
         "degf": ["grado fahrenheit", "gradi fahrenheit"],
         "km/h": ["chilometri orari", "chilometri all ora", "chilometri allora"],
-        "dollar": ["dollaro", "dollari"],
-        "euro": ["euro"],
+        "dollar": ["dollaro", "dollari", "di dollari"],
+        "euro": ["euro", "di euro"],
         "pound": ["sterlina", "sterline"],
         "yen": ["yen"],
         "hour": ["ora", "ore"],
         "minute": ["minuto", "minuti"],
+        "ton": ["tonnellata", "tonnellate"],
+        "liter": ["litro", "litri"],
+        "hectare": ["ettaro", "ettari"],
+        "km2": ["chilometro quadrato", "chilometri quadrati"],
+        "m2": ["metro quadrato", "metri quadrati"],
+        "volt": ["volt"],
+        "watt": ["watt"],
+        "kilowatt": ["chilowatt"],
+        "megawatt": ["megawatt"],
+        "hertz": ["hertz"],
+        "megahertz": ["megahertz"],
     },
     "ru": {
         "km": _ru(stem = "километр"),
@@ -221,6 +330,20 @@ READINGS = {
         "euro": ["евро"],
         "ruble": _ru(stem = "рубль", soft = True),
         "yen": ["иена", "иены", "иен", "иене", "иену", "иеной", "иенам", "иенами", "иенах"],
+        "ton": ["тонна", "тонны", "тонн", "тонну", "тонне", "тонной", "тоннам", "тоннами", "тоннах"],
+        "liter": _ru(stem = "литр"),
+        "hectare": _ru(stem = "гектар"),
+        "km2": [a + " " + b for a in ("квадратный", "квадратного", "квадратных", "квадратным", "квадратными")
+                for b in _ru(stem = "километр")],
+        "volt": _ru(stem = "вольт"),
+        "kilovolt": _ru(stem = "киловольт"),
+        "watt": _ru(stem = "ватт"),
+        "kilowatt": _ru(stem = "киловатт"),
+        "megawatt": _ru(stem = "мегаватт"),
+        "hertz": _ru(stem = "герц"),
+        "megahertz": _ru(stem = "мегагерц"),
+        "year_ru": ["год", "года", "году", "годом", "годе", "годы", "годов", "годам", "годами", "годах"],
+        "century_ru": _ru(stem = "век"),
         "hour": _ru(stem = "час"),
         "minute": ["минута", "минуты", "минут", "минуту", "минуте", "минутой", "минутам", "минутами", "минутах"],
     },
@@ -300,6 +423,10 @@ READINGS = {
         "degf": ["độ f", "độ ép", "độ fahrenheit"],
         "dollar": ["đô la", "đô"],
         "dong": ["đồng"],
+        "hectare": ["héc ta", "hecta"],
+        "liter": ["lít"],
+        "ml": ["mi li lít", "mililít"],
+        "km/h": ["ki lô mét trên giờ", "ki lô mét một giờ"],
         "euro": ["euro", "ơ rô"],
         "yen": ["yên"],
         "hour": ["giờ", "tiếng"],
@@ -374,6 +501,33 @@ READINGS = {
         "won": ["韩元"],
         "hour": ["小时", "个小时"],
         "minute": ["分钟"],
+        ("km",): ["千米"],
+        ("kg",): ["千克"],
+        "nm": ["纳米"],
+        "um": ["微米"],
+        "ton": ["吨"],
+        "liter": ["升", "公升"],
+        "ml": ["毫升"],
+        "mg": ["毫克"],
+        "hectare": ["公顷"],
+        "km2": ["平方公里", "平方千米"],
+        "m2": ["平方米"],
+        "cm2": ["平方厘米"],
+        "mi": ["英里"],
+        "ft": ["英尺"],
+        ("pound", "lb"): ["磅"],
+        "volt": ["伏", "伏特"],
+        "kilovolt": ["千伏"],
+        "watt": ["瓦", "瓦特"],
+        "kilowatt": ["千瓦"],
+        "megawatt": ["兆瓦"],
+        "hertz": ["赫兹", "赫"],
+        "kilohertz": ["千赫", "千赫兹"],
+        "megahertz": ["兆赫", "兆赫兹"],
+        "gigahertz": ["吉赫", "吉赫兹"],
+        "kb": ["千字节"],
+        "mb": ["兆字节"],
+        "gb": ["吉字节"],
     },
     "ja": {
         ("km", "kg"): ["キロ"],
@@ -392,6 +546,31 @@ READINGS = {
         "pound": ["ポンド"],
         "hour": ["時間"],
         "minute": ["分", "分間"],
+        "nm": ["ナノメートル"],
+        "um": ["マイクロメートル", "ミクロン"],
+        "ton": ["トン"],
+        "liter": ["リットル"],
+        "ml": ["ミリリットル"],
+        "mg": ["ミリグラム"],
+        "hectare": ["ヘクタール"],
+        "km2": ["平方キロメートル", "平方キロ"],
+        "m2": ["平方メートル"],
+        "mi": ["マイル"],
+        "ft": ["フィート"],
+        "lb": ["ポンド"],
+        "volt": ["ボルト"],
+        "kilovolt": ["キロボルト"],
+        "watt": ["ワット"],
+        "kilowatt": ["キロワット"],
+        "megawatt": ["メガワット"],
+        "hertz": ["ヘルツ"],
+        "kilohertz": ["キロヘルツ"],
+        "megahertz": ["メガヘルツ"],
+        "gigahertz": ["ギガヘルツ"],
+        "kb": ["キロバイト"],
+        "mb": ["メガバイト"],
+        "gb": ["ギガバイト"],
+        "tb": ["テラバイト"],
     },
     "ko": {
         "km": ["킬로미터"],
@@ -410,6 +589,31 @@ READINGS = {
         "pound": ["파운드"],
         "hour": ["시간"],
         "minute": ["분"],
+        "nm": ["나노미터"],
+        "um": ["마이크로미터", "미크론"],
+        "ton": ["톤"],
+        "liter": ["리터"],
+        "ml": ["밀리리터"],
+        "mg": ["밀리그램"],
+        "hectare": ["헥타르"],
+        "km2": ["제곱킬로미터", "평방킬로미터"],
+        "m2": ["제곱미터", "평방미터"],
+        "mi": ["마일"],
+        "ft": ["피트"],
+        "lb": ["파운드"],
+        "volt": ["볼트"],
+        "kilovolt": ["킬로볼트"],
+        "watt": ["와트"],
+        "kilowatt": ["킬로와트"],
+        "megawatt": ["메가와트"],
+        "hertz": ["헤르츠"],
+        "kilohertz": ["킬로헤르츠"],
+        "megahertz": ["메가헤르츠"],
+        "gigahertz": ["기가헤르츠"],
+        "kb": ["킬로바이트"],
+        "mb": ["메가바이트"],
+        "gb": ["기가바이트"],
+        "tb": ["테라바이트"],
     },
 }
 
@@ -430,7 +634,7 @@ TIME = {
     "ru": {"hour": ["час", "часа", "часов"], "minute": ["минута", "минуты", "минут"]},
     "vi": {"hour": ["giờ"], "hour_sym": ["h"], "minute": ["phút"], "half": ["rưỡi"]},
     "th": {"hour": ["นาฬิกา", "โมง"], "minute": ["นาที"]},
-    "fa": {"minute": ["دقیقه"], "conn": ["و"]},
+    "fa": {"minute": ["دقیقه"], "conn": ["و"], "conn_needs_minute": True},
 }
 
 # ---------------------------------------------------------------------------
@@ -454,6 +658,151 @@ NATIVE_LETTERS = {
 KEEP_ALL_LETTERS = {"vi"}
 
 
+# ---------------------------------------------------------------------------
+# 缩写与符号：写法 → 读法。键是切分后的写法（点去掉，「z. B.」成为「z b」），读法按自然写法给出。
+# general 在任何位置都换；number 只在后面紧跟数时换（No. 5、§ 4、n° 3）。
+# ---------------------------------------------------------------------------
+
+ABBREVIATIONS = {
+    "en": {
+        "general": {
+            "mr": ["mister"], "mrs": ["missus"], "dr": ["doctor"], "prof": ["professor"],
+            "st": ["saint", "street"], "mt": ["mount"], "ft": ["fort"], "gen": ["general"],
+            "col": ["colonel"], "lt": ["lieutenant"], "sgt": ["sergeant"], "capt": ["captain"],
+            "gov": ["governor"], "sen": ["senator"], "rep": ["representative"], "rev": ["reverend"],
+            "hon": ["honourable", "honorable"], "jr": ["junior"], "sr": ["senior"], "vs": ["versus"],
+            "etc": ["et cetera", "etcetera"], "e g": ["for example"], "i e": ["that is"],
+            "approx": ["approximately"], "ltd": ["limited"], "corp": ["corporation"], "bros": ["brothers"],
+            "&": ["and"],
+        },
+        "number": {
+            "no": ["number"], "nos": ["numbers"], "nr": ["number"], "vol": ["volume"], "fig": ["figure"],
+            "p": ["page"], "pp": ["pages"], "§": ["section", "paragraph"], "c": ["circa"], "ca": ["circa"],
+        },
+    },
+    "de": {
+        "general": {
+            "z b": ["zum beispiel"], "d h": ["das heißt"], "usw": ["und so weiter"], "etc": ["et cetera"],
+            "bzw": ["beziehungsweise"], "ca": ["circa", "zirka"], "vgl": ["vergleiche"],
+            "ggf": ["gegebenenfalls"], "evtl": ["eventuell"], "inkl": ["inklusive"], "insb": ["insbesondere"],
+            "bspw": ["beispielsweise"], "z t": ["zum teil"], "v a": ["vor allem"], "u u": ["unter umständen"],
+            "i d r": ["in der regel"], "s o": ["siehe oben"], "s u": ["siehe unten"],
+            "u ä": ["und ähnliches"], "o ä": ["oder ähnliches"], "v chr": ["vor christus"],
+            "n chr": ["nach christus"], "dr": ["doktor"], "prof": ["professor"], "st": ["sankt"],
+            "mr": ["mister"], "z zt": ["zurzeit"], "u v a": ["und viele andere"], "u v m": ["und vieles mehr"],
+            "u a": ["unter anderem", "und andere"], "&": ["und"],
+            "jh": ["jahrhundert", "jahrhunderts"], "jhd": ["jahrhundert", "jahrhunderts"],
+            "jhdt": ["jahrhundert", "jahrhunderts"], "jhdts": ["jahrhunderts"],
+        },
+        "number": {
+            "nr": ["nummer"], "abs": ["absatz"], "art": ["artikel"], "abb": ["abbildung"], "bd": ["band"],
+            "kap": ["kapitel"], "s": ["seite"], "§": ["paragraf", "paragraph", "paragrafen", "paragraphen"],
+            "§§": ["paragrafen", "paragraphen"],
+        },
+    },
+    "fr": {
+        "general": {
+            "etc": ["et cetera"], "mme": ["madame"], "mmes": ["mesdames"], "mlle": ["mademoiselle"],
+            "mgr": ["monseigneur"], "dr": ["docteur"], "st": ["saint"], "ste": ["sainte"],
+            "av j c": ["avant jésus christ"], "apr j c": ["après jésus christ"], "av": ["avenue"],
+            "bd": ["boulevard"], "env": ["environ"], "p ex": ["par exemple"], "c à d": ["c'est-à-dire"],
+            "jr": ["junior"], "mr": ["mister"], "m": ["monsieur"], "mm": ["messieurs"], "&": ["et"],
+        },
+        "number": {
+            "no": ["numéro"], "n°": ["numéro"], "p": ["page"], "vol": ["volume"], "art": ["article"],
+            "c": ["circa"], "§": ["paragraphe"],
+        },
+    },
+    "es": {
+        "general": {
+            "etc": ["etcétera"], "dr": ["doctor"], "dra": ["doctora"], "sr": ["señor"], "sra": ["señora"],
+            "srta": ["señorita"], "sres": ["señores"], "lic": ["licenciado"], "prof": ["profesor"],
+            "st": ["saint"], "mr": ["míster"], "ud": ["usted"], "uds": ["ustedes"],
+            "a c": ["antes de cristo"], "d c": ["después de cristo"], "ee uu": ["estados unidos"],
+            "aprox": ["aproximadamente"], "av": ["avenida"], "avda": ["avenida"], "jr": ["júnior"],
+            "s n m": ["sobre el nivel del mar"], "msnm": ["metros sobre el nivel del mar"], "&": ["y"],
+        },
+        "number": {
+            "n°": ["número"], "no": ["número"], "núm": ["número"], "pág": ["página"], "vol": ["volumen"],
+            "art": ["artículo"], "cap": ["capítulo"], "c": ["circa"], "§": ["párrafo"], "s": ["siglo"],
+            "sig": ["siglo"],
+        },
+    },
+    "pt": {
+        "general": {
+            "etc": ["etcétera"], "dr": ["doutor"], "dra": ["doutora"], "sr": ["senhor"], "sra": ["senhora"],
+            "srs": ["senhores"], "prof": ["professor"], "st": ["saint"], "mr": ["míster"],
+            "a c": ["antes de cristo"], "d c": ["depois de cristo"], "ltda": ["limitada"], "jr": ["júnior"],
+            "d": ["dom", "dona"], "&": ["e"],
+        },
+        "number": {
+            "n°": ["número"], "no": ["número"], "pág": ["página"], "vol": ["volume"], "art": ["artigo"],
+            "cap": ["capítulo"], "c": ["cerca de"], "§": ["parágrafo"], "séc": ["século"], "sec": ["século"],
+        },
+    },
+    "it": {
+        "general": {
+            "ecc": ["eccetera"], "etc": ["eccetera", "etcetera"], "mons": ["monsignor", "monsignore"],
+            "dott": ["dottor", "dottore"], "sig": ["signor", "signore"], "sig ra": ["signora"],
+            "avv": ["avvocato"], "ing": ["ingegner", "ingegnere"], "prof": ["professor", "professore"],
+            "dr": ["dottor", "dottore"], "st": ["saint"], "mr": ["mister"], "jr": ["junior"],
+            "a c": ["avanti cristo"], "d c": ["dopo cristo"], "s l m": ["sul livello del mare"], "&": ["e"],
+        },
+        "number": {
+            "n": ["numero"], "n°": ["numero"], "no": ["numero"], "nr": ["numero"], "pag": ["pagina"],
+            "vol": ["volume"], "art": ["articolo"], "cap": ["capitolo"], "c": ["circa"], "§": ["paragrafo"],
+            "sec": ["secolo"],
+        },
+    },
+    "ar": {
+        "general": {"م": ["للميلاد", "ميلادي", "ميلادية", "ميلاديا"], "ه": ["للهجرة", "هجري", "هجرية"]},
+        "number": {},
+    },
+    "th": {
+        "general": {"พศ": ["พุทธศักราช"], "คศ": ["คริสต์ศักราช"]},
+        "number": {},
+    },
+    "ru": {
+        "general": {
+            "т е": ["то есть"], "т д": ["так далее"], "т п": ["тому подобное"], "н э": ["нашей эры"],
+            "им": ["имени"], "см": ["смотри"], "&": ["и"],
+        },
+        "number": {"ок": ["около"], "no": ["номер"], "§": ["параграф"]},
+    },
+}
+
+# 前面是这些词时，单个字母 I、V、X 也认作罗马数字（siglo V a. C.、в V веке）
+CENTURY_WORDS = {
+    "es": {"siglo", "siglos", "s"}, "pt": {"século", "séculos", "séc"}, "it": {"secolo", "secoli", "sec"},
+    "fr": {"siècle", "siècles"}, "en": {"century"},
+}
+
+# 罗马数字作君主序号时读法前面的冠词（Henry the Eighth、Wilhelm der Zweite）
+ROMAN_ARTICLES = {"en": ["the"], "de": ["der", "die", "das", "dem", "den", "des"]}
+
+# 英语日期的「the … of」：11 December ↔ the eleventh of December，May 11 ↔ May the eleventh
+EN_MONTHS = [
+    "january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
+    "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+]
+
+# 数词与后缀连写成一个词（семнадцатилетний ↔ 17-летний，hundertjährige ↔ 100-jährige，
+# neunzehnhundertachtziger ↔ 1980er）。decade 表示只在整十的数后拆
+COMPOUND_SUFFIXES = {
+    "ru": {
+        "any": [
+            "летний", "летнего", "летнему", "летним", "летнем", "летняя", "летней", "летнюю", "летнее",
+            "летние", "летних", "летними", "летие", "летия", "летию", "летием", "летии",
+            "процентный", "процентная", "процентное", "процентного", "процентной",
+        ],
+    },
+    "de": {
+        "any": ["jährige", "jährigen", "jähriger", "jähriges", "jährigem", "jährig", "fach", "fache", "fachen"],
+        "decade": ["er", "ern"],
+    },
+}
+
+
 @dataclass
 class Extras:
     """一种语言比对时用的扩展词表，词都已按该语言规范化。"""
@@ -466,7 +815,16 @@ class Extras:
     minute: set = field(default_factory = set)
     half: set = field(default_factory = set)
     conn: set = field(default_factory = set)
+    conn_needs_minute: bool = False                    # 连接词式的时刻必须带「分」类词（波斯语）
     native_letters: str | None = None                  # None 表示不合并变音符号
+    abbr: dict = field(default_factory = dict)         # 缩写写法 → 读法集合
+    abbr_words: dict = field(default_factory = dict)   # 读法 → 读法集合（与 abbr 的集合比较）
+    abbr_number: set = field(default_factory = set)    # 只在后面接数时才换的写法和读法
+    abbr_chars: int = 1
+    roman_articles: list = field(default_factory = list)
+    months: set = field(default_factory = set)
+    compound_any: list = field(default_factory = list)
+    compound_decade: list = field(default_factory = list)
 
 
 def _ids(key) -> frozenset:
@@ -479,7 +837,7 @@ def build_extras(spec) -> Extras:
     ext = Extras()
 
     def register(word: str, origin: str, ids: frozenset) -> None:
-        key = spec.norm(word = word)
+        key = phrase(text = word, spec = spec) if origin == "word" and not spec.scan else spec.norm(word = word)
         if not key:
             return
         old = ext.units.get(key)
@@ -490,7 +848,7 @@ def build_extras(spec) -> Extras:
         ext.units[key] = (origin, ids)
         ext.max_chars = max(ext.max_chars, len(key.replace(" ", "")))
 
-    symbols = dict(SYMBOLS)
+    symbols = {k: v for k, v in SYMBOLS.items() if k not in NOT_SYMBOLS.get(code, set())}
     symbols.update(LANG_SYMBOLS.get(code, {}))
     for word, key in symbols.items():
         register(word = word, origin = "sym", ids = _ids(key = key))
@@ -505,9 +863,35 @@ def build_extras(spec) -> Extras:
     time = TIME.get(code, {})
     for name in ("hour", "hour_sym", "minute", "half", "conn"):
         getattr(ext, name).update(spec.norm(word = w) for w in time.get(name, []))
+    ext.conn_needs_minute = bool(time.get("conn_needs_minute"))
     if code not in KEEP_ALL_LETTERS:
         ext.native_letters = NATIVE_LETTERS.get(code, "")
+    for cls, table in ABBREVIATIONS.get(code, {}).items():
+        for key, words in table.items():
+            norm_key = spec.norm(word = key)
+            readings = frozenset(phrase(text = w, spec = spec) for w in words)
+            ext.abbr[norm_key] = ext.abbr.get(norm_key, frozenset()) | readings
+            for reading in readings:
+                ext.abbr_words[reading] = frozenset({reading})
+            if cls == "number":
+                ext.abbr_number.add(norm_key)
+                ext.abbr_number.update(readings)
+            ext.abbr_chars = max([ext.abbr_chars, len(norm_key)] + [len(r) for r in readings])
+    ext.roman_articles = [phrase(text = w, spec = spec) for w in ROMAN_ARTICLES.get(code, [])]
+    if code == "en":
+        ext.months = {spec.norm(word = w) for w in EN_MONTHS}
+    suffixes = COMPOUND_SUFFIXES.get(code, {})
+    ext.compound_any = sorted((spec.norm(word = w) for w in suffixes.get("any", [])), key = len, reverse = True)
+    ext.compound_decade = sorted((spec.norm(word = w) for w in suffixes.get("decade", [])), key = len, reverse = True)
     return ext
+
+
+def phrase(text: str, spec) -> str:
+    """一段读法切分后的形式（与比较单元中的普通文字一致）：撇号去掉，连字符成为空格。"""
+    from .parse import tokenize
+
+    joiner = "" if spec.scan else " "
+    return joiner.join(t.text for t in tokenize(text = text, spec = spec) if t.kind in ("word", "char"))
 
 
 def fold_latin(text: str, native: str) -> str:

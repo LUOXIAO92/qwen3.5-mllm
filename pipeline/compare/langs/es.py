@@ -57,6 +57,7 @@ def build() -> LangSpec:
         dec_comma = True,
         ordinal_all_parts = True,
         big_compound = True,
+        digits_after_big = True,
     )
     spec.add(words = "cero", morphs = zero())
     for v, words in UNITS.items():

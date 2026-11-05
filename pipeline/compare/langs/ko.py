@@ -6,12 +6,11 @@
 
 汉字词的个位与常见量词、助词同音：「육십일」可以是 61，也可以是 60 加「일」（日），
 「십이」可以是 12，也可以是 10 加助词「이」，「이천구백칠십」可以是 2970，也可以是「이」（这）加 1970。
-读音完全相同，比对时几种切分都尝试（_splits）。
+读音完全相同，比对时几种切分都尝试（_splits）。固有词不作「만」「억」的系数，「두만」是「두」加「만」。
 """
 
-from ..extend import split_variants, word_num
+from ..extend import reparse, word_num
 from ..numerals import LangSpec, add, big, place, zero
-from ..parse import Num, parse_items, tokenize
 
 SINO = {1: "일", 2: "이", 3: "삼", 4: "사", 5: "오", 6: "육", 7: "칠", 8: "팔", 9: "구"}
 SINO_PLACES = {"십": 1, "백": 2, "천": 3}
@@ -28,51 +27,43 @@ _SINO_UNIT_VALUES = {w: v for v, w in SINO.items()}
 _SINO_PLACE_CHARS = set(SINO_PLACES) | set(SINO_BIGS)
 
 
-def _value(text: str, spec) -> int | None:
-    """一段汉字词数词的值；不是单独一个数时返回 None。"""
-    items = parse_items(toks = tokenize(text = text, spec = spec), spec = spec)
-    if len(items) == 1 and isinstance(items[0], Num) and items[0].origin == "word":
-        return items[0].value
-    return None
+# 一个数最多给出几种切分
+_MAX_SPLITS = 6
 
 
 def _splits(num, spec) -> list:
-    """汉字词数的其他切分：末尾的个位单独成数（육십일 = 육십 + 일），开头的个位单独成数（이천구백칠십 = 이 + 천구백칠십）。"""
+    """汉字词数的其他切分，每处切分前后读音不变。
+
+    末尾的个位单独成数（육십일 = 육십 + 일），位值词前的个位单独成数（이천구백칠십 = 이 + 천구백칠십，
+    만이천구백 = 만 + 이 + 천구백），以及这些切分同时进行（이십일 = 이 + 십 + 일）。
+    """
     s = num.surface
-    if len(s) < 2 or "card" not in num.kinds:
+    if len(s) < 2:
         return []
-    out = []
+    choices = []
     if s[-1] in _SINO_UNIT_VALUES and s[-2] in _SINO_PLACE_CHARS:
-        unit = _SINO_UNIT_VALUES[s[-1]]
-        head = word_num(
-            value = num.value - unit,
-            surface = s[:-1],
-            display = s[:-1],
-            kinds = num.kinds,
-        )
-        tail = word_num(
-            value = unit,
-            surface = s[-1],
-            display = s[-1],
-            kinds = num.kinds,
-        )
-        out.append([head, tail])
-    if s[0] in _SINO_UNIT_VALUES and s[1] in _SINO_PLACE_CHARS:
-        rest = _value(text = s[1:], spec = spec)
-        if rest is not None:
-            head = word_num(
-                value = _SINO_UNIT_VALUES[s[0]],
-                surface = s[0],
-                display = s[0],
+        choices.append({len(s) - 1})
+    for p in range(len(s) - 1):
+        if s[p] in _SINO_UNIT_VALUES and s[p + 1] in _SINO_PLACE_CHARS:
+            choices.append({p + 1} if p == 0 else {p, p + 1})
+    if len(choices) > 1:
+        choices.append(set().union(*choices))
+    out = []
+    for cuts in choices[:_MAX_SPLITS]:
+        bounds = [0] + sorted(cuts) + [len(s)]
+        pieces = [s[a:b] for a, b in zip(bounds, bounds[1:])]
+        values = [reparse(text = piece, spec = spec) for piece in pieces]
+        if any(v is None for v in values):
+            continue
+        out.append([
+            word_num(
+                value = value,
+                surface = piece,
+                display = piece,
                 kinds = num.kinds,
             )
-            tail = word_num(
-                value = rest,
-                surface = s[1:],
-                display = s[1:],
-                kinds = num.kinds,
-            )
-            out.append([head, tail])
+            for piece, value in zip(pieces, values)
+        ])
     return out
 
 
@@ -82,10 +73,7 @@ def build() -> LangSpec:
     def splitter(num) -> list:
         return _splits(num = num, spec = spec)
 
-    def variants(items: list) -> list:
-        return split_variants(items = items, splitter = splitter)
-
-    spec.variants = variants
+    spec.splitter = splitter
     spec.add(words = ["영", "공"], morphs = zero())
     for v, w in SINO.items():
         spec.add(words = w, morphs = add(value = v, system = "sino"))
