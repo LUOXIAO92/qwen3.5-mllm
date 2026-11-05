@@ -88,7 +88,7 @@ def check_web_entry(text: str, *, lang: str, spam: bool = False) -> str | None:
             return "too_few_words"
     if n_chars < minimum:
         return "too_short_entry"
-    short_limit = 25 if lang in {"zh", "ja", "ko", "th"} else 60
+    short_limit = 40 if lang in {"zh", "ja", "ko", "th"} else 60
     if _QUESTION_END.search(text) and n_chars < short_limit and len(split_sentences(text, lang = lang)) <= 1:
         return "question_heading"
     if lang in {"zh", "ja"}:

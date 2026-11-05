@@ -85,11 +85,11 @@ def run_one(job: dict) -> str:
         lang = lang,
         exclusion = exclusion,
         identifier = identifier,
-        caps = WEB_CAPS,
+        caps = {**WEB_CAPS, "short": job["cap_short"]},
         seed = job["seed"],
         paragraphs = True,
         options = options,
-        bin_weights = WEB_BIN_WEIGHTS,
+        bin_weights = {**WEB_BIN_WEIGHTS, "short": job["short_weight"]},
         max_per_prefix = 2,
         prefix_len = 14 if lang in {"zh", "ja", "th"} else 24,
         blocklist = blocklist,
@@ -122,6 +122,8 @@ def main() -> None:
     parser.add_argument("--max-per-domain", type = int, default = 40)
     parser.add_argument("--max-records", type = int, default = 0, help = "每路来源最多读取的段落数（泰语切句较慢时用），0 为不限")
     parser.add_argument("--max-mt", type = float, default = 0.2, help = "HPLT：机翻（MT）体裁概率上限；机翻腔偏多的语言（fil、vi、th）用 0.05")
+    parser.add_argument("--cap-short", type = int, default = WEB_CAPS["short"], help = "短档每路来源的候选上限；短档不足的语言（ms）调大")
+    parser.add_argument("--short-weight", type = float, default = WEB_BIN_WEIGHTS["short"], help = "拼段时选短档的权重")
     parser.add_argument("--seed", type = int, default = 0)
     args = parser.parse_args()
 
@@ -140,6 +142,8 @@ def main() -> None:
             "max_per_domain": args.max_per_domain,
             "max_records": args.max_records,
             "max_mt": args.max_mt,
+            "cap_short": args.cap_short,
+            "short_weight": args.short_weight,
         }
         for lang in langs
         for directory in candidate_dirs(args.source)
