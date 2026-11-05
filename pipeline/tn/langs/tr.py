@@ -8,6 +8,7 @@
 时刻：「saat 14:30」「06:30'da」「2.30'a」读 on dört otuz、altı otuzda、iki otuza，整点只读小时（3:00 → üç）；
 冒号写法要求前面有 saat 或后面接后缀，句点写法要求前面有 saat 或后面接后缀；「1:58'lik」这类时长丢弃。
 「2. Dünya Savaşı」「23. Tümen」「II. Dünya Savaşı」在登记的名词前读序数。「-40 derece」读 eksi kırk derece。
+句号后缺少空格（açar.Eğer）时补上空格。
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from functools import lru_cache
 from ..numwords import tr_cardinal, tr_digits, tr_ordinal
 from ..rules import DASHES, Rule, Skip
 from .base import Lang
-from .extras import negative_rule
+from .extras import missing_space_rule, negative_rule
 
 VOWELS = "aeıioöuü"
 BACK = "aıou"
@@ -34,7 +35,7 @@ _CASES = ["", "(y)I", "(y)A", "DA", "DAn", "(n)In", "(y)lA", "DAki", "DIr", "(y)
 # 第三人称领属后的格词尾带 n：sini、sine、sinde、sinden、sinin、sindeki
 _CASES_AFTER_POSSESSIVE = ["", "nI", "nA", "nDA", "nDAn", "nIn", "(y)lA", "nDAki", "DIr", "(y)DI"]
 _TOKEN = re.compile(pattern = r"\([a-zşI]\)|[AID]|[a-zçğıöşü]")
-# 读序数的名词（数字加句点之后）
+# 读序数的名词（数字加句点之后，按词首匹配，包括 Kolorduya、Tümeni 这类带词尾的形式）
 ORDINAL_NOUNS = {
     "Dünya", "Tümen", "Tümeni", "Kolordu", "Kolordusu", "Ordu", "Ordusu", "Alay", "Alayı", "Tugay", "Tugayı",
     "Kafkas", "Lig", "Ligi", "Dönem", "Kuşak", "Filo", "Filosu",
@@ -119,6 +120,8 @@ def with_suffix(spoken: str, suffix: str) -> str | None:
 class Tr(Lang):
     code = "tr"
     point = "virgül"
+    # 小数部分为 1–2 位时按整数读（3,14 → üç virgül on dört）
+    frac_as_number = True
     percent = "yüzde"
     percent_prefix = True
     units = {
@@ -175,6 +178,7 @@ class Tr(Lang):
 
     def extra_rules(self) -> list:
         return [
+            missing_space_rule(left = "a-zçğıöşü", right = "[A-ZÇĞİÖŞÜ][a-zçğıöşü]+"),
             Rule(
                 pattern = re.compile(pattern = r"(?<![\d.,])(?P<num>\d{1,4})\.(?=\s[a-zçğıöşü])"),
                 handle = self.ordinal,
@@ -204,7 +208,7 @@ class Tr(Lang):
             if not n.is_int:
                 return Skip(reason = f"序数写法无法确定「{m.group()}」")
             ordinal = tr_ordinal(n = n.value)
-            ctx.checks[-1] = (ordinal, m.group("num") + "'" + suffix)
+            ctx.checks[-1] = (ordinal, m.group("num"))
             if with_suffix(spoken = spoken, suffix = suffix) != ordinal:
                 return Skip(reason = f"序数后缀与读音不符「{m.group()}」")
             ctx.kind(name = "序数", surface = m.group())
@@ -252,7 +256,7 @@ class Tr(Lang):
 
     def roman_ordinal(self, m, ctx):
         value = _ROMAN.get(m.group("roman"))
-        if value is None or m.group("next") not in ORDINAL_NOUNS:
+        if value is None or not m.group("next").startswith(tuple(ORDINAL_NOUNS)):
             return None
         ctx.kind(name = "序数", surface = m.group().strip())
         return ctx.num(spoken = tr_ordinal(n = value), written = f"{value}.") + " "
@@ -263,7 +267,7 @@ class Tr(Lang):
         return ctx.num(spoken = tr_ordinal(n = n), written = m.group())
 
     def ordinal_before_name(self, m, ctx):
-        if m.group("next") not in ORDINAL_NOUNS:
+        if not m.group("next").startswith(tuple(ORDINAL_NOUNS)):
             return Skip(reason = f"数字后的句点可能表示序数（2. Dünya Savaşı）「{m.group()}」")
         return self.ordinal(m = m, ctx = ctx)
 

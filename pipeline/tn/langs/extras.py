@@ -58,3 +58,20 @@ def long_plain_rule(lang, lookahead: str = r"\s[^\W\d_]") -> Rule:
         pattern = re.compile(pattern = rf"(?<![\w.,٫٬])(?P<num>(?![0٠۰])\d{{5,6}})(?![\d.,٫٬])(?={lookahead})"),
         handle = handle,
     )
+
+
+def missing_space_rule(left: str, right: str, min_left: int = 2) -> Rule:
+    """句号后缺少空格（rồi.Tạm、açar.Eğer、داد.به）：两边都是完整的词时补上空格。
+
+    left、right 是句号前后允许的字符类（正则字符集内容）；拉丁文字要求句号后是大写字母开头的词，
+    避免改动 db.o、google.com 这类写法。
+    """
+
+    def handle(m, ctx):
+        ctx.kind(name = "句号后补空格", surface = m.group())
+        return m.group("a") + ". " + m.group("b")
+
+    return Rule(
+        pattern = re.compile(pattern = rf"(?<![\w.])(?P<a>[{left}]{{{min_left},}})\.(?P<b>{right})"),
+        handle = handle,
+    )
