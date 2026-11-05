@@ -203,6 +203,20 @@ class PlanTests(unittest.TestCase):
         self.assertNotEqual([t["seed"] for t in first], [t["seed"] for t in other])
 
 
+    def test_prefer_builtin(self):
+        self.cfg["prefer_builtin"] = True
+        tasks, _ = build_tasks(cfg = self.cfg, entries = self.entries, voices = self.voices, split = "train")
+        en_a = [task for task in tasks if task["tts_model"] == "tts_a" and task["lang"] == "en"]
+        self.assertTrue(en_a)
+        self.assertTrue(all(task["mode"] == "builtin" for task in en_a))
+        # 没有内置音色可用的语言仍然克隆
+        self.assertTrue(all(task["mode"] == "clone" for task in tasks if task["lang"] == "ja"))
+        # 按语言覆盖：en 关闭优先内置后，会出现克隆
+        self.cfg["langs"]["en"]["prefer_builtin"] = False
+        tasks, _ = build_tasks(cfg = self.cfg, entries = self.entries, voices = self.voices, split = "train")
+        self.assertTrue(any(task["mode"] == "clone" for task in tasks if task["tts_model"] == "tts_a" and task["lang"] == "en"))
+
+
 class RunTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -328,6 +342,32 @@ class RunTests(unittest.TestCase):
             self.assertEqual(self.ws.run(out, command = command).returncode, 0)
         self.assertEqual(before, outputs(out))
         self.assertEqual(outputs(self.full_run("full")), before)
+
+    def test_models_filter_two_processes(self):
+        full = self.full_run("full")
+        out = self.tmp / "two"
+        self.assertEqual(self.ws.run(out, command = "plan").returncode, 0)
+        a = self.ws.run(out, "--models", "tts_a", command = "tts")
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertEqual(list((out / "state" / "synth").iterdir())[0].name, "tts_a")
+        self.assertEqual(len(list((out / "state" / "synth").iterdir())), 1)
+        b = self.ws.run(out, "--models", "tts_b", command = "tts")
+        self.assertEqual(b.returncode, 0, b.stderr)
+        for command, extra in (("length", []), ("asr", []), ("compare", []), ("asr", ["--role", "cross"]), ("compare", []), ("manifest", [])):
+            self.assertEqual(self.ws.run(out, *extra, command = command).returncode, 0)
+        self.assertEqual(outputs(full), outputs(out))
+
+    def test_multiprocess_tts(self):
+        full = self.full_run("full")
+        self.ws.config["tts_models"]["tts_a"]["processes"] = 3
+        self.ws.config_file.write_text(json.dumps(self.ws.config), encoding = "utf-8")
+        multi = self.full_run("multi")
+        self.assertEqual(outputs(full), outputs(multi))
+        # 多进程中途终止后续跑也一致
+        part = self.tmp / "multi_part"
+        self.assertEqual(self.ws.run(part, "--stop-after-calls", "2").returncode, 3)
+        self.assertEqual(self.ws.run(part).returncode, 0)
+        self.assertEqual(outputs(full), outputs(part))
 
     def test_input_format_is_checked(self):
         out = self.tmp / "bad"

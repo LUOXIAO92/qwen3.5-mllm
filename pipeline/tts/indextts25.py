@@ -44,6 +44,7 @@ zh/en/ja 转小写、es 转大写、发音标注解析、日语假名转换不�
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -54,6 +55,9 @@ import soundfile as sf
 import torch
 import torchaudio
 
+from pipeline.text.langs import CHARS_PER_SECOND
+
+MEL_TOKENS_PER_SECOND = 25
 SUPPORTED_LANGS = ("zh", "en", "ja", "es", "ar")
 OUTPUT_SR = 16000
 
@@ -90,6 +94,12 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def max_mel_tokens_for(text: str, lang: str) -> int:
+    """按整段文本估计的朗读时长（语速取该语言平均值）的 2 倍再加 3 秒，乘每秒 25 个 mel token，范围 [100, 1500]。"""
+    seconds = len(text) / CHARS_PER_SECOND.get(lang, 10.0)
+    return max(100, min(1500, int(math.ceil(MEL_TOKENS_PER_SECOND * (2.0 * seconds + 3.0)))))
+
+
 def synthesize(tts, job: dict) -> np.ndarray:
     """合成一条，返回 16 kHz 单声道 float32 波形。"""
     if job["lang"].lower() not in SUPPORTED_LANGS:
@@ -102,6 +112,8 @@ def synthesize(tts, job: dict) -> np.ndarray:
         # 关闭上游的文本规范化：朗读稿已由本项目自行规范化
         text_normalization = False,
         verbose = False,
+        # 按文本长度给每个片段的生成步数设上限，个别片段收不住尾时不会一直生成到默认的 1500
+        max_mel_tokens = max_mel_tokens_for(text = job["text"], lang = job["lang"].lower()),
     )
     if result is None:
         raise RuntimeError("上游没有返回音频")

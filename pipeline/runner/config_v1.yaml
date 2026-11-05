@@ -5,35 +5,52 @@
 seed: 20261104
 
 # 每个封装调用处理多少条（一块），块是续跑的最小单位
-synth_chunk_size: 64
-asr_chunk_size: 256
+synth_chunk_size: 1024
+asr_chunk_size: 4096
+
+# 有内置音色可用时优先用内置音色，其余语言用克隆；可在 langs.<语言>.prefer_builtin 单独覆盖
+prefer_builtin: true
 
 # 没有在 langs.<语言>.sec_per_char 单独配置时使用的「音频秒数 / 非空白字符数」范围 [下限, 上限]
 default_sec_per_char: [0.03, 0.30]
 
 # ---------------------------------------------------------------- TTS 模型
+# 批次依据 #30 在 RTX 5090（32 GB）上的实测（data/T20/bench_table.md；n 条混合语言、按时长排序成批）。选取原则：用时最短，
+# 并且 nvidia-smi 峰值显存不超过约 28 GB（WSL 下超出物理显存会溢出到内存、速度骤降，Whisper 批次 64 的 788 秒就是例子）。
+# 每个模型的「批次—吞吐—峰值显存」：
+#   omnivoice   6、8、10、12 用时相同（81 s/256 条），峰值 12–15 GB；16 106 s、32 165 s、64 188 s（31 GB）
+#   qwen3_tts   克隆：开 expandable_segments，12/16/24 → 172/152/99 s，峰值 12/18/19 GB；builtin：24/32 → 123/121 s，17/24 GB
+#   vieneu      builtin：32/64/128 → 29/18/17 s（195 条），2 GB
+#   voxcpm2、indextts25：逐条合成，批次不影响速度；多进程见各模型注释
+# ASR 批次：qwen3_asr 32 → 69 s/1024 条（22 GB）、64 同速（27 GB）；whisper 32 → 67 s（12 GB）、64 溢出 789 s；typhoon 32（20 GB）、
+#   64 为 31 GB；gigaam 32/64/128 同速；haas_ja 64 与 128 同速；whisper_fa 64（6 GB）；nemotron_farsi 8（23 GB，16 以上超过 26 GB）；jais_asr 8（24 GB）
 # langs：该模型支持的语言；clone：能否用参考片段克隆；needs_ref_text：克隆是否需要参考文本；
 # builtin_langs：内置音色能直接说的语言；aliases：音色库 source_model 里可能出现的别名
 # gpu：false 的封装不经 gpu.lock；env_vars：运行该封装时额外设置的环境变量
 tts_models:
   omnivoice:
+    batch_size: 8   # 批次 8 最快（#30：6、8、10、12 的用时相同，4 与 16 以上更慢），多进程无收益
+    chunk_size: 2048
     env: envs/tts-omnivoice
     module: pipeline.tts.omnivoice
     langs: [zh, en, ja, ko, de, fr, ru, pt, es, it, id, ms, th, vi, fil, ar, tr, fa]
     clone: true
     needs_ref_text: true
     builtin_langs: []
-    batch_size: 16
   voxcpm2:
+    batch_size: 8   # 上游逐条合成；多进程 2 个无收益（#30），批量大小只影响写盘粒度
+    chunk_size: 512
     env: envs/tts-voxcpm2
     module: pipeline.tts.voxcpm2
     langs: [zh, en, ja, ko, de, fr, ru, pt, es, it, id, ms, th, vi, fil, ar, tr]
     clone: true
     needs_ref_text: false
     builtin_langs: []
-    batch_size: 8        # 上游只能逐条合成，批量大小只影响写盘粒度
-    chunk_size: 32
   qwen3_tts:
+    batch_size: 24   # 开 expandable_segments 后批次 24 峰值约 19 GB（不开时 10 就接近 32 GB）
+    chunk_size: 2048
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
     env: envs/tts-qwen3
     module: pipeline.tts.qwen3_tts
     aliases: [qwen3-tts, qwen3-tts-customvoice, qwen3-tts-base]
@@ -41,8 +58,9 @@ tts_models:
     clone: true
     needs_ref_text: true
     builtin_langs: [zh, en, ja, ko, de, fr, ru, pt, es, it]
-    batch_size: 8
   indextts25:
+    batch_size: 4   # 逐条合成；多进程 2 个只快约 15%、显存翻倍，不采用
+    chunk_size: 512
     env: envs/tts-indextts25
     module: pipeline.tts.indextts25
     aliases: [indextts-2.5]
@@ -50,10 +68,10 @@ tts_models:
     clone: true
     needs_ref_text: false
     builtin_langs: []
-    batch_size: 4        # 逐条合成，批量大小只用来把同一参考音频的任务排在一起
-    chunk_size: 32
     args: [--model-dir, "{work_dir}/src/index-tts/checkpoints"]
   vieneu:
+    batch_size: 64   # 批次 64 与 128 用时相同，显存只有 2 GB
+    chunk_size: 2048
     env: envs/tts-vieneu
     module: pipeline.tts.vieneu
     aliases: [vieneu-v3-turbo]
@@ -61,53 +79,53 @@ tts_models:
     clone: true
     needs_ref_text: false
     builtin_langs: [vi]
-    batch_size: 16
   supertonic3:           # 只有内置音色，没有按语言配置权重时不会被抽到
+    batch_size: 16   # CPU，不占 GPU
+    chunk_size: 1024
     env: envs/tts-supertonic3
     module: pipeline.tts.supertonic3
     aliases: [supertonic-3]
     langs: [en, ko, ja, ar, de, es, fr, id, it, pt, ru, tr, vi]
     clone: false
     builtin_langs: [en, ko, ja, ar, de, es, fr, id, it, pt, ru, tr, vi]
-    batch_size: 16
     gpu: false
 
 # ---------------------------------------------------------------- ASR 模型
 asr_models:
   qwen3_asr:
+    batch_size: 32
     env: envs/asr-qwen3
     module: pipeline.asr.qwen3_asr
-    batch_size: 16
   whisper:
+    batch_size: 32
     env: envs/asr-qwen3
     module: pipeline.asr.whisper
-    batch_size: 16
   whisper_fa:
+    batch_size: 64
     env: envs/asr-nemo-fa
     module: pipeline.asr.whisper_fa
-    batch_size: 16
   nemotron_farsi:
+    batch_size: 8
     env: envs/asr-nemo-fa
     module: pipeline.asr.nemotron_farsi
-    batch_size: 16
   gigaam:
+    batch_size: 64
     env: envs/asr-gigaam
     module: pipeline.asr.gigaam
-    batch_size: 16
   haas_ja:
+    batch_size: 64
     env: envs/asr-nemo
     module: pipeline.asr.haas_ja
-    batch_size: 32
     env_vars:
       PYTHONPATH: "{work_dir}/src/Haas-ASR/src"
   typhoon:
+    batch_size: 32
     env: envs/asr-hf
     module: pipeline.asr.typhoon
-    batch_size: 16
   jais_asr:
+    batch_size: 8
     env: envs/asr-hf
     module: pipeline.asr.jais_asr
-    batch_size: 8
 
 # ---------------------------------------------------------------- 按语言
 # tts：可用的 TTS 模型及权重（依据 research/training-data-selection-zh.md 的推荐表）；
@@ -121,52 +139,52 @@ langs:
     cross_asr: whisper
     sec_per_char: [0.07, 0.60]
   en:
-    tts: {omnivoice: 3, qwen3_tts: 2}
+    tts: {omnivoice: 3, qwen3_tts: 2, supertonic3: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.03, 0.22]
   ja:
-    tts: {omnivoice: 3, qwen3_tts: 2}
+    tts: {omnivoice: 3, qwen3_tts: 2, supertonic3: 2}
     asr: haas_ja
     cross_asr: qwen3_asr
     sec_per_char: [0.07, 0.45]
   ko:
-    tts: {qwen3_tts: 3, omnivoice: 2}
+    tts: {qwen3_tts: 3, omnivoice: 2, supertonic3: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.07, 0.45]
   de:
-    tts: {qwen3_tts: 3, omnivoice: 2, voxcpm2: 1}
+    tts: {qwen3_tts: 3, omnivoice: 2, voxcpm2: 1, supertonic3: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.03, 0.30]
   fr:
-    tts: {omnivoice: 3, qwen3_tts: 2}
+    tts: {omnivoice: 3, qwen3_tts: 2, supertonic3: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.03, 0.22]
   ru:
-    tts: {omnivoice: 3, voxcpm2: 2}
+    tts: {omnivoice: 3, voxcpm2: 2, supertonic3: 2}
     asr: gigaam
     cross_asr: qwen3_asr
     sec_per_char: [0.035, 0.20]
   pt:
-    tts: {voxcpm2: 3, qwen3_tts: 2, omnivoice: 1}
+    tts: {voxcpm2: 3, qwen3_tts: 2, omnivoice: 1, supertonic3: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.04, 0.22]
   es:
-    tts: {qwen3_tts: 3, omnivoice: 2, voxcpm2: 1}
+    tts: {qwen3_tts: 3, omnivoice: 2, voxcpm2: 1, supertonic3: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.04, 0.22]
   it:
-    tts: {omnivoice: 3, qwen3_tts: 2, voxcpm2: 1}
+    tts: {omnivoice: 3, qwen3_tts: 2, voxcpm2: 1, supertonic3: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.04, 0.24]
   id:
-    tts: {voxcpm2: 3, omnivoice: 2}
+    tts: {voxcpm2: 3, omnivoice: 2, supertonic3: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.04, 0.24]
@@ -181,7 +199,7 @@ langs:
     cross_asr: qwen3_asr
     sec_per_char: [0.03, 0.18]
   vi:
-    tts: {omnivoice: 3, voxcpm2: 2, vieneu: 2}
+    tts: {omnivoice: 3, voxcpm2: 2, vieneu: 2, supertonic3: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.04, 0.25]
@@ -190,11 +208,11 @@ langs:
     asr: whisper
     sec_per_char: [0.04, 0.26]
   ar:
-    tts: {indextts25: 3, omnivoice: 2}
+    tts: {indextts25: 3, omnivoice: 2, supertonic3: 2}
     asr: jais_asr
     sec_per_char: [0.04, 0.26]
   tr:
-    tts: {voxcpm2: 3, omnivoice: 2}
+    tts: {voxcpm2: 3, omnivoice: 2, supertonic3: 2}
     asr: whisper
     sec_per_char: [0.035, 0.22]
   fa:

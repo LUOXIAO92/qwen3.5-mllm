@@ -225,7 +225,7 @@ def main():
     start = time.time()
     # 按模式分组，组内按文本长度排序，减少批内补齐
     for mode in ("builtin", "clone"):
-        group = sorted((s for s in segments if s["mode"] == mode), key = lambda s: len(s["text"]))
+        group = sorted((s for s in segments if s["mode"] == mode), key = lambda s: len(s["text"]) / CHARS_PER_SECOND.get(s["lang"], 10.0))
         for i in range(0, len(group), args.batch_size):
             batch = group[i : i + args.batch_size]
             try:

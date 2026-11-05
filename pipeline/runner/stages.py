@@ -4,12 +4,14 @@
 重新运行时已有块文件的块直接跳过，没有的块整块重做，所以中途终止后续跑的结果和一次跑完相同。
 """
 
+import fcntl
 import os
 import re
 import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from pipeline.compare import compare
@@ -78,15 +80,16 @@ def run_wrapper(
     args: list,
     log_path: Path,
     progress = None,
+    lock: bool = True,
 ) -> None:
-    """在封装自己的环境里以子进程运行；需要 GPU 的封装经 gpu.lock 排队。"""
+    """在封装自己的环境里以子进程运行；需要 GPU 的封装经 gpu.lock 排队（lock 为假时调用方已持有锁）。"""
     work_dir = Path(work_dir)
     python = backend.get("python") or str(Path(backend["env"]) / "bin" / "python")
     python_path = Path(python)
     if not python_path.is_absolute():
         python_path = work_dir / python_path
     cmd = []
-    if backend.get("gpu", True):
+    if backend.get("gpu", True) and lock:
         cmd += ["flock", str(work_dir / "gpu.lock")]
     cmd += [str(python_path), "-m", backend["module"], *[str(item) for item in args]]
     env = dict(os.environ)
@@ -111,6 +114,23 @@ def run_wrapper(
         raise RunnerError(f"{backend_name} 退出码 {proc.returncode}，日志 {log_path}")
 
 
+class GpuLock:
+    """进程内持有 gpu.lock（flock），用于同一模型的多个子进程共用一次持锁。"""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.handle = None
+
+    def __enter__(self):
+        self.handle = self.path.open(mode = "a")
+        fcntl.flock(self.handle, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        fcntl.flock(self.handle, fcntl.LOCK_UN)
+        self.handle.close()
+
+
 # ---------------------------------------------------------------- TTS
 
 
@@ -121,9 +141,16 @@ def tts_stage(
     work_dir: Path,
     budget: Budget,
     progress = None,
+    models: list | None = None,
 ) -> None:
+    """按 TTS 模型分块合成。models 给出时只跑这些模型（CPU 模型与 GPU 模型可在两个进程里同时跑同一输出目录）。
+
+    配置里 ``processes`` 大于 1 的模型同时开多个封装进程各处理一块；这时整个模型阶段只持一次 gpu.lock。
+    """
     by_model = {}
     for task in tasks:
+        if models and task["tts_model"] not in models:
+            continue
         by_model.setdefault(task["tts_model"], []).append(task)
     for model in sorted(by_model):
         backend = cfg["tts_models"][model]
@@ -133,18 +160,21 @@ def tts_stage(
             layout.synth_dir(model = model) / chunk_name(sample_ids = [row["sample_id"] for row in chunk])
             for chunk in chunks
         ]
+        key = f"synth:{model}"
         if progress is not None:
             progress.start(
-                key = f"synth:{model}",
+                key = key,
                 stage = "synth",
                 total = len(by_model[model]),
                 done = sum(len(chunk) for chunk, target in zip(chunks, targets) if target.exists()),
                 counters = _synth_counters(targets = targets),
             )
-        for chunk, target in zip(chunks, targets):
-            if target.exists():
-                continue
-            budget.consume()
+        pending = [(chunk, target) for chunk, target in zip(chunks, targets) if not target.exists()]
+        processes = int(backend.get("processes", 1))
+        shared_lock = processes > 1 and backend.get("gpu", True)
+
+        def work(item: tuple) -> None:
+            chunk, target = item
             records = _synth_chunk(
                 model = model,
                 backend = backend,
@@ -153,16 +183,62 @@ def tts_stage(
                 layout = layout,
                 work_dir = work_dir,
                 progress = progress,
+                lock = not shared_lock,
             )
             if progress is not None:
                 ok = [rec for rec in records if rec["status"] == "ok"]
                 progress.advance(
-                    key = f"synth:{model}",
+                    key = key,
                     n = len(records),
                     audio_s = sum(rec["duration_s"] or 0 for rec in ok),
                     counters = {"ok": len(ok), "failed": len(records) - len(ok)},
                 )
+
+        if processes <= 1:
+            for item in pending:
+                budget.consume()
+                work(item)
+        else:
+            _run_parallel(
+                items = pending,
+                work = work,
+                workers = processes,
+                budget = budget,
+                lock = GpuLock(path = Path(work_dir) / "gpu.lock") if shared_lock else None,
+            )
     merge_synth(cfg = cfg, layout = layout)
+
+
+def _run_parallel(items: list, work, workers: int, budget: Budget, lock) -> None:
+    """用线程池同时启动多个封装子进程；任何一块失败时等其余块结束后抛出第一个异常。"""
+    if not items:
+        return
+    errors = []
+    futures = []
+    context = lock if lock is not None else _NoLock()
+    with context:
+        with ThreadPoolExecutor(max_workers = workers) as pool:
+            try:
+                for item in items:
+                    budget.consume()
+                    futures.append(pool.submit(work, item))
+            except StopRun as stop:
+                errors.append(stop)
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as error:
+                    errors.append(error)
+    if errors:
+        raise errors[0]
+
+
+class _NoLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
 
 
 def _synth_chunk(
@@ -173,6 +249,7 @@ def _synth_chunk(
     layout: Layout,
     work_dir: Path,
     progress = None,
+    lock: bool = True,
 ) -> list:
     job_dir = layout.work / f"synth-{model}-{target.stem}"
     if job_dir.exists():
@@ -202,6 +279,7 @@ def _synth_chunk(
         ],
         log_path = layout.logs / f"synth-{model}.log",
         progress = progress,
+        lock = lock,
     )
     results = {row["sample_id"]: row for row in read_jsonl(path = out_dir / "results.jsonl")}
     if not results:
@@ -275,6 +353,7 @@ def length_verdict(cfg: dict, task: dict, record: dict) -> str:
 
 def length_stage(cfg: dict, tasks: list, layout: Layout, progress = None) -> None:
     """读取 synth_results.jsonl，给每个合成成功的样本判定时长比例，写出 length_check.jsonl。"""
+    merge_synth(cfg = cfg, layout = layout)
     synth = {row["sample_id"]: row for row in load_checked(path = layout.synth, kind = "synth", hint = "先运行 tts 子命令")}
     ids = {task["sample_id"] for task in tasks}
     missing = ids - set(synth)
@@ -342,6 +421,7 @@ def asr_stage(
     budget: Budget,
     role: str,
     progress = None,
+    models: list | None = None,
 ) -> None:
     """对通过长度检查的样本运行 ASR，写出原始识别结果 asr_<role>.jsonl（不比对）。
 
@@ -354,6 +434,8 @@ def asr_stage(
         results = load_checked(path = layout.asr_results, kind = "asr_results", hint = "先对主 ASR 运行 compare 子命令")
         primary_match = {row["sample_id"]: row["match"] for row in results if row["asr_role"] == "primary"}
     for name, group in sorted(asr_assignments(cfg = cfg, tasks = tasks, role = role).items()):
+        if models and name not in models:
+            continue
         backend = cfg["asr_models"][name]
         chunk_size = backend.get("chunk_size", cfg.get("asr_chunk_size", 256))
         chunks = split_chunks(items = sorted(group, key = lambda row: row["sample_id"]), size = chunk_size)

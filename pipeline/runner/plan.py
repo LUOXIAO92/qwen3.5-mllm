@@ -130,7 +130,11 @@ def build_tasks(cfg: dict, entries: list, voices: list, split: str) -> tuple:
             continue
         rng = random.Random(f"{seed}:{split}:{entry['entry_id']}")
         model = rng.choices(population = candidates, weights = [weights[name] for name in candidates], k = 1)[0]
-        voice, mode = rng.choice(cache[(model, lang)])
+        usable = cache[(model, lang)]
+        prefer = cfg.get("langs", {}).get(lang, {}).get("prefer_builtin", cfg.get("prefer_builtin", False))
+        if prefer and any(mode == "builtin" for _, mode in usable):
+            usable = [pair for pair in usable if pair[1] == "builtin"]
+        voice, mode = rng.choice(usable)
         sample_id = f"{split}-{entry['entry_id']}"
         task = {
             "sample_id": sample_id,
