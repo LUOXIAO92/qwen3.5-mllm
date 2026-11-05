@@ -110,6 +110,8 @@ asr_models:
     module: pipeline.asr.whisper_fa
   nemotron_farsi:
     batch_size: 8
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True   # #22 ar：Jais 最后一批长音频时显存到 32 GB
     env: envs/asr-nemo-fa
     module: pipeline.asr.nemotron_farsi
   gigaam:
@@ -124,10 +126,14 @@ asr_models:
       PYTHONPATH: "{work_dir}/src/Haas-ASR/src"
   typhoon:
     batch_size: 32
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True   # #22 ar：Jais 最后一批长音频时显存到 32 GB
     env: envs/asr-hf
     module: pipeline.asr.typhoon
   jais_asr:
     batch_size: 8
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True   # #22 ar：Jais 最后一批长音频时显存到 32 GB
     env: envs/asr-hf
     module: pipeline.asr.jais_asr
 
