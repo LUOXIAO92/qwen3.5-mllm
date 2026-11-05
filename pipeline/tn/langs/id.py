@@ -1,10 +1,12 @@
 """印尼语：数词不变形，基数、年份、日期都按数值读；千分位为「.」，小数点为「,」。
 
-- 「ke-21」读 kedua puluh satu；「1970-an」「70-an」读 seribu sembilan ratus tujuh puluhan、tujuh puluhan。
+- 「ke-21」读 kedua puluh satu；「1970-an」「70-an」「1980an」读 seribu sembilan ratus tujuh puluhan、tujuh puluhan 等。
+- 马来语「16hb Julai」读 enam belas haribulan Julai。
 - 时刻：「pukul 17.30」「pukul 2:30」读 pukul tujuh belas tiga puluh、pukul dua tiga puluh，整点只读小时；
   没有 pukul、jam 时，后面要有 pagi、siang、sore、malam 或 WIB 等时区。分钟为 01–09 的写法丢弃。
 - 单独的「°」读 derajat；「-10 derajat」读 minus sepuluh derajat。
 - 不带千分位的 5–6 位数（10000 orang）后接文字时按数值读。
+- hubungi、telepon、nomor 后的数字可能逐位读，丢弃。
 
 马来语（ms.py）沿用这里的规则，只换数词和单位的词。
 """
@@ -59,8 +61,13 @@ class Id(Lang):
                 ),
                 handle = self.time,
             ),
+            Rule(
+                pattern = re.compile(pattern = r"\b(?:[Hh]ubungi|[Tt]elepon|[Tt]elefon|[Mm]enelepon|[Nn]omor|[Nn]ombor|[Tt]elp\.?)\s(?P<num>\d+)"),
+                handle = lambda m, ctx: Skip(reason = f"电话号码、编号的读法（逐位或按数值）不确定「{m.group()}」"),
+            ),
             Rule(pattern = re.compile(pattern = r"(?<![\w-])ke-(?P<num>\d{1,3})(?!\d|[.,]\d)"), handle = self.ordinal),
-            Rule(pattern = re.compile(pattern = r"(?<![\w.,-])(?P<num>\d{2,4})-an(?![\w-])"), handle = self.decade),
+            Rule(pattern = re.compile(pattern = r"(?<![\w.,-])(?P<num>\d{2,4})-?an(?![\w-])"), handle = self.decade),
+            Rule(pattern = re.compile(pattern = r"(?<![\w.,])(?P<num>\d{1,2})\s?hb(?![\w])"), handle = self.haribulan),
             long_plain_rule(lang = self),
         ]
 
@@ -84,6 +91,14 @@ class Id(Lang):
             return Skip(reason = f"序数写法无法确定「{m.group()}」")
         ctx.kind(name = "序数", surface = m.group())
         return ctx.num(spoken = "ke" + self.card(n = n), written = m.group())
+
+    def haribulan(self, m, ctx):
+        """马来语「16hb Julai」：hb 是 haribulan 的缩写。"""
+        n = int(m.group("num"))
+        if self.code != "ms" or not 1 <= n <= 31 or m.group("num").startswith("0"):
+            return Skip(reason = f"日期写法无法确定「{m.group()}」")
+        ctx.kind(name = "日期", surface = m.group())
+        return ctx.num(spoken = self.card(n = n), written = m.group("num")) + " haribulan"
 
     def decade(self, m, ctx):
         n = int(m.group("num"))

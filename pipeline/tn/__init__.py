@@ -49,10 +49,15 @@ tn_status（unchanged、normalized、dropped）和 tn_note（改写或丢弃的�
 - fr、es、pt、it：基数、年份、「1er octobre」「11 de mayo de 2025」日期、序数（2e、3º、36ª）、单位、货币；
   随名词变性的数（un/une、doscientos/doscientas、dois/duas）只在确定为阳性时改写。
 - ru：只改写「2008 года」「в 1950-х годах」这类后接 год 的年份，和支配属格的词之后、复数属格名词之前的基数。
-- id、ms、th、vi、tr、fa：数词不变形，基数、年份、日期按数值读；id/ms 的 ke-21，vi 的 thứ nhất、tháng tư，
-  tr 的序数（4. sınıf）和「%25」，fa 日期中的序数（دوازدهم مرداد）。
-- ar：只改写 عام、سنة、في、منذ 之后的年份（属格，ألفين وخمسة وعشرين），其余丢弃。
-- fil：他加禄语、西班牙语、英语三套数词随语境选用，含数字的条目全部丢弃。
+- id、ms、th、vi、tr、fa：数词不变形，基数、年份、日期按数值读。id/ms：ke-21、1970-an、pukul 17.30、
+  RM50、-10 derajat；th：14.30 น.、พ.ศ. 2500、99.50 บาท、句末误加的句点；vi：thứ nhất、tháng tư、
+  lúc 6:30（sáu giờ ba mươi phút）、km 等单位、-10°C；tr：撇号后缀按元音和谐接到读法上（2006'da → iki bin
+  altıda）、saat 14:30、序数（4. sınıf、2. Dünya Savaşı）、「%25」；fa：日期中的序数（دوازدهم مرداد）、15ام、
+  14ساله、٪۱۰、ساعت 2:30。共用的负温度、5–6 位数规则在 langs/extras.py。
+- ar：按被数名词的性（名词表）和数词的格（介词、支配属格的名词、及物动词之后）选择词形，性或格无法确定且
+  影响词形时丢弃；年份、日期、百分数、单位、货币，以及 م、هـ 纪元标记。
+- fil：按 FLEURS 朗读者的习惯用他加禄语数词（年份 isang libo siyam na raan at animnapu't anim、ika-18 →
+  ikalabingwalo），修饰名词时加连接成分 -ng/na；「alas 6」用西班牙语来源数词（alas sais）；小数、0、分钟丢弃。
 
 依赖与环境
 ==========

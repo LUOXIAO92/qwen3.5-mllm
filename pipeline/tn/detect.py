@@ -50,10 +50,10 @@ _FR_ROMAN_ORDINAL = re.compile(pattern = r"(?<!\w)(?P<roman>[IVXLCDM]+)(?:e|er|r
 _TH_ABBREV = re.compile(pattern = f"[{chr(0x0E01)}-{chr(0x0E4E)}]\\.|{chr(0x0E2F)}")
 # 阿拉伯文、波斯文：字母后接 tatweel（U+0640，هـ、كـم，多用于缩写，偶尔用于拉长字形）、单个字母加句点（د.、م.），
 # 以及单独成词的 م、ه（公历、伊斯兰历年份标记，1887 م）。后面紧跟元音符号的 م、ه 是词首字母（مُكسوة、هُناك），
-# 不算单独成词
+# 与零宽不连字相邻的是词的一部分（انداز‌ه‌ی），都不算单独成词
 _AR_LETTER = f"{chr(0x0620)}-{chr(0x064A)}{chr(0x066E)}-{chr(0x06D3)}{chr(0x06FA)}-{chr(0x06FF)}"
 _AR_ABBREV = re.compile(
-    pattern = rf"[{_AR_LETTER}]{chr(0x0640)}+[{_AR_LETTER}]*|(?<![\w])[{_AR_LETTER}]\.|(?<![\w])[مه](?![\w\u064B-\u065F\u0670])",
+    pattern = rf"[{_AR_LETTER}]{chr(0x0640)}+[{_AR_LETTER}]*|(?<![\w])[{_AR_LETTER}]\.|(?<![\w\u200c])[مه](?![\w\u064B-\u065F\u0670\u200c])",
 )
 
 # 带句点的常见缩写（区分大小写，按整词匹配）。只收录不会和普通词混淆的写法，

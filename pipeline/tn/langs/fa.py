@@ -6,11 +6,12 @@
 - 日期中的日读序数（12 مرداد → دوازدهم مرداد）。
 - 数字直接接序数后缀：「15ام」「20امین」「3م」读 پانزدهم、بیستمین、سوم。
 - 数字直接接 ساله、سالگی（14ساله、90سالگی，也包括用连字符相连的 14-ساله）读 چهارده‌ساله、نود‌سالگی（数词与后缀之间
-  用零宽不连字）。其余与文字直接相连的数字丢弃。
+  用零宽不连字）。数字与后面的词漏了空格（۴هزار、۳ماه）、或 سال、بر、از 等与后面的数字漏了空格（سال۱۹۶۵）时补上
+  空格；其余与文字直接相连的数字丢弃。
 - 百分号在数字前（٪۱۰，波斯语文本常见的录入顺序）或后都读 ده درصد。
 - 时刻「ساعت 2:30」「ساعت 13:00」读 ساعت دو و سی دقیقه、ساعت سیزده；要求前面有 ساعت。
 - 不带千分位的 5–6 位数（۱۰۰۰۰ راه）后接文字时按数值读；负数只改写温度（-5 درجه → منفی پنج درجه）。
-- 词中用于拉长字形的 tatweel（فـقط）删去；单独的 هـ 等缩写仍丢弃。
+- 词中用于拉长字形的 tatweel（فـقط）删去；单独的 هـ 等缩写仍丢弃。句号后缺少空格（داد.به）时补上空格。
 """
 
 from __future__ import annotations
@@ -20,15 +21,22 @@ import re
 from ..numwords import fa_cardinal, fa_digits
 from ..rules import DASHES, Rule, Skip, alternation
 from .base import Lang
-from .extras import long_plain_rule, negative_rule
+from .extras import long_plain_rule, missing_space_rule, negative_rule
 
 ZWNJ = chr(0x200C)
 TATWEEL = chr(0x0640)
 ARABIC_LETTERS = f"{chr(0x0620)}-{chr(0x063F)}{chr(0x0641)}-{chr(0x064A)}{chr(0x066E)}-{chr(0x06D3)}{chr(0x06FA)}-{chr(0x06FF)}"
+# 含 tatweel 的整个词（جميــع、سـعادتـمـند）：词首前不是字母，tatweel 后面还有字母（不含 هـ、بـ 这类缩写和介词）
+TATWEEL_WORD = (
+    rf"(?<![\w\u0640\u064B-\u0652])(?=[{ARABIC_LETTERS}\u0640\u064B-\u0652]*\u0640+[{ARABIC_LETTERS}])"
+    rf"[{ARABIC_LETTERS}\u0640\u064B-\u0652]+"
+)
 MONTHS = (
     "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند",
     "ژانویه", "فوریه", "مارس", "آوریل", "مه", "ژوئن", "ژوئیه", "اوت", "سپتامبر", "اکتبر", "نوامبر", "دسامبر",
 )
+# 后面紧跟数字（漏了空格）时可以补上空格的词
+GLUED_BEFORE = "سال|بر|از|در|تا|با|به|حدود|ساعت|ماه|روز"
 # 数字后直接相连、读作「数词 + 后缀」的词（14ساله → چهارده‌ساله）
 AGE_SUFFIXES = ("سالگی", "ساله")
 
@@ -88,10 +96,21 @@ class Fa(Lang):
                 handle = self.time,
             ),
             Rule(
-                pattern = re.compile(pattern = rf"[{ARABIC_LETTERS}]+{TATWEEL}+[{ARABIC_LETTERS}]+"),
+                pattern = re.compile(pattern = TATWEEL_WORD),
                 handle = self.tatweel,
             ),
             long_plain_rule(lang = self),
+            missing_space_rule(left = ARABIC_LETTERS, right = rf"[{ARABIC_LETTERS}]{{2,}}"),
+            # 数字与后面的词之间漏了空格（۴هزار、۳ماه、۱۲طبقه）：读出数字并补空格
+            Rule(
+                pattern = re.compile(pattern = rf"(?<![\d.,٫٬\w])(?P<num>{self.num})(?P<word>[{ARABIC_LETTERS}]{{2,}})"),
+                handle = self.glued_after,
+            ),
+            # 常见的介词、名词与后面的数字之间漏了空格（سال۱۹۶۵、بر2）
+            Rule(
+                pattern = re.compile(pattern = rf"(?<![\w])(?P<word>{GLUED_BEFORE})(?P<num>\d+(?:[٫٬.,]\d+)*)(?![\d\w])"),
+                handle = self.glued_before,
+            ),
             Rule(
                 pattern = re.compile(pattern = rf"[{ARABIC_LETTERS}]\d+|\d+[{ARABIC_LETTERS}]"),
                 handle = lambda m, ctx: Skip(reason = f"数字与文字直接相连「{m.group()}」"),
@@ -142,6 +161,26 @@ class Fa(Lang):
             spoken += " و " + ctx.num(spoken = self.card(n = mm), written = m.group("m")) + " دقیقه"
         ctx.kind(name = "时刻", surface = m.group())
         return m.group("word") + spoken
+
+    def _say_written(self, ctx, written: str):
+        n = self.parse(written = written)
+        if n is None:
+            return Skip(reason = f"数字写法无法确定「{written}」")
+        return self.say(n = n, ctx = ctx)
+
+    def glued_after(self, m, ctx):
+        spoken = self._say_written(ctx = ctx, written = m.group("num"))
+        if isinstance(spoken, Skip):
+            return spoken
+        ctx.kind(name = "数字后补空格", surface = m.group())
+        return spoken + " " + m.group("word")
+
+    def glued_before(self, m, ctx):
+        spoken = self._say_written(ctx = ctx, written = m.group("num"))
+        if isinstance(spoken, Skip):
+            return spoken
+        ctx.kind(name = "数字前补空格", surface = m.group())
+        return m.group("word") + " " + spoken
 
     def tatweel(self, m, ctx):
         ctx.kind(name = "删去拉长符", surface = m.group())

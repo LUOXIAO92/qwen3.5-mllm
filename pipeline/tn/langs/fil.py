@@ -14,6 +14,7 @@ sampung libong taon（10,000），序数读作 ikalabingwalong siglo（ika-18）
   年份语境时不加。
 - 序数：「ika-18」读 ikalabingwalo，「ika-2」「ika-3」读 ikalawa、ikatlo，后接名词时同样加连接成分；ika-1 丢弃。
 - 百分数：「70%」读 pitumpung porsiyento。
+- 缩写「atbp.」读 at iba pa（FLEURS 朗读者同样这样读）。
 - 丢弃：小数、时刻（2:30）、AD/BC 纪年、0、序数 100 以上。
 """
 
@@ -21,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-from ..rules import Rule, Skip
+from ..rules import Number, Rule, Skip
 from .base import Lang
 
 UNITS = ["", "isa", "dalawa", "tatlo", "apat", "lima", "anim", "pito", "walo", "siyam"]
@@ -39,7 +40,7 @@ MONTHS = (
     "Disyembre", "Septiyembre", "Setiyembre", "Febrero",
 )
 # 前面是这些词时，数字是年份，读法后不加连接成分
-YEAR_BEFORE = {"noong", "Noong", "taong", "Taong", "nitong", "dekada", "siglong", "mula", "hanggang", "simula"} | set(MONTHS)
+YEAR_BEFORE = {"noong", "Noong", "taong", "Taong", "dekada", "dekadang", "siglo", "siglong"} | set(MONTHS)
 # 后面是这些词时，数词后不加连接成分
 FUNCTION_WORDS = {
     "sa", "ng", "nang", "at", "ay", "o", "na", "ang", "si", "ni", "kay", "para", "mula", "hanggang", "noong", "pa",
@@ -128,10 +129,34 @@ class Fil(Lang):
                 handle = self.spanish_hour,
             ),
             Rule(
+                pattern = re.compile(pattern = r"(?<![\w.])atbp\.(?!\w)"),
+                handle = self.atbp,
+            ),
+            Rule(
+                pattern = re.compile(pattern = r"(?<![\w.,])(?!0)\d{5,6}(?![\d.,])(?=\s[^\W\d_])"),
+                handle = self.long_plain,
+            ),
+            Rule(
                 pattern = re.compile(pattern = rf"(?P<num>{self.num})\s?(?:AD|BC|A\.D\.|B\.C\.|CE|BCE)(?!\w)"),
                 handle = lambda m, ctx: Skip(reason = f"纪元标记的读法不确定「{m.group()}」"),
             ),
         ]
+
+    def long_plain(self, m, ctx):
+        """不带千分位的 5–6 位数后接文字（10000 yen）：按数量读。"""
+        n = Number(written = m.group(), value = int(m.group()), frac = None, int_digits = m.group(), grouped = False)
+        out = self.cardinal(m = m, ctx = ctx, n = n)
+        if isinstance(out, str):
+            ctx.kind(name = "基数", surface = m.group())
+        return out
+
+    def atbp(self, m, ctx):
+        ctx.kind(name = "缩写", surface = m.group())
+        # 缩写的句点同时是句号时保留句号
+        rest = ctx.text[m.end():]
+        if not rest.strip() or re.match(pattern = r"\s+[A-Z\"“]", string = rest):
+            return "at iba pa."
+        return "at iba pa"
 
     def needs_linker(self, ctx, start: int, end: int) -> bool:
         """数词后面是名词等实词时加连接成分。"""

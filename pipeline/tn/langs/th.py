@@ -6,8 +6,9 @@
 - 纪年：「พ.ศ. 2500」「ค.ศ.1993」读 พุทธศักราช、คริสต์ศักราช 加年份。
 - 金额：「99.50 บาท」读 เก้าสิบเก้าบาทห้าสิบสตางค์。
 - 「-10 องศา」读 ลบสิบองศา。
-- 句末误加的句点（ได้. 、ครับ. ）：泰语不用句点断句，句点前是含元音符号的整词、后面是空白或文末时删去句点；
-  单个辅音加句点（จอมพล ป.）、不含元音符号的缩写（รพ.、กสพท.）和字母名（เอส.）仍按缩写丢弃。
+- 句末误加的句点（ได้. 、ครับ. ）：泰语不用句点断句，句点前的词至少三个字符、末三个字符中有元音符号、后面是
+  空白或文末时删去句点；单个辅音加句点（จอมพล ป.）、末尾不含元音符号的缩写（รพ.、ดร.、กสพท.）和字母名（เอส.）
+  仍按缩写丢弃。
 """
 
 from __future__ import annotations
@@ -110,7 +111,8 @@ class Th(Lang):
         start = m.start()
         if start > 0 and not ctx.text[start - 1].isspace():
             return None
-        if len(word) < 3 or word in LETTER_NAMES or not (set(word) & THAI_MARKS):
+        # 句点前最后一个音节（末三个字符）不含元音符号时可能是缩写（ดร.、นพ.、กสพท.）
+        if len(word) < 3 or word in LETTER_NAMES or not (set(word[-3:]) & THAI_MARKS):
             return None
         ctx.kind(name = "句末句点", surface = word[-1] + ".")
         return word
