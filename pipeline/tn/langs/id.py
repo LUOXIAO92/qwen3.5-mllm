@@ -9,6 +9,7 @@
 - hubungi、telepon、nomor 后的数字可能逐位读，丢弃。
 - 「Rp 893 M」「Rp 5 jt」读 delapan ratus sembilan puluh tiga miliar rupiah、lima juta rupiah（M = miliar、jt = juta、
   rb = ribu、T = triliun）；金额和价格结尾的「,-」「,00」不读；后面没有金额的「Rp」、不带分隔符的「Jam 1005」丢弃。
+- 「RM10 Juta」「$5 juta」读 sepuluh juta ringgit、lima juta dolar：数量级词（大小写不限）读在货币名前。
 
 马来语（ms.py）沿用这里的规则，只换数词和单位的词。
 """
@@ -33,6 +34,8 @@ ADJACENT_NUMERALS = (
     "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "lapan", "sembilan", "sepuluh", "sebelas",
     "seratus", "puluh", "belas", "ratus",
 )
+# 货币符号后可以出现的数量级词（两种语言的写法都收，读时按原文的词、改成小写）
+SCALE_WORDS = "ribu|juta|bilion|billion|miliar|milyar|trilion|triliun"
 TIME_WORDS = ("pagi", "siang", "sore", "petang", "malam", "WIB", "WITA", "WIT")
 
 
@@ -82,6 +85,14 @@ class Id(Lang):
                 ),
                 handle = self.rupiah,
             ),
+            # 「RM10 Juta」「$5 juta」「RM1.5 bilion」：货币符号后的数量级词（大小写不限）读在货币名前
+            Rule(
+                pattern = re.compile(
+                    pattern = rf"(?<![A-Za-z])(?P<cur>RM|US\$|\$|€)\s?(?P<num>{self.num_bare})\s?(?P<scale>{SCALE_WORDS})(?![\w])",
+                    flags = re.IGNORECASE,
+                ),
+                handle = self.currency_scale,
+            ),
             Rule(
                 pattern = re.compile(pattern = r"(?<![A-Za-z])Rp\.?(?![\w])"),
                 handle = lambda m, ctx: Skip(reason = f"货币符号后没有金额「{m.group()}」"),
@@ -125,6 +136,22 @@ class Id(Lang):
         if after == "rupiah":
             return self.join(spoken, scale)
         return self.join(spoken, scale, "rupiah")
+
+    def currency_scale(self, m, ctx):
+        n = self.parse(written = m.group("num"))
+        if n is None:
+            return Skip(reason = f"金额写法无法确定「{m.group()}」")
+        cur = m.group("cur").upper()
+        names = {"RM": "ringgit", "US$": "dolar Amerika", "$": "dolar", "€": "euro"}
+        spoken = self.say(n = n, ctx = ctx)
+        if isinstance(spoken, Skip):
+            return spoken
+        name = names[cur]
+        # 原文已写出货币名（RM10 juta ringgit）时不再加
+        if word_after(text = ctx.text, end = m.end()).lower() == name.split()[0]:
+            name = ""
+        ctx.kind(name = "货币", surface = m.group())
+        return self.join(spoken, m.group("scale").lower(), name)
 
     def price_dash(self, m, ctx):
         n = self.parse(written = m.group("num"))
