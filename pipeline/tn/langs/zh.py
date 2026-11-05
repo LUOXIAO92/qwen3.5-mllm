@@ -46,6 +46,12 @@ MEASURE_AFTER = tuple(w for w in LIANG_AFTER if w not in ("号", "楼")) + (
 # 不带「年」的 1000–2099 只在后面是真正的量词时按数值读；后面是「至」「左右」等时可能是年份
 RANGE_WORDS = ("至", "到", "左右", "以上", "以下", "以内", "上下", "强", "弱")
 FOUR_DIGIT_AFTER = tuple(w for w in MEASURE_AFTER if w not in RANGE_WORDS)
+# 以量词开头、其实是另一个词的写法（国窖1573所属、2000家族）：后面是这些词时不算量词
+NOT_MEASURE = (
+    "所属", "所有", "所以", "所在", "所谓", "所示", "所述", "所得", "所需", "所用", "所提", "家族", "家庭", "人民",
+    "名称", "名字", "名单", "台湾", "台北", "口号", "头条", "首都", "首次", "首届", "部分", "部门", "部长", "项目",
+    "条件", "条例", "条约", "场所", "种类", "号称", "下来", "下去", "对于", "对此", "回到", "回来", "间隔", "支持",
+)
 # 后面是这些词时，整百的「N年」可能表示年数
 SPAN_AFTER = ("前", "后", "間", "间", "多", "来", "之久", "历史", "左右", "以上")
 # 前面是这些词时，整百的「1500年」「2000年」可能表示年数
@@ -243,6 +249,8 @@ class Zh(Lang):
         text, start, end = ctx.text, m.start(), m.end()
         after = text[end:]
         ordinal = text[:start].endswith("第")
+        if n.is_int and len(n.int_digits) >= 3 and after.lstrip().startswith(NOT_MEASURE):
+            return Skip(reason = f"数字后面不是量词，可能是编号「{m.group()}{after.lstrip()[:2]}」")
         if n.is_int and not n.grouped and 1000 <= n.value <= 2099 and not ordinal:
             if not after.lstrip().startswith(FOUR_DIGIT_AFTER):
                 # 《我的1919》：不带「年」的四位数可能是年份（逐位读）也可能是数量

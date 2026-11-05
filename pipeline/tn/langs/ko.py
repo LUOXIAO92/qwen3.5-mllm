@@ -117,7 +117,8 @@ class Ko(Lang):
                 pattern = re.compile(pattern = r"(?P<pre>[(（][가-힣]{1,4}\s)(?P<num>\d{1,3})(?=[)）])"),
                 handle = self.reign_year,
             ),
-            Rule(pattern = re.compile(pattern = rf"(?<=제)(?P<sp>\s?)(?P<num>{num})"), handle = self.ordinal_je),
+            # 「제」必须在词首：실제、문제、경제 后面的数不是序数
+            Rule(pattern = re.compile(pattern = rf"(?<![가-힣])제(?P<sp>\s?)(?P<num>{num})"), handle = self.ordinal_je),
             Rule(
                 # 「2030세대」「4050세대」：两个年龄段并写，逐位读（이공삼공）
                 pattern = re.compile(pattern = r"(?<!\d)\d{4}(?=\s?세대)"),
@@ -171,8 +172,8 @@ class Ko(Lang):
     def reign_year(self, m, ctx):
         """「1884년(고종 21)」：括号里年号后的年数，用汉字词读。"""
         n = self.parse(written = m.group("num"))
-        if n is None:
-            return Skip(reason = f"数字写法无法确定「{m.group()}」")
+        if n is None or not n.is_int or n.value == 0:
+            return Skip(reason = f"括号里的数读法不确定「{m.group()}」")
         out = self.sino(n = n, ctx = ctx, kind = "年数", surface = m.group().lstrip("(（"))
         return out if isinstance(out, Skip) else m.group("pre") + out
 
@@ -180,9 +181,9 @@ class Ko(Lang):
         """「제56회」「제2공화국」：제 后面的序数用汉字词。"""
         n = self.parse(written = m.group("num"))
         if n is None or not n.is_int:
-            return Skip(reason = f"数字写法无法确定「제{m.group()}」")
-        out = self.sino(n = n, ctx = ctx, kind = "序数", surface = "제" + m.group())
-        return out if isinstance(out, Skip) else m.group("sp") + out
+            return Skip(reason = f"数字写法无法确定「{m.group()}」")
+        out = self.sino(n = n, ctx = ctx, kind = "序数", surface = m.group())
+        return out if isinstance(out, Skip) else "제" + m.group("sp") + out
 
     def big_number(self, m, ctx):
         """「1억 5천만」「4만」「2천」：带만、억、조、천、백的数，按韩语的四位分组算出数值，用汉字词读。
