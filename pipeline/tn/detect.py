@@ -32,9 +32,9 @@ _NUMERIC_CATEGORIES = {"Nd", "No", "Nl"}
 _NOT_NUMERIC = {"〇"}
 
 # 符号字符：货币（Sc）、数学符号（Sm）、其他符号（So，含 °、℃、№、表情符号），以及下列标点类符号
-# 和序数标记 º、ª（3º、36ª）。
+# 和序数标记 º、ª（3º、36ª）；全角的 ％＃＆＠＊、注释符 ※ 和角分符号 ′″ 也算符号。
 _SYMBOL_CATEGORIES = {"Sc", "Sm", "So"}
-_SYMBOL_CHARS = set("%‰‱#&@§¶*٪ºª")
+_SYMBOL_CHARS = set("%‰‱#&@§¶*٪ºª％＃＆＠＊※′″")
 
 # 中间带点的缩写：e.g.、z.B.、U.S.、TP.HCM、ق.م、Rev.W（每段 1–4 个字母）
 _DOTTED = re.compile(pattern = r"(?<![\w.])[^\W\d_]{1,4}(?:\.[^\W\d_]{1,4})+\.?(?!\w)")
