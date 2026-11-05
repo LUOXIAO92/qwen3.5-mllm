@@ -40,14 +40,14 @@ def candidate_dirs(source: str) -> list[str]:
     return {"fineweb2hq": ["fw2hq"], "fineweb-edu": ["fwedu"], "wikinews": ["wikinews"]}[source]
 
 
-def make_reader(*, source: str, directory: str, lang: str, raw_root: Path):
+def make_reader(*, source: str, directory: str, lang: str, raw_root: Path, max_mt: float = 0.2):
     """返回 (读取函数, 是否可用)。"""
     if source == "hplt":
         code = HPLT_CODES[lang]
         files = web.list_files(raw_root / "HPLT" / "HPLT3.0" / code / "*.jsonl.zst")
         genre = directory.split("_", 1)[1]
         glotlid = code  # HPLT 自己的语言代码（中文为 cmn_Hans，波斯语为 pes_Arab）
-        return (lambda: web.read_hplt(files = files, lang = lang, genre = genre, glotlid_code = glotlid)), bool(files)
+        return (lambda: web.read_hplt(files = files, lang = lang, genre = genre, glotlid_code = glotlid, max_mt = max_mt)), bool(files)
     if source == "fineweb2hq":
         if lang not in FINEWEB2_CONFIGS:
             return None, False
@@ -69,7 +69,7 @@ def make_reader(*, source: str, directory: str, lang: str, raw_root: Path):
 def run_one(job: dict) -> str:
     """一个 (语言, 候选目录) 任务：读取、过滤、抽样、语言检测，写出候选文件。"""
     lang, source, directory = job["lang"], job["source"], job["directory"]
-    reader, available = make_reader(source = source, directory = directory, lang = lang, raw_root = Path(job["raw_root"]))
+    reader, available = make_reader(source = source, directory = directory, lang = lang, raw_root = Path(job["raw_root"]), max_mt = job["max_mt"])
     if not available:
         return f"[{lang}] {directory}: 没有原始数据，跳过"
     identifier = LangIdentifier(model_path = job["langid_model"])
@@ -121,6 +121,7 @@ def main() -> None:
     parser.add_argument("--max-per-doc", type = int, default = 4)
     parser.add_argument("--max-per-domain", type = int, default = 40)
     parser.add_argument("--max-records", type = int, default = 0, help = "每路来源最多读取的段落数（泰语切句较慢时用），0 为不限")
+    parser.add_argument("--max-mt", type = float, default = 0.2, help = "HPLT：机翻（MT）体裁概率上限；机翻腔偏多的语言（fil、vi、th）用 0.05")
     parser.add_argument("--seed", type = int, default = 0)
     args = parser.parse_args()
 
@@ -138,6 +139,7 @@ def main() -> None:
             "max_per_doc": args.max_per_doc,
             "max_per_domain": args.max_per_domain,
             "max_records": args.max_records,
+            "max_mt": args.max_mt,
         }
         for lang in langs
         for directory in candidate_dirs(args.source)
