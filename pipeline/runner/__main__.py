@@ -50,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--langs", nargs = "+", default = None, help = "plan：只处理这些语言")
     parser.add_argument("--limit-per-lang", type = int, default = None, help = "plan：每种语言最多取多少条（按 entry_id 排序取前面的）")
     parser.add_argument("--fallback-original", action = "store_true", help = "plan：条目没有 script 时用原文当朗读稿（集成测试用）")
+    parser.add_argument("--replan", action = "store_true", help = "plan：输出目录已有不同的任务计划时，仍然覆盖（会让已合成的块失效）")
     parser.add_argument("--models", nargs = "+", default = None, help = "tts、asr：只处理这些模型（配置里的名字）；CPU 与 GPU 模型可在两个进程里同时跑同一输出目录")
     parser.add_argument("--role", choices = ["primary", "cross"], default = "primary", help = "asr：主 ASR 或交叉 ASR")
     parser.add_argument("--shard", type = parse_shard, default = (0, 1), help = "tts、asr：只执行第 K 片，写成 K/N")
@@ -70,6 +71,19 @@ def run_plan(args: argparse.Namespace, cfg: dict, layout: Layout) -> None:
     )
     voices = load_voices(path = args.voices)
     tasks, info = build_tasks(cfg = cfg, entries = entries, voices = voices, split = args.split)
+    if layout.tasks.exists() and not args.replan:
+        # 输出目录里已有任务计划时，新计划必须与之完全相同；配置或输入变了会导致已合成的块失效、音频被覆盖
+        with open(file = layout.tasks, mode = "r", encoding = "utf-8") as handle:
+            old = [json.loads(s = line) for line in handle if line.strip()]
+        if old != tasks:
+            changed = sum(1 for a, b in zip(old, tasks) if a != b) + abs(len(old) - len(tasks))
+            raise InputError(
+                f"{layout.tasks} 已存在且与新计划不同（{changed} 条不同）。"
+                "这通常是配置或输入在这个目录规划之后改过；请用当初的配置续跑，或换一个输出目录。"
+                "确认要丢弃旧计划时加 --replan。",
+            )
+        print(json.dumps({"tasks": len(tasks), "unchanged": True, **info}, ensure_ascii = False), file = sys.stderr)
+        return
     write_jsonl_atomic(path = layout.tasks, rows = tasks)
     write_json_atomic(path = layout.out / "config_snapshot.json", obj = cfg)
     print(json.dumps({"tasks": len(tasks), **info}, ensure_ascii = False), file = sys.stderr)
