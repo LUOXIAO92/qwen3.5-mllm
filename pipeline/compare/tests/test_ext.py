@@ -6,10 +6,11 @@ import unittest
 import warnings
 from unittest import mock
 
-from pipeline.compare import compare, ja_reading, normalize_for_scoring
+from pipeline.compare import compare, ja_reading, normalize_for_scoring, zh_convert
 from pipeline.compare.tests.cases_ext import EXT_NEGATIVE, EXT_POSITIVE
 
 READING = ja_reading.available()
+OPENCC = zh_convert._converters() is not None
 
 
 def _run(test: unittest.TestCase, cases: dict, expect: bool) -> None:
@@ -76,6 +77,55 @@ class FallbackTests(unittest.TestCase):
         self.assertIn(ja_reading.MISSING_NOTE, differ.detail)
         self.assertTrue(same.match)
         self.assertTrue(any(ja_reading.MISSING_NOTE in str(w.message) for w in caught))
+
+
+@unittest.skipUnless(OPENCC, "需要 opencc 1.4.2")
+class ZhConvertTests(unittest.TestCase):
+    def test_word_level_conversion(self):
+        # 单字表把「著」「瞭」「衹」留作原字，词组级转换按词选字
+        positive = [
+            ("他看着我，又执着又沉着。", "他看著我，又執著又沉著。"),
+            ("乾隆年间的著名学者都了解此事。", "乾隆年間的著名學者都瞭解此事。"),
+            ("飞机着陆以后只剩三人。", "飛機著陸以後衹剩3人。"),
+            ("这部原著显著不同。", "這部原著顯著不同。"),
+        ]
+        negative = [
+            ("他看着我。", "他看到我。"),
+            ("著名学者", "看着学者"),
+            ("飞机着陆以后只剩三人。", "飛機著陸以後衹剩4人。"),
+        ]
+        for script, hyp in positive:
+            with self.subTest(script = script, hyp = hyp):
+                result = compare(script = script, hypothesis = hyp, lang = "zh")
+                self.assertTrue(result.match, msg = result.detail)
+        for script, hyp in negative:
+            with self.subTest(script = script, hyp = hyp):
+                self.assertFalse(compare(script = script, hypothesis = hyp, lang = "zh").match)
+
+    def test_same_as_tn(self):
+        try:
+            from pipeline.tn import core as tn_core
+        except ImportError as exc:
+            self.skipTest(reason = f"无法导入 pipeline.tn：{exc}")
+        self.assertEqual(zh_convert._ZHU_FIXES.pattern, tn_core._ZHU_FIXES.pattern)
+        for text in ["他看著我，所著之書顯著", "乾隆年間的乾淨綫路", "著名作家穿著西裝", "裡面有隻貓"]:
+            with self.subTest(text = text):
+                self.assertEqual(zh_convert.to_simplified(text = text), tn_core.to_simplified(text = text))
+
+
+class ZhFallbackTests(unittest.TestCase):
+    def test_missing_opencc_falls_back_to_table(self):
+        no_opencc = mock.patch.object(target = zh_convert, attribute = "_converters", return_value = None)
+        not_warned = mock.patch.object(target = zh_convert, attribute = "_warned", new = False)
+        with no_opencc, not_warned:
+            with warnings.catch_warnings(record = True) as caught:
+                warnings.simplefilter("always")
+                differ = compare(script = "他看着我。", hypothesis = "他看著我。", lang = "zh")
+                same = compare(script = "他买了三本书。", hypothesis = "他買了3本書。", lang = "zh")
+        self.assertFalse(differ.match)
+        self.assertIn(zh_convert.MISSING_NOTE, differ.detail)
+        self.assertTrue(same.match)
+        self.assertTrue(any(zh_convert.MISSING_NOTE in str(w.message) for w in caught))
 
 
 class ScoringUnchangedTests(unittest.TestCase):

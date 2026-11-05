@@ -63,7 +63,7 @@ class Mark:
 
 class Tok:
     """切分阶段的记号。kind：word、char、digit、sep、pct、minus、bound、alt，
-    比对时另有 usym（货币、度数符号）和 colon（数字之间的冒号）。"""
+    比对时另有 usym（货币、度数符号）、colon（数字之间的冒号）和 slash（日期中数字之间的斜线）。"""
 
     __slots__ = ("kind", "text", "frac", "kinds", "alts", "roman", "brk")
 
@@ -331,6 +331,7 @@ def tokenize(text: str, spec: LangSpec, ext: bool = False) -> list:
                 j = j,
                 alts = alts,
                 spec = spec,
+                ext = ext,
             )
             if ext and end == j + 1 and s[j] == "°":
                 # 西、葡、意语的「20°」可以是序数，也可以是度数
@@ -380,6 +381,10 @@ def tokenize(text: str, spec: LangSpec, ext: bool = False) -> list:
             toks.append(Tok(kind = "colon"))
             i += 1
             continue
+        if ext and ch == "/" and nxt_digit and i and _is_digit(ch = s[i - 1]) and spec.ext is not None and spec.ext.date_month:
+            toks.append(Tok(kind = "slash"))
+            i += 1
+            continue
         if ch in _WORD_HYPHENS or ch == "−":
             prev = s[i - 1] if i else " "
             if nxt_digit and not (prev.isalnum() or prev in _APOSTROPHES):
@@ -404,15 +409,22 @@ def tokenize(text: str, spec: LangSpec, ext: bool = False) -> list:
     return toks
 
 
-def _attach_ordinal(s: str, j: int, alts: list, spec: LangSpec) -> int:
-    """数字后紧跟序数标记（3rd、3.、3e、3-й、3º）时，记录序数属性并吞掉标记。"""
+def _attach_ordinal(s: str, j: int, alts: list, spec: LangSpec, ext: bool = False) -> int:
+    """数字后紧跟序数标记（3rd、3.、3e、3-й、3º）时，记录序数属性并吞掉标记。
+    比对时数字与序数标记之间可以有撇号（土耳其语 3'üncü）。"""
     if len(alts) != 1 or len(alts[0]) != 1 or not spec.ordinal_suffixes:
         return j
-    for pattern, kinds in spec.ordinal_suffixes:
-        m = pattern.match(string = s, pos = j)
-        if m:
-            alts[0][0].kinds = kinds
-            return m.end()
+    starts = [j]
+    if ext and j < len(s) and s[j] in _APOSTROPHES:
+        starts.append(j + 1)
+    for pos in starts:
+        for pattern, kinds, ext_only in spec.ordinal_suffixes:
+            if ext_only and not ext:
+                continue
+            m = pattern.match(string = s, pos = pos)
+            if m and m.end() > pos:
+                alts[0][0].kinds = kinds
+                return m.end()
     return j
 
 
@@ -494,7 +506,7 @@ def _digit_morph(digits: str, needs = None):
     )
 
 
-def parse_number(toks: list, start: int, spec: LangSpec, frac: bool = False, first = None):
+def parse_number(toks: list, start: int, spec: LangSpec, frac: bool = False, first = None, ext: bool = False):
     """从 start 开始尽量长地组成一个数，返回 (结束位置, 状态, 分析路径) 或 None。
 
     first 给出时，以该语素（阿拉伯数字）开头，组成「5 миллионов」「3万」这类混写。
@@ -505,7 +517,7 @@ def parse_number(toks: list, start: int, spec: LangSpec, frac: bool = False, fir
         if st is not None:
             frontier.append((st, start + 1, ()))
     else:
-        for a in spec.analyses(word = toks[start].text):
+        for a in spec.analyses(word = toks[start].text, ext = ext):
             st = NumState(frac = frac).apply(morphs = a.morphs, spec = spec)
             if st is not None:
                 frontier.append((st, start + 1, (a,)))
@@ -525,7 +537,7 @@ def parse_number(toks: list, start: int, spec: LangSpec, frac: bool = False, fir
                 continue
             cands = []
             if tok.kind == "word":
-                for a in spec.analyses(word = tok.text):
+                for a in spec.analyses(word = tok.text, ext = ext):
                     if a.prefix and not a.conn_prefix:
                         continue
                     if (
@@ -569,7 +581,7 @@ def parse_number(toks: list, start: int, spec: LangSpec, frac: bool = False, fir
     return best
 
 
-def _minutes_follow(toks: list, j: int, spec: LangSpec) -> bool:
+def _minutes_follow(toks: list, j: int, spec: LangSpec, ext: bool = True) -> bool:
     """中文「点」后面是否是分钟：「十五」「零五」这类小数读法里不会出现的写法，或后面跟着「分」。
 
     「三点五」仍按小数处理；「三点五分」「三点十五」「三点零五」按时刻处理（另有按小数处理的候选）。
@@ -579,8 +591,8 @@ def _minutes_follow(toks: list, j: int, spec: LangSpec) -> bool:
         return False
     tok = toks[j]
     zero_lead = False
-    if tok.kind == "word" and any(m.cls == "zero" for a in spec.analyses(word = tok.text) for m in a.morphs):
-        if j + 1 >= n or not _numeral_start(tok = toks[j + 1], spec = spec):
+    if tok.kind == "word" and any(m.cls == "zero" for a in spec.analyses(word = tok.text, ext = ext) for m in a.morphs):
+        if j + 1 >= n or not _numeral_start(tok = toks[j + 1], spec = spec, ext = ext):
             return False
         zero_lead = True
         j += 1
@@ -588,7 +600,12 @@ def _minutes_follow(toks: list, j: int, spec: LangSpec) -> bool:
     if tok.kind == "digit" and not tok.frac:
         value, end = int(tok.text), j + 1
     elif tok.kind == "word":
-        res = parse_number(toks = toks, start = j, spec = spec)
+        res = parse_number(
+            toks = toks,
+            start = j,
+            spec = spec,
+            ext = ext,
+        )
         if res is None:
             return False
         end, st, _ = res
@@ -603,8 +620,8 @@ def _minutes_follow(toks: list, j: int, spec: LangSpec) -> bool:
     return value < 60 and (minute_word or value >= 10 or (zero_lead and value < 10))
 
 
-def _numeral_start(tok: Tok, spec: LangSpec) -> bool:
-    return tok.kind == "digit" or (tok.kind == "word" and bool(spec.analyses(word = tok.text)))
+def _numeral_start(tok: Tok, spec: LangSpec, ext: bool = False) -> bool:
+    return tok.kind == "digit" or (tok.kind == "word" and bool(spec.analyses(word = tok.text, ext = ext)))
 
 
 def _is_int_num(it) -> bool:
@@ -649,6 +666,11 @@ def parse_items(toks: list, spec: LangSpec, ext: bool = False, time_first: bool 
             frac_ctx = False
             i += 1
             continue
+        if kind == "slash":
+            items.append(Mark(kind = "slash", origin = "sym", surface = "/"))
+            frac_ctx = False
+            i += 1
+            continue
         if kind == "usym":
             items.append(Mark(kind = "usym", origin = "sym", surface = t.text))
             frac_ctx = False
@@ -666,13 +688,14 @@ def parse_items(toks: list, spec: LangSpec, ext: bool = False, time_first: bool 
                 spec = spec,
                 items = items,
                 frac_ctx = frac_ctx,
+                ext = ext,
             )
             frac_ctx = items[-1].frac if isinstance(items[-1], Num) else False
             continue
         # 普通词
         w = t.text
         nxt = toks[i + 1] if i + 1 < n else None
-        nxt_num = nxt is not None and _numeral_start(tok = nxt, spec = spec)
+        nxt_num = nxt is not None and _numeral_start(tok = nxt, spec = spec, ext = ext)
         if (
             ext
             and time_first
@@ -698,7 +721,16 @@ def parse_items(toks: list, spec: LangSpec, ext: bool = False, time_first: bool 
             i += 1
             continue
         pos = spec.pct_words.get(w)
-        if (pos == "post" and items and isinstance(items[-1], Num)) or (pos == "pre" and nxt_num):
+        # 比对时数与百分号读法之间可以有连接成分（菲律宾语 anim na porsiyento）
+        linked = (
+            ext
+            and spec.ext is not None
+            and len(items) >= 2
+            and isinstance(items[-1], Text)
+            and items[-1].text in spec.ext.linkers
+            and isinstance(items[-2], Num)
+        )
+        if (pos == "post" and items and (isinstance(items[-1], Num) or linked)) or (pos == "pre" and nxt_num):
             items.append(Mark(kind = "pct", origin = "word", surface = w.replace(" ", "")))
             frac_ctx = False
             i += 1
@@ -708,6 +740,7 @@ def parse_items(toks: list, spec: LangSpec, ext: bool = False, time_first: bool 
             start = i,
             spec = spec,
             frac = frac_ctx,
+            ext = ext,
         )
         if res is not None:
             end, st, path = res
@@ -741,7 +774,7 @@ def parse_items(toks: list, spec: LangSpec, ext: bool = False, time_first: bool 
     return _place_percent(items = items, spec = spec)
 
 
-def _digit_item(toks: list, i: int, spec: LangSpec, items: list, frac_ctx: bool) -> int:
+def _digit_item(toks: list, i: int, spec: LangSpec, items: list, frac_ctx: bool, ext: bool = False) -> int:
     """处理一个阿拉伯数字记号，返回下一个位置；后面接位值词时组成混写数。"""
     t = toks[i]
     frac = t.frac or frac_ctx
@@ -755,6 +788,7 @@ def _digit_item(toks: list, i: int, spec: LangSpec, items: list, frac_ctx: bool)
                 start = i,
                 spec = spec,
                 first = m,
+                ext = ext,
             )
         if res is not None and res[0] > i + 1:
             end, st, path = res
@@ -841,9 +875,10 @@ def _conn_breaks(toks: list, spec: LangSpec) -> list:
     spots = []
     for k in range(1, len(toks) - 1):
         tok = toks[k]
-        if tok.kind != "word" or not any(m.cls == "conn" for a in spec.analyses(word = tok.text) for m in a.morphs):
+        if tok.kind != "word" or not any(m.cls == "conn" for a in spec.analyses(word = tok.text, ext = True) for m in a.morphs):
             continue
-        if _numeral_start(tok = toks[k - 1], spec = spec) and _numeral_start(tok = toks[k + 1], spec = spec):
+        before = _numeral_start(tok = toks[k - 1], spec = spec, ext = True)
+        if before and _numeral_start(tok = toks[k + 1], spec = spec, ext = True):
             spots.append(k)
     spots = spots[:MAX_CONN_BREAKS]
     choices = [[k] for k in spots] + ([spots] if len(spots) > 1 else [])

@@ -8,7 +8,13 @@ BIGS_MS = [("ribu", 1000), ("juta", 10 ** 6), ("bilion", 10 ** 9), ("trilion", 1
 
 
 def build() -> LangSpec:
-    spec = LangSpec(code = "ms", compound = True, split_affixes = malay_affixes)
+    spec = LangSpec(
+        code = "ms",
+        compound = True,
+        big_compound = True,
+        one_ten_closed = True,
+        split_affixes = malay_affixes,
+    )
     fill_malay_family(
         spec = spec,
         units = UNITS_MS,

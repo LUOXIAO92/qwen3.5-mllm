@@ -342,6 +342,8 @@ class NumState:
     def _add(self, m: Morph, lab: str, pend, spec):
         if not self._system_ok(m = m):
             return None
+        if spec.one_ten_closed and lab == "unit" and pend is None and self.last == "place" and self.last_val == 10:
+            return None
         value, places = m.value, m.places
         if self.teen:
             value += 10
@@ -534,8 +536,11 @@ class LangSpec:
     big_compound: bool = False        # 大单位可以叠用（西语 mil millones、中文 万亿）
     split_words_need_scale: bool = False  # 分开写的词只在接位值词、大单位时才组成一个数（德语数词连写）
     digits_after_big: bool = False    # 大单位后可以接阿拉伯数字（中文 1万2000）
+    one_ten_closed: bool = False      # 「一十」后面不能接个位（马来语 sepuluh empat 是 10 和 4，十几用 belas）
     pct_symbol_prefix: bool = False   # 百分号读在数前（中文 百分之、土耳其语 yüzde）
+    # 词缀切分：split_affixes(word, spec, ext) 给出 (前缀, 词干, 后缀, 前缀是否为连接词)；ext 为 True 时用于比对，可以切得更宽
     split_affixes: Callable | None = None
+    suffixes: frozenset = frozenset()  # 比对时数词、单位词后可以连写的词尾（土耳其语 kilometreye、km'ye）
     post: Callable | None = None
     # 比对时一个读法数的其他切分（韩语「육십일」也可以是 60 加「일」）：输入 Num，返回若干种切分，每种是一串 Num
     splitter: Callable | None = None
@@ -610,20 +615,21 @@ class LangSpec:
             self.ord_mark_words.add(self.norm(word = w))
             self.add(words = w, morphs = ORD_MARK)
 
-    def add_ordinal_suffix(self, pattern: str, kinds: frozenset) -> None:
+    def add_ordinal_suffix(self, pattern: str, kinds: frozenset, ext_only: bool = False) -> None:
         """登记阿拉伯数字后的序数标记（3rd、3.、3e、3-й），kinds 为该写法允许的基数/序数属性。"""
-        self.ordinal_suffixes.append((re.compile(pattern = pattern), kinds))
+        self.ordinal_suffixes.append((re.compile(pattern = pattern), kinds, ext_only))
 
     # ---- 分析 ----
 
-    def analyses(self, word: str) -> tuple:
-        """一个词作为数词的全部分析；不是数词时返回空元组。"""
-        cached = self._cache.get(word)
+    def analyses(self, word: str, ext: bool = False) -> tuple:
+        """一个词作为数词的全部分析；不是数词时返回空元组。ext 为 True 时（比对）词缀切分可以更宽。"""
+        key = (word, ext)
+        cached = self._cache.get(key)
         if cached is not None:
             return cached
         out = list(self._core(word = word))
         if self.split_affixes is not None:
-            for prefix, stem, suffix, is_conn in self.split_affixes(word = word, spec = self):
+            for prefix, stem, suffix, is_conn in self.split_affixes(word = word, spec = self, ext = ext):
                 for a in self._core(word = stem):
                     if a.prefix or a.suffix:
                         continue
@@ -635,7 +641,7 @@ class LangSpec:
                         conn_prefix = is_conn,
                     ))
         result = tuple(out)
-        self._cache[word] = result
+        self._cache[key] = result
         return result
 
     def _core(self, word: str) -> list:

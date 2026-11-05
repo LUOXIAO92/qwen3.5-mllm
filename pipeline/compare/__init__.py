@@ -23,7 +23,9 @@ zh en ja ko de fr ru pt es it id ms th vi fil ar tr fa。
 
 两边先做同一套字符规范化（normalize.py）：NFKC、删除零宽字符和方向控制符、各种数字字形统一为 ASCII
 数字、大小写统一（土耳其语单独处理 I/İ）、俄语 ё 统一为 е；阿拉伯语和波斯语删除元音符号和 tatweel，
-统一 alef、ya、kaf、ta marbuta 等字母变体；中文按 OpenCC 的单字表转为简体；日语平假名统一为片假名。
+统一 alef、ya、kaf、ta marbuta 等字母变体；中文用 OpenCC 词组级转换为简体（zh_convert.py，与朗读稿生成
+pipeline.tn.core.to_simplified 相同，包括「著」的修正），再按单字表合并（朗读稿已经转过一次，词组级转换再转一次
+结果可能不同），没有 OpenCC 时只用单字表；日语平假名统一为片假名。
 标点在切分时删除，比较普通文字时忽略空白。
 
 然后把两边的数词都换成数值记号（parse.py）。数值记号的设计对所有语言相同：一个记号记录整数值、
@@ -88,13 +90,29 @@ normalize_for_scoring 不经过这里（parse.analyze(ext = True)，见 extend.p
   空格处理；数与后缀连写的词拆开（семнадцатилетний 对 17-летний，neunzehnhundertachtziger 对 1980er，
   -jährige，马来语 puluhan 对 1970-an）；大单位可以叠用、大单位后可以接数字（4280 million、12 тысяч 304）；
   小数后的大单位词与写在数前的货币符号对应（$1.7 billion）；时刻的分钟 00 也可以读出（neuf heures zéro zéro）。
+- 越南语斜线日期：日期中的斜线换成日期记号，对应读法中的 tháng、năm（7/1 对 bảy tháng một，tháng 5/2023 对
+  tháng năm năm hai nghìn…，17/2/2020 对 mười bảy tháng hai năm …）；不像日期的斜线（1/2）仍按标点处理。
+  「ba mươi một」也可以是 30 加 một（30 một số loại）。
+- 土耳其语数词、单位词后连写的词尾（units 中的词尾串）：sekizdeki 对 1978'deki，yedisini 对 97'sini，
+  kilometreye 对 km'ye，kilometrekare'lik 对 km²'lik；数字与序数后缀之间可以有撇号或空格（3'üncü、50 nci），
+  序数后缀后面还可以有词尾（99'uncusu）。词尾两边仍要逐字相同。
+- 菲律宾语以辅音结尾的数词后的连接成分 na（apat na taon、anim na porsiyento）：读法数连同 na 可以对应
+  不写 na 的阿拉伯数字（4 taon、6%）；两边都是读法时 na 不能省。缩写 atbp.（at iba pa）。
+- 马来语、印尼语：sepuluh 后面不接个位（sepuluh empat puluh lima 是 10 和 45，对 10.45）；缩写 hb（haribulan）；
+  kilometer persegi、kilometer sejam；写在下一个数前面的 RM、Rp 不归前一个数（(2002), RM1 bilion、RM80 - RM320）；
+  pertama 只单独使用（200 pertama）；milyar 与 miliar 合并。
+- 越南语、马来语、印尼语、土耳其语的大单位可以叠用（một nghìn sáu trăm tỉ 对 1.600 tỉ，seribu juta 对 1000 juta），
+  越南语、土耳其语、菲律宾语的大单位后可以接阿拉伯数字（3 nghìn 550 tỷ、3 bin 500、14 bilyon 555 milyong）。
 
 依赖与许可
 ==========
 
-必需的只有 Python 标准库，支持 Python 3.10 及以上。data/zh_t2s.txt 由 OpenCC 的 TSCharacters.txt 生成
-（Apache-2.0，https://github.com/BYVoid/OpenCC）。日语按读音比较是可选功能，需要 fugashi（MIT）和
-unidic-lite（MIT，词典为 UniDic，BSD 许可，约 250 MB）：pip install fugashi unidic-lite。开发用的词表回归检查
+必需的只有 Python 标准库，支持 Python 3.10 及以上。可选依赖两项，缺失时退回较粗的比较并给出提示：
+中文词组级繁简转换需要 opencc 1.4.2（Apache-2.0，https://github.com/BYVoid/OpenCC），没有时用 data/zh_t2s.txt
+（由 OpenCC 的 TSCharacters.txt 生成）逐字转换；日语按读音比较需要 fugashi 1.5.2（MIT）和 unidic-lite 1.0.8
+（MIT，词典为 UniDic，BSD 许可，约 250 MB）。流水线用的环境 envs/runner 装有这三个包（见 pipeline/runner）：
+uv pip install opencc==1.4.2 fugashi==1.5.2 unidic-lite==1.0.8。opencc-python-reimplemented 也提供 opencc 模块，
+但没有词组配置，按未安装处理。开发用的词表回归检查
 tests/rbnf_check.py 需要 unicode-rbnf（MIT，数据为 Unicode 许可），只在开发环境中安装。
 
 测试
@@ -117,8 +135,8 @@ TTS 读成「в пять домах」、ASR 写成「в 5 домах」，会�
 
 以下情况仍会误杀：泰语「ร้อยละห้า」对「5%」的语序；带辅币的金额（「zwölf Euro fünfzig」对「12,50 €」）；
 不带上标、直接写成「km2」的平方单位；范围中的连字符不转为「到」（「three to five」对「3-5」）；
-单数缩写的复数或所有格（Jrs.、James II's）；英语、法语的省音（d'une heure 对 de 1 heure）；越南语斜线日期
-（2/7 对 hai tháng bảy）；土耳其语数字后的后缀写法；两边的数都被并错位置时（「삼십일 천장」对「30일 천장」，一边把「일」并进 31，另一边并进「일천」）；
+单数缩写的复数或所有格（Jrs.、James II's）；英语、法语的省音（d'une heure 对 de 1 heure）；印尼语金额中的
+缩写 M、jt（Rp80 M）；带百分号的范围（%1,5-% 27,6）；两边的数都被并错位置时（「삼십일 천장」对「30일 천장」，一边把「일」并进 31，另一边并进「일천」）；
 菲律宾语只覆盖常见的他加禄语、英语和少量西班牙语来源数词。
 以下读音相同的写法差异没有放宽：中文同音字（江杨、江阳），法语不发音的词尾（sport、sports），俄语非重读元音弱化
 （человекам、человеком），韩语 ㅐ/ㅔ（떼、때），泰语元音长短符号与不发音字母（เซ็นต์、เซน），菲律宾语外来词拼法

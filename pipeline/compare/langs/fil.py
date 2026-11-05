@@ -26,7 +26,7 @@ def _linked(word: str) -> list:
     return [word, word + "ng"] if word[-1] in _VOWELS else [word]
 
 
-def _affixes(word: str, spec: LangSpec):
+def _affixes(word: str, spec: LangSpec, ext: bool = False):
     for p in _ORD_PREFIXES:
         if word.startswith(p) and len(word) > len(p) + 2:
             stem = word[len(p):]
@@ -36,7 +36,12 @@ def _affixes(word: str, spec: LangSpec):
 
 
 def build() -> LangSpec:
-    spec = LangSpec(code = "fil", compound = True, split_affixes = _affixes)
+    spec = LangSpec(
+        code = "fil",
+        compound = True,
+        digits_after_big = True,
+        split_affixes = _affixes,
+    )
     en.fill(spec = spec)
     for v, w in UNITS.items():
         spec.add(words = _linked(word = w), morphs = add(value = v))

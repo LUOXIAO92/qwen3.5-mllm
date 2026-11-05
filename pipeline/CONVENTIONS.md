@@ -7,7 +7,7 @@
 代码放在仓库的 `pipeline/` 下，按阶段分子目录：`text/`（抽取原文）、`tn/`（生成朗读稿）、`compare/`（比对规范化与数词统一）、`tts/`、`asr/`、`runner/`（合成—核对流水线）、`train/`、`eval/`。合成数据、下载的数据集和虚拟环境都不进仓库，统一放在工作目录 `/home/luoxiao/workspace/qwen3.5-asr-work/`：
 
 - `data/<任务编号>/`：各任务的数据产出，例如 `data/T03/`。下游只读取上游目录，不在其中写文件。
-- `envs/<名称>/`：用 `uv venv` 建立的虚拟环境，一个模型或一组相容的模型一个环境。conda 环境 `py3.14` 不安装、不升级任何包。
+- `envs/<名称>/`：用 `uv venv` 建立的虚拟环境，一个模型或一组相容的模型一个环境。conda 环境 `py3.14` 不安装、不升级任何包。合成—核对流水线（`pipeline.runner`）和比对（`pipeline.compare`）统一用 `envs/runner` 的 python 运行，这个环境装有 PyYAML 6.0.3、opencc 1.4.2、fugashi 1.5.2 和 unidic-lite 1.0.8，建立方法见 `pipeline/runner/__init__.py`。
 - `src/<仓库名>/`：需要长期保留的上游源码克隆（含随源码存放的权重），例如可编辑安装的 TTS 源码、通过 `PYTHONPATH` 使用的推理包。
 - `tmp/<任务编号>/`：可再生的中间文件，删除后不影响已有环境和产出。
 - `logs/`：长时间任务的日志。

@@ -29,7 +29,7 @@ def _ord_forms(word: str) -> list:
     return [stem + "م", stem + "مین"]
 
 
-def _affixes(word: str, spec: LangSpec):
+def _affixes(word: str, spec: LangSpec, ext: bool = False):
     """数内的连接词 و 有时与后一个词连写：بیست（零宽不连字）ویک → بیست ویک。"""
     if word.startswith("و") and len(word) >= 3:
         yield "و", word[1:], "", True

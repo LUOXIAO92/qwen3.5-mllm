@@ -2,10 +2,17 @@
 
 输入文本条目（带 script 朗读稿）、音色库 voices.jsonl 和按语言的配置，生成合成任务，按 TTS 模型分块合成，
 检查音频时长与文本长度的比例，按语言调用主 ASR 和可选的交叉 ASR，用 pipeline.compare 比对，
-写出识别结果、通过清单和统计。运行本流水线的 Python 只需要标准库和 PyYAML（读配置）；
-TTS、ASR 封装用各自虚拟环境的 python 以子进程运行，需要 GPU 的经 ``<工作目录>/gpu.lock``。
+写出识别结果、通过清单和统计。本流水线用工作目录的 ``envs/runner`` 运行，这个环境装有 PyYAML 6.0.3（读配置）、
+opencc 1.4.2（中文繁简转换）、fugashi 1.5.2 和 unidic-lite 1.0.8（日语按读音比对）；比对与朗读稿生成用同一种
+繁简转换，日语可以按读音比较（见 pipeline.compare）。TTS、ASR 封装用各自虚拟环境的 python 以子进程运行，
+需要 GPU 的经 ``<工作目录>/gpu.lock``。
 
-用法（在仓库根目录运行）。每个子命令都是独立的一步，只读取上一步写在 ``--out-dir`` 里的文件，启动时按
+建立环境（在工作目录运行）::
+
+    uv venv --python 3.12 envs/runner
+    uv pip install --python envs/runner/bin/python pyyaml==6.0.3 opencc==1.4.2 fugashi==1.5.2 unidic-lite==1.0.8
+
+用法（在仓库根目录运行，``python`` 指 ``<工作目录>/envs/runner/bin/python``）。每个子命令都是独立的一步，只读取上一步写在 ``--out-dir`` 里的文件，启动时按
 pipeline/CONVENTIONS.md 检查输入格式（缺文件、缺字段、语言代码不对时报输入错误，退出码 2）::
 
     C="--config pipeline/runner/config_v1.yaml --work-dir <工作目录> --out-dir <输出目录>"

@@ -1,11 +1,11 @@
 """印尼语数词。se- 前缀（sepuluh、seratus、seribu）按部件切分；ke- 序数前缀拆成文字，与「ke-2」对齐。"""
 
 from ..numerals import (
-    TEEN_SUFFIX, LangSpec, add, big, ordinal, place, zero,
+    TEEN_SUFFIX, LangSpec, add, big, ordinal, place, with_fold, zero,
 )
 
 UNITS_ID = ["satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "sembilan"]
-BIGS_ID = [("ribu", 1000), ("juta", 10 ** 6), ("miliar", 10 ** 9), ("milyar", 10 ** 9), ("triliun", 10 ** 12)]
+BIGS_ID = [("ribu", 1000), ("juta", 10 ** 6), ("miliar", 10 ** 9), ("triliun", 10 ** 12)]
 
 
 def fill_malay_family(spec: LangSpec, units: list, zeros: list, bigs: list) -> None:
@@ -21,14 +21,15 @@ def fill_malay_family(spec: LangSpec, units: list, zeros: list, bigs: list) -> N
     spec.add(words = "ratus", morphs = place(exp = 2, implicit_one = False))
     for w, v in bigs:
         spec.add(words = w, morphs = big(value = v, implicit_one = False))
-    spec.add(words = "pertama", morphs = ordinal(morph = add(value = 1)))
+    # pertama（第一）只单独使用，「dua ratus pertama」是「前 200」，不是第 201
+    spec.add(words = "pertama", morphs = ordinal(morph = add(value = 1, alone = True)))
 
 
 # 年代后缀 -an 只接在这些词后：tujuh puluhan（70 年代）、sepuluhan、seribu sembilan ratus sembilan puluhan
 _DECADE_STEMS = ("puluh", "sepuluh", "belas", "ratus", "ribu")
 
 
-def malay_affixes(word: str, spec: LangSpec):
+def malay_affixes(word: str, spec: LangSpec, ext: bool = False):
     """ke- 序数前缀、-nya 后缀与年代后缀 -an：kedua、ketiganya、puluhan（与 1970-an 对应）。"""
     suffix = ""
     stem = word
@@ -46,6 +47,8 @@ def build() -> LangSpec:
         code = "id",
         compound = True,
         dec_comma = True,
+        big_compound = True,
+        one_ten_closed = True,
         split_affixes = malay_affixes,
     )
     fill_malay_family(
@@ -54,6 +57,9 @@ def build() -> LangSpec:
         zeros = ["nol", "kosong"],
         bigs = BIGS_ID,
     )
+    # milyar 是 miliar 的旧拼法
+    milyar = with_fold(morph = big(value = 10 ** 9, implicit_one = False), fold = "miliar")
+    spec.add(words = "milyar", morphs = milyar)
     spec.add_sep(words = "koma")
     spec.add_pct(words = "persen")
     spec.add_minus(words = ["minus", "negatif"])

@@ -2,7 +2,7 @@
 
 处理内容：NFKC、零宽字符和方向控制符、各种数字字形统一为 ASCII 数字、
 大小写（土耳其语的 I/İ 单独处理）、俄语 ё、阿拉伯语和波斯语的元音符号、
-tatweel 和字母变体、中文繁简、日语平假名与片假名。
+tatweel 和字母变体、中文繁简（OpenCC 词组级转换，见 zh_convert.py）、日语平假名与片假名。
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ import re
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
+
+from . import zh_convert
 
 ZWNJ = chr(0x200C)
 
@@ -58,7 +60,7 @@ _HIRAGANA_TO_KATAKANA.update({0x309D: 0x30FD, 0x309E: 0x30FE})
 
 @lru_cache(maxsize = 1)
 def _zh_t2s() -> dict:
-    """读取繁简单字对照表（来自 OpenCC，Apache-2.0）。"""
+    """读取繁简单字对照表（来自 OpenCC，Apache-2.0）。没有安装 OpenCC 1.4.2 时用它代替词组级转换。"""
     table = {}
     path = Path(__file__).with_name(name = "data") / "zh_t2s.txt"
     for line in path.read_text(encoding = "utf-8").splitlines():
@@ -74,6 +76,10 @@ def normalize_text(text: str, lang: str) -> str:
     text = text.replace(ZWNJ, " " if lang == "fa" else "")
     text = text.translate(_DIGITS)
     if lang == "zh":
+        # 词组级转换之后再查一遍单字表：朗读稿已经转过一次，「徵调」再转会变成「征调」，原文「徵調」只转一次是「徵调」，
+        # 两边都查单字表后一致（词组级转换的结果不幂等）
+        if zh_convert.available():
+            text = zh_convert.to_simplified(text = text)
         text = text.translate(_zh_t2s())
     elif lang == "ja":
         text = text.translate(_HIRAGANA_TO_KATAKANA)
