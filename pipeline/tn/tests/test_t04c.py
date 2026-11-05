@@ -45,6 +45,16 @@ NORMALIZED = {
         ("3.000 pelajar", "Tiga ribu pelajar"),
         ("1,5 juta orang", "Satu koma lima juta orang"),
         ("pukul 23.59 WIB", "Pukul dua puluh tiga lima puluh sembilan WIB"),
+        ("dimasukkannya 8 (Delapan) Area Perubahan", "dimasukkannya delapan Area Perubahan"),
+        ("selama 3 (tiga) tahun", "selama tiga tahun"),
+        ("sebesar Rp 893 M berhasil", "sebesar delapan ratus sembilan puluh tiga miliar rupiah berhasil"),
+        ("harga Rp 50 rb", "harga lima puluh ribu rupiah"),
+        ("Rp 2 jt", "Dua juta rupiah"),
+        ("anggaran Rp. 60 Milyar lebih", "anggaran enam puluh miliar rupiah lebih"),
+        ("hingga Rp180 juta rupiah. Pelakunya", "hingga seratus delapan puluh juta rupiah. Pelakunya"),
+        ("harga 1.000.000,- dan", "harga satu juta dan"),
+        ("harga Rp5.000,00 saja", "harga lima ribu rupiah saja"),
+        ("1.Beberapa apologist Kristen", "Beberapa apologist Kristen"),
     ],
     "ms": [
         ("Pada 21 Jun, 1974, José datang.", "Pada dua puluh satu Jun, seribu sembilan ratus tujuh puluh empat, José datang."),
@@ -78,6 +88,9 @@ NORMALIZED = {
         ("1.5 juta orang", "Satu perpuluhan lima juta orang"),
         ("suhu 30°C", "suhu tiga puluh darjah Celsius"),
         ("ke-3 kalinya", "Ketiga kalinya"),
+        ("selama tiga (3) tahun bermula", "selama tiga tahun bermula"),
+        ("3.Mungkin tidak terlambat", "Mungkin tidak terlambat"),
+        ("tempoh enam (6) bulan", "tempoh enam bulan"),
     ],
     "th": [
         ("ไปกับอังกฤษ 99 ปี", "ไปกับอังกฤษ เก้าสิบเก้า ปี"),
@@ -112,6 +125,7 @@ NORMALIZED = {
         ("-5 องศา", "ลบห้า องศา"),
         ("เวลา 07.15 น.", "เวลา เจ็ดนาฬิกาสิบห้านาที"),
         ("หนัก 15.5 กิโลกรัม", "หนัก สิบห้าจุดห้า กิโลกรัม"),
+        ("ระยะเวลาสาม (3) ปี", "ระยะเวลาสาม ปี"),
     ],
     "vi": [
         ("FIFA World Cup 2026 là lần thứ 23", "FIFA World Cup hai nghìn không trăm hai mươi sáu là lần thứ hai mươi ba"),
@@ -144,6 +158,9 @@ NORMALIZED = {
         ("tốc độ 50 km/h", "tốc độ năm mươi ki lô mét trên giờ"),
         ("lúc 23:59 đêm", "Lúc hai mươi ba giờ năm mươi chín phút đêm"),
         ("giá 10.000 đồng", "giá mười nghìn đồng"),
+        ("thường là 140 x 130 x 60 mm.", "thường là một trăm bốn mươi nhân một trăm ba mươi nhân sáu mươi mi li mét."),
+        ("của ba (3) bên", "của ba bên"),
+        ("1.Tôi đă sống", "Tôi đă sống"),
     ],
     "fil": [
         ("Isinilang po ako noong ika-14 ng Pebrero, taong 1960.", "Isinilang po ako noong ikalabing-apat ng Pebrero, taong isang libo siyam na raan at animnapu."),
@@ -175,6 +192,11 @@ NORMALIZED = {
         ("ika-23 ng Marso", "Ikadalawampu't tatlo ng Marso"),
         ("Gradong 7 ako", "Gradong pito ako"),
         ("ika-2 at ika-3", "Ikalawa at ikatlo"),
+        ("6 Nang magkagayo'y ang mga pangulo", "Nang magkagayo'y ang mga pangulo"),
+        ("2 Nguni't ako'y magsusugo", "Nguni't ako'y magsusugo"),
+        ("Tatlong (3) araw bago", "Tatlong araw bago"),
+        ("Ruta Bilang 66.", "Ruta Bilang animnapu't anim."),
+        ("5 Paraan para sumaya", "Limang Paraan para sumaya"),
     ],
     "ar": [
         ("في نهائي عام 2025 الذي", "في نهائي عام ألفين وخمسة وعشرين الذي"),
@@ -215,6 +237,8 @@ NORMALIZED = {
         ("في 9 رجب 1395هـ", "في تسعة رجب ألف وثلاثمئة وخمسة وتسعين للهجرة"),
         ("تراوحت بين %72 و%80 من", "تراوحت بين اثنين وسبعين بالمئة وثمانين بالمئة من"),
         ("حصل على 3 جوائز", "حصل على ثلاث جوائز"),
+        ("الشركاء التسعة عشر (19) الآخرين", "الشركاء التسعة عشر الآخرين"),
+        ("ثمانية (8) أشخاص", "ثمانية أشخاص"),
     ],
     "tr": [
         ("7 Eylül 2006'da Amsterdam'da okudum.", "Yedi Eylül iki bin altıda Amsterdam'da okudum."),
@@ -246,6 +270,9 @@ NORMALIZED = {
         ("saat 14:30", "Saat on dört otuz"),
         ("1940'larda", "Bin dokuz yüz kırklarda"),
         ("dört 4'te", "dört dörtte"),
+        ("başlıklı 119 uncu maddenin", "başlıklı yüz on dokuzuncu maddenin"),
+        ("Kanunun 4 üncü maddesinin", "Kanunun dördüncü maddesinin"),
+        ("sekiz (8) kitap", "sekiz kitap"),
     ],
     "fa": [
         ("حداقل 3000 زبان", "حداقل سه هزار زبان"),
@@ -281,6 +308,7 @@ NORMALIZED = {
         ("21امین سالگرد", "بیست و یکمین سالگرد"),
         ("-10 درجه", "منفی ده درجه"),
         ("۷ km", "هفت کیلومتر"),
+        ("نرمافزار شصت (۶۰) را نصب کنید.", "نرمافزار شصت را نصب کنید."),
     ],
 }
 
@@ -298,6 +326,13 @@ DROPPED = {
         ("PLTN No.1 di Fukushima", "缩写"),
         ("Dr. Baker", "缩写"),
         ("pukul 25.00", "时刻写法无法确定"),
+        ("Kamis (28!10) dini hari", "标点"),
+        ("biaya 30 hari sebesar Rp.", "没有金额"),
+        ("pukul 0930 WIB", "分隔符"),
+        ("ukuran 180 x 120 cm", "尺寸"),
+        ("selesai. 2. Kemudian", "列表序号"),
+        ("Menurut Rowski(2), 70% dari", "引用"),
+        ("Pada tahun 2030 dua puluh satu persen", "数词"),
     ],
     "ms": [
         ("suhu -5 darjah", "负号"),
@@ -309,6 +344,7 @@ DROPPED = {
         ("COVID-19 melanda", "型号或编号"),
         ("papan 8x8", "数字与字母相连"),
         ("10-20 orang", "范围"),
+        ("Jam 1005 Pak Lah tiba", "分隔符"),
     ],
     "th": [
         ("จอมพล ป. พิบูลสงคราม", "缩写"),
@@ -320,6 +356,7 @@ DROPPED = {
         ("ม.6 เทอม2", "缩写"),
         ("นัด 10-12 คน", "范围"),
         ("ตัดสินใจครั้งนี้อีกด้วยดร.", "缩写"),
+        ("ขนาด 200 x 600 พิกเซล", "尺寸"),
     ],
     "vi": [
         ("Nó lỡ chuyến xe 8:30.", "是否为时刻"),
@@ -332,6 +369,7 @@ DROPPED = {
         ("lúc 25:00", "时刻写法无法确定"),
         ("tháng 13", "月份写法无法确定"),
         ("Covid-19", "型号或编号"),
+        ("sáp chứa tới 30 một số loại", "数词"),
     ],
     "fil": [
         ("noong 410 AD.", "纪元标记"),
@@ -345,6 +383,13 @@ DROPPED = {
         ("sa 7-11", "范围"),
         ("0 grado", "零"),
         ("alas 13", "时刻写法无法确定"),
+        ("Now Bobby is my number 1 great leader", "英语"),
+        ("ma-upgrade sa Windows 11 at", "英语"),
+        ("Bukambibig Volume 1 Issue 3 Disasters", "英语"),
+        ("magnanakaw. 5 Kayong lahat", "经节号"),
+        ("madaling araw 3 AM na", "时刻"),
+        ("sa darating na January 15 matatanggap", "英语"),
+        ("Ang Defenders 2 TD ay laro", "名称"),
     ],
     "ar": [
         ("كانت الرحلة تقل 246 راكبًا.", "格未知"),
@@ -370,6 +415,7 @@ DROPPED = {
         ("10-15 öğrenci", "范围"),
         ("CDMA2000'dır", "数字与字母相连"),
         ("B-52 tek", "型号或编号"),
+        ("sayfa 3 ncü geliyoruz", "不符"),
     ],
     "fa": [
         ("ساعت ۳ ب.ظ.", "缩写"),
@@ -379,17 +425,25 @@ DROPPED = {
         ("۱۶۳۳: اینکه", "冒号"),
         ("۱/۲ کیلو", "分数或斜线"),
         ("حدود ۲-۳ روز", "范围"),
+        ("ویلیاموست(2) سعی دارد", "引用"),
+        ("در منبع (۱۵) آمده", "引用"),
+        ("تا ۲۰۵۰ سه برابر شود", "数词"),
     ],
 }
 
 # 读法与原文写法语序或成分不同、比对模块不转换的类别：单位、货币、时刻、纪年和纪元词、年代后缀、缩写、
 # 罗马数字、菲律宾语连接成分 na。这些改写只核对每处数词的数值（normalize_entry 内部已做），不比对整句。
-COMPARE_SKIP = ("单位", "货币", "时刻", "年代", "缩写", "序数「II.」", "句末句点")
+COMPARE_SKIP = (
+    "单位", "货币", "时刻", "年代", "缩写", "序数「II.」", "句末句点", "删去重复的数字", "删去行首序号", "删去行首节号", "尺寸",
+)
 COMPARE_SKIP_SCRIPTS = (
     "للميلاد", "للهجرة", "قبل الميلاد", "พุทธศักราช", "คริสต์ศักราช", " na ", "at iba pa",
 )
-# 比对模块不认的写法：「7'nci」（撇号加序数后缀）、「لـ الشركة」（ل 与冠词合写为 لل）
-COMPARE_KNOWN = {("tr", "7'nci sırada"), ("ar", "التابع لـ الشركة")}
+# 比对模块不认的写法：「7'nci」「119 uncu」（序数后缀用撇号或空格隔开）、「لـ الشركة」（ل 与冠词合写为 لل）
+COMPARE_KNOWN = {
+    ("tr", "7'nci sırada"), ("tr", "başlıklı 119 uncu maddenin"), ("tr", "Kanunun 4 üncü maddesinin"),
+    ("ar", "التابع لـ الشركة"),
+}
 
 
 class T04cNormalizedTest(unittest.TestCase):

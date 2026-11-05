@@ -19,10 +19,12 @@ import re
 from ..numwords import vi_cardinal, vi_digits
 from ..rules import Rule, Skip
 from .base import Lang
-from .extras import long_plain_rule, missing_space_rule, negative_rule
+from .extras import adjacent_numeral_rule, common_rules, long_plain_rule, missing_space_rule, negative_rule
 
 LOWER = "a-zàáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ"
 UPPER = LOWER.upper()
+# 写成文字的数词（不含 năm「年」、nghìn 等数量级词）：数字后紧跟这些词时读法有歧义（30 một số → ba mươi một số）
+ADJACENT_NUMERALS = ("một", "hai", "ba", "bốn", "sáu", "bảy", "tám", "chín", "mười", "mươi", "trăm", "linh", "lẻ", "mốt", "lăm")
 TIME_BEFORE = ("lúc", "vào", "khoảng", "từ", "đến", "tới", "trước", "sau", "Lúc", "Vào", "Khoảng", "Từ", "Đến")
 TIME_AFTER = ("sáng", "trưa", "chiều", "tối", "đêm")
 # 斜线日期前面的词：日/月（/年）
@@ -54,7 +56,8 @@ class Vi(Lang):
     def rules(self) -> list:
         """负温度、斜线日期先于公共保护规则运行（公共规则把 -10、24/9 丢弃）。"""
         days = "|".join(DAY_BEFORE)
-        return [
+        return common_rules(lang = self, times = "nhân") + [
+            adjacent_numeral_rule(lang = self, words = ADJACENT_NUMERALS),
             negative_rule(lang = self, minus = "âm", words = ("độ",)),
             Rule(
                 pattern = re.compile(pattern = rf"(?<!\w)(?P<word>(?:{days})\s)(?P<d>\d{{1,2}})/(?P<m>\d{{1,2}})(?:/(?P<y>\d{{4}}))?(?![\d/])"),

@@ -3,7 +3,7 @@
 千分位为「.」，小数点为「,」。数字后接撇号后缀（2006'da、%65'i、4'ü、7'nci、1990'lı）时，把后缀接到读法的
 最后一个词上（iki bin altıda、yüzde altmış beşi、dördü、yedinci、bin dokuz yüz doksanlı）。原文的后缀按读音
 写成，因此先按读法最后一个词的元音和谐、清浊同化生成全部合法后缀，原文后缀在其中才改写，否则说明原文写错，
-丢弃。dört 在元音开头的后缀前变为 dörd，-lık 在元音前变为 -lığ。
+丢弃。序数后缀与数字之间多了空格（119 uncu madde）时同样合并。dört 在元音开头的后缀前变为 dörd，-lık 在元音前变为 -lığ。
 
 时刻：「saat 14:30」「06:30'da」「2.30'a」读 on dört otuz、altı otuzda、iki otuza，整点只读小时（3:00 → üç）；
 冒号写法要求前面有 saat 或后面接后缀，句点写法要求前面有 saat 或后面接后缀；「1:58'lik」这类时长丢弃。
@@ -19,7 +19,7 @@ from functools import lru_cache
 from ..numwords import tr_cardinal, tr_digits, tr_ordinal
 from ..rules import DASHES, Rule, Skip
 from .base import Lang
-from .extras import missing_space_rule, negative_rule
+from .extras import common_rules, missing_space_rule, negative_rule
 
 VOWELS = "aeıioöuü"
 BACK = "aıou"
@@ -144,7 +144,7 @@ class Tr(Lang):
 
     def rules(self) -> list:
         """后缀、时刻、负温度先于公共保护规则运行（公共规则会把 2006'da、-40 丢弃）。"""
-        return self.pre_rules() + super().rules()
+        return common_rules(lang = self, list_numbers = False) + self.pre_rules() + super().rules()
 
     def pre_rules(self) -> list:
         num = self.num
@@ -163,6 +163,11 @@ class Tr(Lang):
             ),
             Rule(
                 pattern = re.compile(pattern = rf"{before}(?P<num>{num}){apostrophe}{suffix}"),
+                handle = self.number_suffix,
+            ),
+            # 「119 uncu madde」：序数后缀与数字之间多了空格，后缀与读音和谐时合并（yüz on dokuzuncu）
+            Rule(
+                pattern = re.compile(pattern = rf"{before}(?P<num>{num})\s(?P<suf>[ıiuü]?nc[ıiuü](?:s[ıiuü]|[ıiuü]n|y[ae]|d[ae])?)(?![\w'’])"),
                 handle = self.number_suffix,
             ),
             Rule(
