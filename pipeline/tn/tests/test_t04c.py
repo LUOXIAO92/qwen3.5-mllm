@@ -55,6 +55,7 @@ NORMALIZED = {
         ("harga 1.000.000,- dan", "harga satu juta dan"),
         ("harga Rp5.000,00 saja", "harga lima ribu rupiah saja"),
         ("1.Beberapa apologist Kristen", "Beberapa apologist Kristen"),
+        ("harga $5 Juta", "harga lima juta dolar"),
     ],
     "ms": [
         ("Pada 21 Jun, 1974, José datang.", "Pada dua puluh satu Jun, seribu sembilan ratus tujuh puluh empat, José datang."),
@@ -91,6 +92,10 @@ NORMALIZED = {
         ("selama tiga (3) tahun bermula", "selama tiga tahun bermula"),
         ("3.Mungkin tidak terlambat", "Mungkin tidak terlambat"),
         ("tempoh enam (6) bulan", "tempoh enam bulan"),
+        ("membabitkan kos sebanyak RM10 Juta.", "membabitkan kos sebanyak sepuluh juta ringgit."),
+        ("telah menyediakan RM100 Juta untuk", "telah menyediakan seratus juta ringgit untuk"),
+        ("kos RM1.5 bilion", "kos satu perpuluhan lima bilion ringgit"),
+        ("dana RM10 juta ringgit", "dana sepuluh juta ringgit"),
     ],
     "th": [
         ("ไปกับอังกฤษ 99 ปี", "ไปกับอังกฤษ เก้าสิบเก้า ปี"),
@@ -416,6 +421,7 @@ DROPPED = {
         ("CDMA2000'dır", "数字与字母相连"),
         ("B-52 tek", "型号或编号"),
         ("sayfa 3 ncü geliyoruz", "不符"),
+        ("17.-18. yüzyıllardan başlayarak", "序数范围"),
     ],
     "fa": [
         ("ساعت ۳ ب.ظ.", "缩写"),
@@ -442,7 +448,7 @@ COMPARE_SKIP_SCRIPTS = (
 # 比对模块不认的写法：「7'nci」「119 uncu」（序数后缀用撇号或空格隔开）、「لـ الشركة」（ل 与冠词合写为 لل）
 COMPARE_KNOWN = {
     ("tr", "7'nci sırada"), ("tr", "başlıklı 119 uncu maddenin"), ("tr", "Kanunun 4 üncü maddesinin"),
-    ("ar", "التابع لـ الشركة"),
+    ("ar", "التابع لـ الشركة"), ("ms", "dana RM10 juta ringgit"),
 }
 
 
