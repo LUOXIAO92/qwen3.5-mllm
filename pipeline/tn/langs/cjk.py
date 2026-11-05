@@ -4,6 +4,7 @@
   三・一运动写作 3・1運動）习惯逐位读或按日期读，读法不固定，丢弃；并列的一位数（1・4番線）照常改写；
 - 全角连字符的范围（20－30°C）与半角范围一样丢弃；
 - 拉丁字母词后隔空格的数字多为型号、版本（Windows 10、Mk 36），可能按英语读，丢弃；
+- 紧挨汉字数字的数字（安倍晋三14日、弗二15）改写后会和它连成一个数，丢弃；
 - 全角冒号后紧跟数字时只是标点（两个客运大楼：1号客运大楼），保留冒号，让后面的数字照常改写；
   汉字、假名后的半角冒号接数字（总部:21）多为引文页码，丢弃；
 - 中文、日语里数字两侧夹在汉字、假名之间的空格（于 1903 年）改写后删除；
@@ -14,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from ..rules import Rule, Skip
+from ..rules import DASHES, Rule, Skip
 
 # 汉字（扩展 A、基本区、兼容区）、平假名、片假名（含长音符）的字符范围
 HAN = f"{chr(0x3400)}-{chr(0x4DBF)}{chr(0x4E00)}-{chr(0x9FFF)}{chr(0xF900)}-{chr(0xFAFF)}"
@@ -45,13 +46,31 @@ def dotted_numbers(m, ctx):
     return None
 
 
+# 汉字数字。阿拉伯数字紧挨着它们时，改写后会连成一个数（安倍晋三14日 → 安倍晋三十四日，弗二15 → 弗二十五）
+HAN_NUMERALS = "〇零一二三四五六七八九十两"
+
+
 def guard_rules(num: str) -> list:
     """在各语言规则之前运行的保护规则。num 是该语言的数字写法正则。"""
     return [
+        Rule(
+            pattern = re.compile(pattern = rf"(?<=[{HAN_NUMERALS}]){num}|{num}(?=[{HAN_NUMERALS}])"),
+            handle = lambda m, ctx: Skip(reason = f"数字紧挨汉字数字，改写后会连成一个数「{adjacent(m = m, ctx = ctx)}」"),
+        ),
         Rule(pattern = re.compile(pattern = rf"{num}(?:\s?[{MIDDLE_DOTS}]\s?{num})+"), handle = dotted_numbers),
         Rule(
             pattern = re.compile(pattern = rf"{num}\s*[{FULLWIDTH_DASHES}]\s*{num}"),
             handle = lambda m, ctx: Skip(reason = f"范围或编号「{m.group()}」"),
+        ),
+        Rule(
+            # 数字带上单位或量词再接连字符的范围（600만-700만、3万～5万、1990年-1995年）
+            pattern = re.compile(pattern = rf"{num}[^\W\d_]{{1,3}}\s*[{re.escape(pattern = DASHES + FULLWIDTH_DASHES)}]\s*{num}"),
+            handle = lambda m, ctx: Skip(reason = f"范围或编号「{m.group()}」"),
+        ),
+        Rule(
+            # 全角负号「－6時間」；长音符号「ー」不跟在片假名后时也是误用的负号（更にー1時間）
+            pattern = re.compile(pattern = rf"(?<![\w.,])[{FULLWIDTH_DASHES}]\s?{num}|(?<![{KATAKANA}])ー{num}"),
+            handle = lambda m, ctx: Skip(reason = f"负号或连字符「{m.group()}」"),
         ),
         Rule(
             pattern = re.compile(pattern = rf"(?<![A-Za-z])[A-Za-z][A-Za-z.]*\s{num}"),
@@ -63,6 +82,10 @@ def guard_rules(num: str) -> list:
             handle = lambda m, ctx: Skip(reason = f"型号或编号「{m.group()}」"),
         ),
     ]
+
+
+def adjacent(m, ctx) -> str:
+    return ctx.text[max(0, m.start() - 1):m.end() + 1]
 
 
 def colon_punct_rule() -> Rule:
