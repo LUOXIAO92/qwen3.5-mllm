@@ -277,3 +277,7 @@ def test_hplt_persian_segment_code_accepted():
     doc = _doc(NA = 0.9)
     doc["lang"], doc["prob"], doc["seg_langs"] = ["pes_Arab"], [0.98], ["fas_Arab"] * 4
     assert hplt_doc_ok(doc, genres = ("NA",), glotlid_code = "pes_Arab") == "na"
+
+
+def test_thai_repeated_phrases_are_not_repeated_sentences():
+    assert check_text("ฟัง 'ภาษาไทยวันละคำ' ของ เพลิน พรหมแดน สุดยอด ! สุดยอด ! สุดยอด !", lang = "th") is None
