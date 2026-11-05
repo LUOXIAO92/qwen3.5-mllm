@@ -94,10 +94,14 @@ tts_models:
 asr_models:
   qwen3_asr:
     batch_size: 32
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True   # #22 es：按时长升序成批时显存逐批增长到 32 GB
     env: envs/asr-qwen3
     module: pipeline.asr.qwen3_asr
   whisper:
     batch_size: 32
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True   # #22 es：按时长升序成批时显存逐批增长到 32 GB
     env: envs/asr-qwen3
     module: pipeline.asr.whisper
   whisper_fa:
