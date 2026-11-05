@@ -132,87 +132,88 @@ asr_models:
 # asr：主 ASR；cross_asr：可选的交叉 ASR，只对主 ASR 已一致的样本运行，两者都一致才算通过；
 # sec_per_char：「音频秒数 / 非空白字符数」的合理范围 [下限, 上限]，范围参照 FLEURS 各语言的实际语速，
 #   上限留出余量，用来拦下 TTS 失控的长音频，下限拦下被截断的短音频
+# 各语言 TTS 权重按 #21 试验中「语言 × TTS 模型」的通过率调整：通过率高的模型权重大，OmniVoice（约 27%）只保留少量以保持音色多样；
+# IndexTTS 在 zh、ja、en、es 上未经试验，给权重 1 观察通过率。
 langs:
   zh:
-    tts: {qwen3_tts: 3, omnivoice: 2}
+    tts: {qwen3_tts: 3, indextts25: 1, omnivoice: 1}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.07, 0.60]
   en:
-    tts: {omnivoice: 3, qwen3_tts: 2, supertonic3: 2}
+    tts: {supertonic3: 4, omnivoice: 2, qwen3_tts: 2, indextts25: 1}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.03, 0.22]
   ja:
-    tts: {omnivoice: 3, qwen3_tts: 2, supertonic3: 2}
+    tts: {qwen3_tts: 3, supertonic3: 3, indextts25: 1, omnivoice: 1}
     asr: haas_ja
     cross_asr: qwen3_asr
     sec_per_char: [0.07, 0.45]
   ko:
-    tts: {qwen3_tts: 3, omnivoice: 2, supertonic3: 2}
+    tts: {supertonic3: 4, qwen3_tts: 3, omnivoice: 1}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.07, 0.45]
   de:
-    tts: {qwen3_tts: 3, omnivoice: 2, voxcpm2: 1, supertonic3: 2}
+    tts: {qwen3_tts: 3, supertonic3: 3, omnivoice: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.03, 0.30]
   fr:
-    tts: {omnivoice: 3, qwen3_tts: 2, supertonic3: 2}
+    tts: {qwen3_tts: 2, supertonic3: 2, omnivoice: 2}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.03, 0.22]
   ru:
-    tts: {omnivoice: 3, voxcpm2: 2, supertonic3: 2}
+    tts: {supertonic3: 4, voxcpm2: 2, omnivoice: 1}
     asr: gigaam
     cross_asr: qwen3_asr
     sec_per_char: [0.035, 0.20]
   pt:
-    tts: {voxcpm2: 3, qwen3_tts: 2, omnivoice: 1, supertonic3: 2}
+    tts: {supertonic3: 3, qwen3_tts: 3, voxcpm2: 1, omnivoice: 1}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.04, 0.22]
   es:
-    tts: {qwen3_tts: 3, omnivoice: 2, voxcpm2: 1, supertonic3: 2}
+    tts: {qwen3_tts: 4, indextts25: 1, omnivoice: 1, supertonic3: 1, voxcpm2: 1}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.04, 0.22]
   it:
-    tts: {omnivoice: 3, qwen3_tts: 2, voxcpm2: 1, supertonic3: 2}
+    tts: {qwen3_tts: 4, supertonic3: 2, omnivoice: 1}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.04, 0.24]
   id:
-    tts: {voxcpm2: 3, omnivoice: 2, supertonic3: 2}
+    tts: {supertonic3: 4, voxcpm2: 2, omnivoice: 1}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.04, 0.24]
-  ms:
-    tts: {voxcpm2: 3, omnivoice: 2}
+  ms:                      # Qwen3-ASR 的马来语明显弱于 Whisper，交叉核对误杀多（#21），不做交叉
+    tts: {voxcpm2: 3, omnivoice: 1}
     asr: whisper
-    cross_asr: qwen3_asr
     sec_per_char: [0.03, 0.20]
   th:
-    tts: {omnivoice: 3, voxcpm2: 2}
+    tts: {voxcpm2: 3, omnivoice: 1}
     asr: typhoon
     cross_asr: qwen3_asr
     sec_per_char: [0.03, 0.18]
   vi:
-    tts: {omnivoice: 3, voxcpm2: 2, vieneu: 2, supertonic3: 2}
+    tts: {vieneu: 3, omnivoice: 2, voxcpm2: 2, supertonic3: 1}
     asr: qwen3_asr
     cross_asr: whisper
     sec_per_char: [0.04, 0.25]
   fil:                     # Whisper 明显优于 Qwen3-ASR（#15 验收），不用 Qwen3-ASR 交叉
-    tts: {voxcpm2: 3, omnivoice: 2}
+    tts: {voxcpm2: 3, omnivoice: 1}
     asr: whisper
     sec_per_char: [0.04, 0.26]
   ar:
-    tts: {indextts25: 3, omnivoice: 2, supertonic3: 2}
+    tts: {indextts25: 4, supertonic3: 2, omnivoice: 1}
     asr: jais_asr
     sec_per_char: [0.04, 0.26]
   tr:
-    tts: {voxcpm2: 3, omnivoice: 2, supertonic3: 2}
+    tts: {supertonic3: 4, voxcpm2: 2, omnivoice: 1}
     asr: whisper
     sec_per_char: [0.035, 0.22]
   fa:
