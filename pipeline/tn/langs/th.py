@@ -18,7 +18,7 @@ import re
 from ..numwords import th_cardinal, th_digits
 from ..rules import Rule, Skip
 from .base import Lang
-from .extras import negative_rule
+from .extras import common_rules, negative_rule
 
 THAI = f"{chr(0x0E01)}-{chr(0x0E4E)}"
 # 元音符号与声调符号（不含辅音）
@@ -57,7 +57,8 @@ class Th(Lang):
             pattern = re.compile(pattern = rf"(?P<era>{eras})(?P<space>\s?)(?P<num>\d{{3,4}})(?![\d.,])"),
             handle = self.era_year,
         )
-        return [negative_rule(lang = self, minus = "ลบ", words = ("องศา",)), era] + super().rules()
+        negative = negative_rule(lang = self, minus = "ลบ", words = ("องศา",))
+        return common_rules(lang = self, list_numbers = False) + [negative, era] + super().rules()
 
     def extra_rules(self) -> list:
         return [

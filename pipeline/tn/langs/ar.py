@@ -35,7 +35,7 @@ from itertools import product
 
 from ..rules import Rule, Skip, alternation
 from .base import Lang
-from .extras import missing_space_rule
+from .extras import common_rules, missing_space_rule
 
 TASHKEEL = re.compile(pattern = "[ً-ْـ]")
 ARABIC_LETTERS = f"{chr(0x0620)}-{chr(0x064A)}{chr(0x066E)}-{chr(0x06D3)}{chr(0x06FA)}-{chr(0x06FF)}"
@@ -362,7 +362,7 @@ class Ar(Lang):
             pattern = re.compile(pattern = rf"(?P<waw>(?<![\w\u0640])و)?(?P<num>{self.num})"),
             handle = self.cardinal_with_waw,
         )
-        return [
+        return common_rules(lang = self, list_numbers = False) + [
             Rule(
                 pattern = re.compile(pattern = rf"(?P<prev>(?<![{ARABIC_LETTERS}])(?:عام|العام|سنة|السنة|في|منذ)\s)?(?<![\d.,٫٬])(?P<num>\d{{3,4}})\s?(?P<era>ق\.?\s?م\.?)(?![{ARABIC_LETTERS}])"),
                 handle = self.year_bc,

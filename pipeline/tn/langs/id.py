@@ -7,6 +7,8 @@
 - 单独的「°」读 derajat；「-10 derajat」读 minus sepuluh derajat。
 - 不带千分位的 5–6 位数（10000 orang）后接文字时按数值读。
 - hubungi、telepon、nomor 后的数字可能逐位读，丢弃。
+- 「Rp 893 M」「Rp 5 jt」读 delapan ratus sembilan puluh tiga miliar rupiah、lima juta rupiah（M = miliar、jt = juta、
+  rb = ribu、T = triliun）；金额和价格结尾的「,-」「,00」不读；后面没有金额的「Rp」、不带分隔符的「Jam 1005」丢弃。
 
 马来语（ms.py）沿用这里的规则，只换数词和单位的词。
 """
@@ -16,10 +18,21 @@ from __future__ import annotations
 import re
 
 from ..numwords import idms_cardinal, idms_digits
-from ..rules import Rule, Skip
-from .base import Lang
-from .extras import long_plain_rule, negative_rule
+from ..rules import Rule, Skip, alternation
+from .base import ANY_SCALES, Lang, word_after
+from .extras import adjacent_numeral_rule, common_rules, long_plain_rule, negative_rule
 
+# 金额中的数量级词及其缩写（Rp 893 M = 893 miliar rupiah）
+MONEY_SCALES = {
+    "rb": "ribu", "ribu": "ribu", "jt": "juta", "juta": "juta", "M": "miliar", "miliar": "miliar", "milyar": "miliar",
+    "T": "triliun", "triliun": "triliun",
+}
+MONEY_SCALES.update({k.capitalize(): v for k, v in list(MONEY_SCALES.items()) if len(k) > 1})
+# 写成文字的数词（不含 ribu、juta 等数量级词）：数字后紧跟这些词时读法有歧义
+ADJACENT_NUMERALS = (
+    "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "lapan", "sembilan", "sepuluh", "sebelas",
+    "seratus", "puluh", "belas", "ratus",
+)
 TIME_WORDS = ("pagi", "siang", "sore", "petang", "malam", "WIB", "WITA", "WIT")
 
 
@@ -46,15 +59,35 @@ class Id(Lang):
         return idms_digits(digits = digits, lang = self.code)
 
     def rules(self) -> list:
-        """负数先于公共保护规则运行（公共规则把 -10 当作负号或连字符丢弃）。"""
-        if self.minus is None:
-            return super().rules()
-        return [negative_rule(lang = self, minus = self.minus, words = ("derajat",))] + super().rules()
+        """共用规则、数字后紧跟数词、负数先于公共保护规则运行（公共规则把 -10 当作负号或连字符丢弃）。"""
+        first = common_rules(lang = self) + [adjacent_numeral_rule(lang = self, words = ADJACENT_NUMERALS)]
+        if self.minus is not None:
+            first.append(negative_rule(lang = self, minus = self.minus, words = ("derajat",)))
+        return first + super().rules()
 
     def extra_rules(self) -> list:
         hours = "|".join(self.hour_words)
         times = "|".join(TIME_WORDS)
+        scales = alternation(words = MONEY_SCALES)
         return [
+            # 「Jam 1005」「pukul 0930」：不带分隔符的时刻写法不确定
+            Rule(
+                pattern = re.compile(pattern = rf"\b(?:{hours})\s\d{{3,4}}(?!\d|[.,:]\d)"),
+                handle = lambda m, ctx: Skip(reason = f"不带分隔符的时刻写法不确定「{m.group()}」"),
+            ),
+            # 「Rp 893 M」「Rp5 jt」「Rp 1.000.000,-」：金额缩写和结尾的 ,- ,00
+            Rule(
+                pattern = re.compile(
+                    pattern = rf"(?<![A-Za-z])Rp\.?\s?(?P<num>{self.num_bare})(?:\s?(?P<scale>{scales})(?![\w]))?(?P<tail>,-|,00(?!\d))?",
+                ),
+                handle = self.rupiah,
+            ),
+            Rule(
+                pattern = re.compile(pattern = r"(?<![A-Za-z])Rp\.?(?![\w])"),
+                handle = lambda m, ctx: Skip(reason = f"货币符号后没有金额「{m.group()}」"),
+            ),
+            # 「1.000.000,-」：价格结尾的 ,- 不读
+            Rule(pattern = re.compile(pattern = rf"(?P<num>{self.num}),-"), handle = self.price_dash),
             Rule(
                 pattern = re.compile(
                     pattern = rf"(?:(?P<word>\b(?:{hours}))\s)?(?<![\d.,:])(?P<h>\d{{1,2}})[.:](?P<m>\d{{2}})(?!\d|[.,:]\d)(?=(?P<after>\s(?:{times})\b)?)",
@@ -70,6 +103,35 @@ class Id(Lang):
             Rule(pattern = re.compile(pattern = r"(?<![\w.,])(?P<num>\d{1,2})\s?hb(?![\w])"), handle = self.haribulan),
             long_plain_rule(lang = self),
         ]
+
+    def rupiah(self, m, ctx):
+        n = self.parse(written = m.group("num"))
+        if n is None:
+            return Skip(reason = f"金额写法无法确定「{m.group()}」")
+        scale = MONEY_SCALES.get(m.group("scale") or "", "")
+        # 「Rp5.000,00」：小数部分全为 0 的是分位，不读
+        if n.frac is not None and set(n.frac) == {"0"} and not scale:
+            n = self.parse(written = n.int_digits)
+        if not n.is_int and not scale:
+            return Skip(reason = f"金额的小数部分读法不确定「{m.group()}」")
+        after = word_after(text = ctx.text, end = m.end()).lower()
+        if not scale and after in {k.lower() for k in MONEY_SCALES} | ANY_SCALES:
+            return Skip(reason = f"金额后的数量级词未登记「{m.group()} {after}」")
+        spoken = self.say(n = n, ctx = ctx)
+        if isinstance(spoken, Skip):
+            return spoken
+        ctx.kind(name = "货币", surface = m.group())
+        # 「Rp180 juta rupiah」：原文已写出 rupiah 时不再加
+        if after == "rupiah":
+            return self.join(spoken, scale)
+        return self.join(spoken, scale, "rupiah")
+
+    def price_dash(self, m, ctx):
+        n = self.parse(written = m.group("num"))
+        if n is None or not n.is_int:
+            return Skip(reason = f"金额写法无法确定「{m.group()}」")
+        ctx.kind(name = "基数", surface = m.group())
+        return ctx.num(spoken = self.card(n = n.value), written = m.group("num"))
 
     def time(self, m, ctx):
         h, mm = int(m.group("h")), int(m.group("m"))

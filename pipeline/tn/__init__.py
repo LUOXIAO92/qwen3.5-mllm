@@ -53,7 +53,8 @@ tn_status（unchanged、normalized、dropped）和 tn_note（改写或丢弃的�
   RM50、-10 derajat；th：14.30 น.、พ.ศ. 2500、99.50 บาท、句末误加的句点；vi：thứ nhất、tháng tư、
   lúc 6:30（sáu giờ ba mươi phút）、km 等单位、-10°C；tr：撇号后缀按元音和谐接到读法上（2006'da → iki bin
   altıda）、saat 14:30、序数（4. sınıf、2. Dünya Savaşı）、「%25」；fa：日期中的序数（دوازدهم مرداد）、15ام、
-  14ساله、٪۱۰、ساعت 2:30。共用的负温度、5–6 位数规则在 langs/extras.py。
+  14ساله、٪۱۰、ساعت 2:30。这八种语言共用的规则在 langs/extras.py：负温度、5–6 位数、括号中重复的数字只读一次
+  （8 (Delapan)、tiga (3)）、行首列表序号删去、尺寸（越南语 140 x 130 读 nhân）、引用标号和 28!10 这类写法丢弃。
 - ar：按被数名词的性（名词表）和数词的格（介词、支配属格的名词、及物动词之后）选择词形，性或格无法确定且
   影响词形时丢弃；年份、日期、百分数、单位、货币，以及 م、هـ 纪元标记。
 - fil：按 FLEURS 朗读者的习惯用他加禄语数词（年份 isang libo siyam na raan at animnapu't anim、ika-18 →

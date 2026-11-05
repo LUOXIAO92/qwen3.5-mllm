@@ -15,6 +15,9 @@ sampung libong taon（10,000），序数读作 ikalabingwalong siglo（ika-18）
 - 序数：「ika-18」读 ikalabingwalo，「ika-2」「ika-3」读 ikalawa、ikatlo，后接名词时同样加连接成分；ika-1 丢弃。
 - 百分数：「70%」读 pitumpung porsiyento。
 - 缩写「atbp.」读 at iba pa（FLEURS 朗读者同样这样读）。
+- 行首的经节号（6 Nang magkagayo'y…）和列表序号（3. Una）删去，句中的丢弃；他加禄语编号用词之后（Ruta Bilang 66、
+  Kabanata 3）不加连接成分；前面是英语词、英语月份或其他名称（my number 1、Windows 11、Volume 1、January 15、
+  Defenders 2），或后面是 AM、PM 时，读法无法确定，丢弃。
 - 丢弃：小数、时刻（2:30）、AD/BC 纪年、0、序数 100 以上。
 """
 
@@ -24,6 +27,7 @@ import re
 
 from ..rules import Number, Rule, Skip
 from .base import Lang
+from .extras import common_rules
 
 UNITS = ["", "isa", "dalawa", "tatlo", "apat", "lima", "anim", "pito", "walo", "siyam"]
 TEENS = {
@@ -48,6 +52,24 @@ FUNCTION_WORDS = {
     "yata", "ko", "mo", "niya", "namin", "natin", "nila", "ninyo", "siya", "ako", "ikaw", "kami", "tayo", "sila",
     "kayo", "ito", "iyan", "iyon", "dito", "diyan", "doon", "upang", "dahil", "kaya", "pero", "ngunit", "subalit",
     "hindi", "ayon", "bago", "habang", "gaya", "tulad", "kaysa", "nga", "pa'y", "na'y", "ba't", "lahat",
+}
+# 行首经节号后面常见的词（6 Nang magkagayo'y…、2 Nguni't…）：这时行首的数字是节号，删去
+VERSE_NEXT = FUNCTION_WORDS | {"nguni't", "sapagka't", "datapuwa't", "kaya't", "at", "ang", "sa", "nang", "ngunit"}
+# 前面是这些英语词或编号用词时，数字的读法（英语 one、他加禄语 isa）无法确定，丢弃
+ENGLISH_CONTEXT = {
+    "number", "no", "top", "the", "my", "version", "windows", "iphone", "ios", "android", "season", "episode",
+    "chapter", "volume", "vol", "issue", "part", "level", "grade", "phase", "round", "page", "step", "rank", "class",
+    "room", "gen", "edition", "series", "model", "type", "category", "formula", "apollo", "boeing", "airbus", "galaxy",
+    "pixel", "xbox", "playstation", "ps", "office", "covid", "web", "day", "week", "game", "cup", "world", "item",
+    "unit", "lot", "block", "phase", "track", "act", "scene", "verse", "psalm", "psalms", "route", "highway",
+    "january", "february", "march", "april", "june", "july", "august", "september", "october", "november",
+    "december",
+}
+# 他加禄语的编号用词：后面的数字按他加禄语读，不加连接成分（Ruta Bilang 66、Kabanata 3）
+TAGALOG_LABELS = {
+    "Bilang", "Kabanata", "Baitang", "Gradong", "Grado", "Pahina", "Taludtod", "Seksiyon", "Seksyon", "Artikulo",
+    "Kalye", "Distrito", "Purok", "Sona", "Silid", "Kuwarto", "Antas", "Yugto", "Bahagi", "Aklat", "Ruta", "Batas",
+    "Konstitusyon", "Konstitusyong",
 }
 VOWELS = "aeiou"
 
@@ -120,7 +142,15 @@ class Fil(Lang):
             pattern = re.compile(pattern = r"(?<![\w-])(?P<ika>[Ii]ka)-(?P<num>\d{1,3}(?:,\d{3})*)(?!\d|[.,]\d)"),
             handle = self.ordinal,
         )
-        return [ordinal] + super().rules()
+        verse = Rule(pattern = re.compile(pattern = r"^\d{1,3}\s(?=(?P<next>[A-Z][\w'’]*))"), handle = self.verse_number)
+        return common_rules(lang = self) + [verse, ordinal] + super().rules()
+
+    def verse_number(self, m, ctx):
+        """行首的经节号（6 Nang magkagayo'y…）删去；后面是其他大写词时（5 Paraan…）按数量读。"""
+        if m.group("next").lower() not in VERSE_NEXT:
+            return None
+        ctx.kind(name = "删去行首节号", surface = m.group().strip())
+        return ""
 
     def extra_rules(self) -> list:
         return [
@@ -158,8 +188,21 @@ class Fil(Lang):
             return "at iba pa."
         return "at iba pa"
 
+    @staticmethod
+    def prev_word(ctx, start: int) -> tuple:
+        """前一个词，以及它是否在句首（文本开头或句号、问号、叹号之后）。"""
+        before = ctx.text[:start].rstrip()
+        m = re.search(pattern = r"([^\W\d_][\w'’]*)$", string = before)
+        if not m:
+            return "", False
+        head = before[:m.start()].rstrip()
+        return m.group(1), (not head or head[-1] in ".!?")
+
     def needs_linker(self, ctx, start: int, end: int) -> bool:
-        """数词后面是名词等实词时加连接成分。"""
+        """数词后面是名词等实词时加连接成分；前面是大写开头的名称、编号用词（Volume 1、Ruta Bilang 66）时不加。"""
+        word, at_start = self.prev_word(ctx = ctx, start = start)
+        if word in TAGALOG_LABELS:
+            return False
         rest = ctx.text[end:]
         m = re.match(pattern = r" ([^\W\d_][\w'’-]*)", string = rest)
         if not m:
@@ -183,9 +226,23 @@ class Fil(Lang):
             return Skip(reason = f"菲律宾语小数的读法（punto、tuldok）不确定「{m.group()}」")
         if n.value == 0:
             return Skip(reason = f"菲律宾语零的读法（sero、wala）不确定「{m.group()}」")
+        word, at_start = self.prev_word(ctx = ctx, start = m.start())
+        if word.lower() in ENGLISH_CONTEXT:
+            return Skip(reason = f"英语语境或编号中的数字，读法不确定「{word} {m.group()}」")
+        # 名称后的编号（Defenders 2、Apollo 11）多为英语读法
+        if word[:1].isupper() and not at_start and word.lower() not in FUNCTION_WORDS and word not in TAGALOG_LABELS \
+                and not self.year_context(ctx = ctx, start = m.start()):
+            return Skip(reason = f"名称后的编号，读法不确定「{word} {m.group()}」")
+        rest = ctx.text[m.end():]
+        if re.match(pattern = r"\s?(?:[AaPp]\.?[Mm]\.?)(?![\w])", string = rest):
+            return Skip(reason = f"英语时刻写法，读法不确定「{m.group()}{rest[:4]}」")
+        # 句中的经节号、序号（…magnanakaw. 5 Kayong lahat…）
+        before = ctx.text[:m.start()].rstrip()
+        if before and before[-1] in ".!?" and re.match(pattern = r"\s[A-Z]", string = rest):
+            return Skip(reason = f"句中的经节号或序号「{m.group()}」")
         spoken = ctx.num(spoken = self.card(n = n.value), written = m.group())
         if self.year_context(ctx = ctx, start = m.start()):
-            ctx.kind(name = "年份", surface = m.group())
+            ctx.kind(name = "日期" if word in MONTHS and n.value <= 31 else "年份", surface = m.group())
             return spoken
         if self.needs_linker(ctx = ctx, start = m.start(), end = m.end()):
             return linked(words = spoken)

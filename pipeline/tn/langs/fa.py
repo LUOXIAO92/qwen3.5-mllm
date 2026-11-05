@@ -21,7 +21,7 @@ import re
 from ..numwords import fa_cardinal, fa_digits
 from ..rules import DASHES, Rule, Skip, alternation
 from .base import Lang
-from .extras import long_plain_rule, missing_space_rule, negative_rule
+from .extras import adjacent_numeral_rule, common_rules, long_plain_rule, missing_space_rule, negative_rule
 
 ZWNJ = chr(0x200C)
 TATWEEL = chr(0x0640)
@@ -31,6 +31,8 @@ TATWEEL_WORD = (
     rf"(?<![\w\u0640\u064B-\u0652])(?=[{ARABIC_LETTERS}\u0640\u064B-\u0652]*\u0640+[{ARABIC_LETTERS}])"
     rf"[{ARABIC_LETTERS}\u0640\u064B-\u0652]+"
 )
+# 写成文字的数词：数字后紧跟这些词时读法有歧义（۲۰۵۰ سه برابر → دو هزار و پنجاه سه）
+ADJACENT_NUMERALS = ("یک", "دو", "سه", "چهار", "پنج", "شش", "هفت", "هشت", "نه", "ده", "صد", "بیست", "سی", "چهل", "پنجاه")
 MONTHS = (
     "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند",
     "ژانویه", "فوریه", "مارس", "آوریل", "مه", "ژوئن", "ژوئیه", "اوت", "سپتامبر", "اکتبر", "نوامبر", "دسامبر",
@@ -68,7 +70,8 @@ class Fa(Lang):
         """负温度、与文字用连字符相连的年龄先于公共保护规则运行。"""
         dash = re.escape(pattern = DASHES)
         ages = alternation(words = AGE_SUFFIXES)
-        return [
+        return common_rules(lang = self, list_numbers = False, standalone_citation = True) + [
+            adjacent_numeral_rule(lang = self, words = ADJACENT_NUMERALS),
             negative_rule(lang = self, minus = "منفی", words = ("درجه",)),
             Rule(
                 pattern = re.compile(pattern = rf"(?<![\d.,٫٬\w])(?P<num>\d{{1,3}})[{dash}]?(?P<suf>{ages})(?![{ARABIC_LETTERS}])"),
