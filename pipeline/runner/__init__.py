@@ -27,6 +27,11 @@ pipeline/CONVENTIONS.md 检查输入格式（缺文件、缺字段、语言代�
     python -m pipeline.runner manifest $C                     # 训练清单、samples.jsonl、统计
     python -m pipeline.runner all $C ...                      # 按上面的顺序依次执行全部（不含分片）
 
+``tts`` 与 ``asr`` 的 ``--models a b`` 只处理列出的模型，所以 CPU 模型（如 supertonic3）与 GPU 模型可以在两个进程里
+同时跑同一个输出目录（块文件按模型分开，progress.json 合并各进程写入的阶段）；配置里 ``processes`` 大于 1 的模型同时开多个
+封装子进程，各处理一块，整个模型阶段只持一次 gpu.lock。配置里的 ``prefer_builtin: true``（可按语言覆盖）让抽到的模型在有
+内置音色可用时只用内置音色，其余语言用克隆。批次与吞吐的测量用 ``pipeline.runner.bench``，结果表用 ``bench_table``。
+
 ``--scripts`` 的朗读稿按 entry_id 合并进条目，``tn_status`` 为 dropped 的条目不合成。``--split train`` 只用非留出
 音色，``--split test`` 只用留出音色，两者分别运行、分别放在不同输出目录。每一步可以单独重跑：已完成的块直接跳过，
 下游文件按 sample_id 排序重写，内容不变。
