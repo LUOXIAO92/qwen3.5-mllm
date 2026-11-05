@@ -22,6 +22,7 @@
 
 import argparse
 import json
+import math
 import re
 import time
 from pathlib import Path
@@ -31,6 +32,9 @@ import soundfile as sf
 import torch
 import torchaudio
 
+from pipeline.text.langs import CHARS_PER_SECOND
+
+CODEC_TOKENS_PER_SECOND = 12.5
 CUSTOM_VOICE_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 BASE_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 OUTPUT_SR = 16000
@@ -123,16 +127,30 @@ def to_16k(wav: np.ndarray, sr: int) -> np.ndarray:
     return tensor.squeeze(0).numpy()
 
 
+def max_new_tokens_for(batch: list) -> int:
+    """按文本长度给生成步数设上限，防止个别片段收不住尾、整批生成到默认的 2048 步。
+
+    编解码器每秒约 12.5 个 token；上限取「该语言平均语速下时长的 2 倍再加 3 秒」，按批内最长的片段计算。
+    """
+    longest = max(
+        len(seg["text"]) / CHARS_PER_SECOND.get(seg["lang"], 10.0)
+        for seg in batch
+    )
+    return int(math.ceil(CODEC_TOKENS_PER_SECOND * (2.0 * longest + 3.0)))
+
+
 def synthesize_batch(models: dict, batch: list, clone_prompts: dict):
     """合成一批同模式的片段，返回（波形列表，模型原生采样率）。"""
     mode = batch[0]["mode"]
     texts = [seg["text"] for seg in batch]
     languages = [LANG_NAMES[seg["lang"]] for seg in batch]
+    max_new_tokens = max_new_tokens_for(batch = batch)
     if mode == "builtin":
         return models["builtin"].generate_custom_voice(
             text = texts,
             language = languages,
             speaker = [seg["builtin_name"] for seg in batch],
+            max_new_tokens = max_new_tokens,
         )
     prompts = []
     for seg in batch:
@@ -148,6 +166,7 @@ def synthesize_batch(models: dict, batch: list, clone_prompts: dict):
         text = texts,
         language = languages,
         voice_clone_prompt = prompts,
+        max_new_tokens = max_new_tokens,
     )
 
 
