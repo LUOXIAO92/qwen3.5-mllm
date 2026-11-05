@@ -50,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--langs", nargs = "+", default = None, help = "plan：只处理这些语言")
     parser.add_argument("--limit-per-lang", type = int, default = None, help = "plan：每种语言最多取多少条（按 entry_id 排序取前面的）")
     parser.add_argument("--fallback-original", action = "store_true", help = "plan：条目没有 script 时用原文当朗读稿（集成测试用）")
+    parser.add_argument("--models", nargs = "+", default = None, help = "tts、asr：只处理这些模型（配置里的名字）；CPU 与 GPU 模型可在两个进程里同时跑同一输出目录")
     parser.add_argument("--role", choices = ["primary", "cross"], default = "primary", help = "asr：主 ASR 或交叉 ASR")
     parser.add_argument("--shard", type = parse_shard, default = (0, 1), help = "tts、asr：只执行第 K 片，写成 K/N")
     parser.add_argument("--progress-interval", type = float, default = 30.0, help = "进度日志与 progress.json 的刷新间隔（秒）")
@@ -90,7 +91,7 @@ def main() -> int:
             tasks = load_checked(path = layout.tasks, kind = "tasks", hint = "先运行 plan 子命令")
             shard_tasks = [row for row in tasks if in_shard(row["sample_id"], args.shard)]
             if step == "tts":
-                tts_stage(cfg = cfg, tasks = shard_tasks, layout = layout, work_dir = args.work_dir, budget = budget, progress = progress)
+                tts_stage(cfg = cfg, tasks = shard_tasks, layout = layout, work_dir = args.work_dir, budget = budget, progress = progress, models = args.models)
             elif step == "length":
                 length_stage(cfg = cfg, tasks = tasks, layout = layout, progress = progress)
             elif step in ("asr", "asr-cross"):
@@ -103,6 +104,7 @@ def main() -> int:
                     budget = budget,
                     role = role,
                     progress = progress,
+                    models = args.models,
                 )
             elif step == "compare":
                 compare_stage(cfg = cfg, tasks = tasks, layout = layout, progress = progress)

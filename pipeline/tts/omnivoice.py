@@ -43,6 +43,8 @@ import soundfile as sf
 import torch
 import torchaudio
 
+from pipeline.text.langs import CHARS_PER_SECOND
+
 MODEL_NAME = "k2-fsa/OmniVoice"
 TARGET_SR = 16000
 
@@ -149,8 +151,8 @@ def main() -> None:
                 continue
         todo.append(job)
 
-    # 按模式分组、再按文本长度排序，减少批内填充
-    todo.sort(key = lambda j: (bool(j.get("ref_audio")), len(j["text"])))
+    # 按模式分组、再按估计的朗读时长排序（不同语言的字符数不可直接比较），减少批内填充
+    todo.sort(key = lambda j: (bool(j.get("ref_audio")), len(j["text"]) / CHARS_PER_SECOND.get(j["lang"], 10.0)))
     batches = [todo[i : i + args.batch_size] for i in range(0, len(todo), args.batch_size)]
 
     audio_seconds = 0.0

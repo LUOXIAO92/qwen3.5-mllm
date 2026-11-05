@@ -101,7 +101,7 @@ class Progress:
                 return
             self._last_emit = now
             numbers = {name: self._numbers(state = state) for name, state in self.stages.items()}
-            merged = {**self.frozen, **numbers}
+            merged = {**self.frozen, **self._on_disk(), **numbers}
             stamp = datetime.now().isoformat(timespec = "seconds")
             lines = []
             for name, info in numbers.items():
@@ -134,6 +134,14 @@ class Progress:
                     "final": self.final,
                 },
             )
+
+    def _on_disk(self) -> dict:
+        """同一输出目录里别的进程（例如 CPU 模型与 GPU 模型各一个进程）写入的阶段，合并进来。"""
+        try:
+            stages = json.loads((self.out_dir / "progress.json").read_text(encoding = "utf-8")).get("stages", {})
+        except (OSError, ValueError):
+            return {}
+        return {name: info for name, info in stages.items() if name not in self.stages}
 
     def _overall(self, stages: dict) -> dict:
         """整体通过率：各阶段计数器的合计，交叉 ASR 只统计主 ASR 已一致的样本。"""
