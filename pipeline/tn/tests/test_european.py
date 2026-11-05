@@ -54,6 +54,7 @@ NORMALIZED = {
         ('Type IV civilizations exist.', 'Type Four civilizations exist.'),
         ("Baldwin IV's deathbed.", "Baldwin the Fourth's deathbed."),
         ('He had 1500 dollars in the 1998 elections.', 'He had one thousand five hundred dollars in the nineteen ninety-eight elections.'),
+        ('Between 1999 and 2000 it grew.', 'Between nineteen ninety-nine and two thousand it grew.'),
     ],
     'de': [
         ('Am 10. August 1990 wurde er im 19. Jahrhundert geboren.', 'Am zehnten August neunzehnhundertneunzig wurde er im neunzehnten Jahrhundert geboren.'),
@@ -91,6 +92,7 @@ NORMALIZED = {
         ('Er belegte den 87. Platz.', 'Er belegte den siebenundachtzigsten Platz.'),
         ('Die 18. Dynastie herrschte lange.', 'Die achtzehnte Dynastie herrschte lange.'),
         ('Bis zum 20. September 2009 war er Chef.', 'Bis zum zwanzigsten September zweitausendneun war er Chef.'),
+        ('Er hatte 200 Millionen Euro.', 'Er hatte zweihundert Millionen Euro.'),
     ],
     'fr': [
         ('Au XVIIe siècle, Louis XIV et François Ier régnaient. Charles V aussi.', 'Au dix-septième siècle, Louis quatorze et François premier régnaient. Charles cinq aussi.'),
@@ -129,6 +131,8 @@ NORMALIZED = {
         ('Il y a 21 % de femmes.', 'Il y a vingt et un pour cent de femmes.'),
         ('La IIe République.', 'La deuxième République.'),
         ('Henri IV fut roi en 1589.', 'Henri quatre fut roi en mille cinq cent quatre-vingt-neuf.'),
+        ('Dans le 5ᵉ arrondissement de Paris au XIXᵉ siècle.', 'Dans le cinquième arrondissement de Paris au dix-neuvième siècle.'),
+        ('Il a 21 ans et 3 enfants.', 'Il a vingt et un ans et trois enfants.'),
     ],
     'ru': [
         ('В 1950-х годах стандарты были пересмотрены.', 'В тысяча девятьсот пятидесятых годах стандарты были пересмотрены.'),
@@ -164,6 +168,10 @@ NORMALIZED = {
         ('В итоге около 70 млн тонн угля.', 'В итоге около семидесяти миллионов тонн угля.'),
         ('Задержаны 6 афганцев.', 'Задержаны шесть афганцев.'),
         ('Сегодня исполняется 54 года.', 'Сегодня исполняется пятьдесят четыре года.'),
+        ('Было 25 тысяч человек.', 'Было двадцать пять тысяч человек.'),
+        ('Город получил от Фридриха II статус вольного.', 'Город получил от Фридриха Второго статус вольного.'),
+        ('Ему исполнилось 22 года.', 'Ему исполнилось двадцать два года.'),
+        ('С 622 по 750 год правили арабы.', 'С шестьсот двадцать второго по семьсот пятидесятый год правили арабы.'),
     ],
     'pt': [
         ('Havia 22 pessoas e 2 mil pessoas no século XX, com D. Pedro I e Isabel II.', 'Havia vinte e duas pessoas e duas mil pessoas no século vinte, com Dom Pedro primeiro e Isabel segunda.'),
@@ -202,6 +210,8 @@ NORMALIZED = {
         ('Foram 2 mil pessoas.', 'Foram duas mil pessoas.'),
         ('Tinha 1 irmã e 2 irmãos.', 'Tinha uma irmã e dois irmãos.'),
         ('Pesava 2 quilos e media 1 metro.', 'Pesava dois quilos e media um metro.'),
+        ('Havia 200 mil pessoas e 2 milhões de casas.', 'Havia duzentas mil pessoas e dois milhões de casas.'),
+        ('Entre 1942 e 1949 viveu.', 'Entre mil novecentos e quarenta e dois e mil novecentos e quarenta e nove viveu.'),
     ],
     'es': [
         ('Había 200.000 personas y 21 casas en 1991.', 'Había doscientas mil personas y veintiuna casas en mil novecientos noventa y uno.'),
@@ -238,6 +248,8 @@ NORMALIZED = {
         ('El rey Alfonso XIII murió.', 'El rey Alfonso trece murió.'),
         ('Isabel I nació en 1451.', 'Isabel primera nació en mil cuatrocientos cincuenta y uno.'),
         ('Ganó 1 millón de dólares.', 'Ganó un millón de dólares.'),
+        ('Hubo 200 mil votos y 2 millones de personas.', 'Hubo doscientos mil votos y dos millones de personas.'),
+        ('Entre 2001 y 2002 creció.', 'Entre dos mil uno y dos mil dos creció.'),
     ],
     'it': [
         ("Negli anni '80 Pio XII ed Elisabetta II vissero nel XX secolo.", 'Negli anni ottanta Pio dodicesimo ed Elisabetta seconda vissero nel ventesimo secolo.'),
@@ -273,6 +285,7 @@ NORMALIZED = {
         ('Fu eletto con 51 voti.', 'Fu eletto con cinquantuno voti.'),
         ('Il XIX secolo fu lungo.', 'Il diciannovesimo secolo fu lungo.'),
         ('Ha 1 figlio e 3 nipoti.', 'Ha un figlio e tre nipoti.'),
+        ('Nel 2008 e 2017 crebbe.', 'Nel duemilaotto e duemiladiciassette crebbe.'),
     ],
 }
 DROPPED = {
@@ -285,6 +298,8 @@ DROPPED = {
         ('in 1500 cases', '四位数是年份还是数量需要上下文'),
         ('between 3 and 5 May', '并列或范围的日期'),
         ('Mr. smith arrived.', '含缩写'),
+        ('In 2020 one person died.', '数字后紧跟数词，读出来会连成另一个数'),
+        ('It cost 20 two-seat cars.', '数字后紧跟数词，读出来会连成另一个数'),
     ],
     'de': [
         ('Er hatte etwa 1740 die Straße gebaut.', '四位数是年份还是数量需要上下文'),
@@ -297,6 +312,7 @@ DROPPED = {
         ('Er wurde 1 Mal Erster.', ''),
         ('Die Formel-1 fährt.', '型号或编号'),
         ('Er war bis 1998 Leiter der Abteilung.', '四位数是年份还是数量需要上下文'),
+        ('1880 ein Haus wurde gebaut.', '数字后紧跟数词，读出来会连成另一个数'),
     ],
     'fr': [
         ('Il en a 21.', '数词的阴阳性取决于名词'),
@@ -306,6 +322,8 @@ DROPPED = {
         ('Le XIXe-XXe siècles', '罗马数字的范围'),
         ('Il compte 21 000 femmes.', '阴性数词的读法不固定'),
         ('Elle a 41 dioptries.', '数词的阴阳性取决于名词'),
+        ('La version courante est la 3.8. Il existe aussi iOS 4.0.', '数字中的点读法不固定（版本号或外来写法）'),
+        ('En 2020 une loi fut votée.', '数字后紧跟数词，读出来会连成另一个数'),
     ],
     'ru': [
         ('Впереди ограничение 40, а следом', '俄语数词的格取决于上下文'),
@@ -317,6 +335,10 @@ DROPPED = {
         ('В 1920 годах.', '复数 год 前的年份写法不规范'),
         ('Поможет им.', '含缩写'),
         ('1,5 км', '小数的格变化暂不处理'),
+        ('Версия 3.8 вышла.', '数字中的点读法不固定（版本号或外来写法）'),
+        ('В 1990 один из них умер.', '数字后紧跟数词，读出来会连成另一个数'),
+        ('Сегодня исполняется 191 год Льюису.', '数后接 год 可能是年数而不是年份'),
+        ('Телефон вышел 19 декабря 2007 г .', '俄语数词的格取决于上下文'),
     ],
     'pt': [
         ('Havia 22.', '数词的阴阳性取决于名词'),
@@ -324,6 +346,7 @@ DROPPED = {
         ('por M1 e M5', '数字与字母相连'),
         ('Eram 2 a 2.', '数词的阴阳性取决于名词'),
         ('Ele tem 22 caixinhas.', '数词的阴阳性取决于名词'),
+        ('Foi substituído por 120 homens.', 'por 后的数读起来像 por ciento、por cento'),
     ],
     'es': [
         ('Tenía 21.', '数词的阴阳性取决于名词'),
@@ -332,6 +355,8 @@ DROPPED = {
         ('el 1.º lugar', '名词前 primero、tercero 要缩略为 primer、tercer'),
         ('La película Rocky II', '罗马数字的读法取决于上下文'),
         ('Se vendieron 21 casitas.', '数词的阴阳性取决于名词'),
+        ('En 2030 y una más.', '数字后紧跟数词，读出来会连成另一个数'),
+        ('Fue sustituido por 120 hombres.', 'por 后的数读起来像 por ciento、por cento'),
     ],
     'it': [
         ("Il '500-'600 fu ricco.", '撇号省略的年份'),

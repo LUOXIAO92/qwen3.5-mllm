@@ -27,8 +27,10 @@ from functools import lru_cache
 
 from ..numwords import n2w
 from ..rules import Rule, Skip, alternation
-from .base import Lang, word_after, word_before
-from .euro import abbreviation_rules, roman_value, sentence_end_after
+from .base import Lang, word_before
+from .euro import (
+    abbreviation_rules, dotted_decimal_guard, number_word_guard, number_words, roman_value, sentence_end_after,
+)
 
 CASE_NAMES = {
     "nomn": "nominative", "gent": "genitive", "datv": "dative", "accs": "accusative", "ablt": "instrumental",
@@ -238,7 +240,11 @@ class Ru(Lang):
     # ------------------------------------------------------------------
 
     def rules(self) -> list:
-        early = abbreviation_rules(table = ABBREVIATIONS, starters = STARTERS) + [
+        words = set()
+        for case in CASE_NAMES:
+            words |= number_words(card = lambda n, case = case: card_form(n = n, case = case))
+        early = [dotted_decimal_guard(), number_word_guard(words = words, conjunctions = ("и",))]
+        early += abbreviation_rules(table = ABBREVIATIONS, starters = STARTERS) + [
             Rule(
                 pattern = re.compile(pattern = r"(?<![\w.])см\.(?=\s+[а-яА-Я])"),
                 handle = self.see,
@@ -286,7 +292,7 @@ class Ru(Lang):
                 pattern = re.compile(
                     pattern = (
                         rf"(?<![\d.,])(?P<day>\d{{1,2}})(?:\s(?P<link>и|или|по)\s(?P<day2>\d{{1,2}}))?\s(?P<month>{months})"
-                        rf"(?:\s(?P<year>\d{{4}})(?![\d.,]|\s?(?:г\.|года|году|год)))?(?![а-яё])"
+                        rf"(?:\s(?P<year>\d{{4}})(?![\d.,]|\s?(?:г\b|гг\b|года|году|год)))?(?![а-яё])"
                     ),
                 ),
                 handle = self.date,
@@ -333,6 +339,11 @@ class Ru(Lang):
             return spoken + " году"
         n = int(m.group("num"))
         case, plural = GOD_FORMS[m.group("god")]
+        cat = category(n = n)
+        if n < 1000 and not m.group("suf") and (
+            (m.group("god") == "год" and cat == "one") or (m.group("god") == "года" and cat == "few")
+        ):
+            return Skip(reason = f"数后接 год 可能是年数而不是年份「{m.group()}」")
         if case is None:
             before = word_before(text = ctx.text, start = m.start())
             if before in PREPOSITIONAL_BEFORE:
@@ -534,8 +545,22 @@ class Ru(Lang):
             if sentence_end_after(text = text, end = m.end(), starters = STARTERS):
                 out += "."
             return out
+        if len(tokens) == 1:
+            # 人名后的君主序号（Пётр I、Петра I、Екатерины II）优先：Фридриха II статус 中的序号与人名一致
+            name_m = re.search(pattern = r"([А-ЯЁ][а-яё]+)\s$", string = text[:m.start()])
+            if name_m:
+                for pos, case, number, _, anim, score, proper, lemma in parses(word = name_m.group(1)):
+                    gender = REGNAL_LEMMAS.get(lemma)
+                    if pos == "NOUN" and gender and score >= 0.05 and number == "sing" and case in CASE_NAMES:
+                        spoken = ord_form(
+                            n = values[0],
+                            case = case,
+                            gender = gender,
+                            animate = True,
+                        )
+                        options.add((spoken.capitalize(),))
         noun = self.noun_after(text = text, end = m.end())
-        if noun and noun[:1].islower():
+        if not options and noun and noun[:1].islower():
             for case, number, gender, anim in noun_parses(word = noun):
                 # 几个罗马数字并列时名词用复数，每个序数仍是单数（XIX и XX веков）
                 plural = number == "plur" and len(tokens) == 1
@@ -551,20 +576,6 @@ class Ru(Lang):
                     )
                     for v in values
                 ))
-        if not options and len(tokens) == 1:
-            # 人名后的君主序号（Пётр I、Петра I、Екатерины II）
-            name_m = re.search(pattern = r"([А-ЯЁ][а-яё]+)\s$", string = text[:m.start()])
-            if name_m:
-                for pos, case, number, _, anim, score, proper, lemma in parses(word = name_m.group(1)):
-                    gender = REGNAL_LEMMAS.get(lemma)
-                    if pos == "NOUN" and gender and score >= 0.05 and number == "sing" and case in CASE_NAMES:
-                        spoken = ord_form(
-                            n = values[0],
-                            case = case,
-                            gender = gender,
-                            animate = True,
-                        )
-                        options.add((spoken.capitalize(),))
         if len(options) != 1:
             if single:
                 return None

@@ -175,6 +175,7 @@ class Pt(Romance):
     regnal_female = REGNAL_FEMALE
     century_words = {"século", "séculos"}
     thousand_word = "mil"
+    conjunctions = ("e",)
 
     def card(self, n: int) -> str:
         return n2w(n = n, lang = "pt")
@@ -246,6 +247,7 @@ class Pt(Romance):
         names = "|".join(sorted(self.regnal_names | self.regnal_female, key = len, reverse = True))
         return [
             Rule(pattern = re.compile(pattern = rf"(?<![\w.])D\.\s(?=(?:{names})\b)"), handle = self.dom),
+            self.por_guard(),
             Rule(
                 pattern = re.compile(pattern = r"(?<![\w.])séc\.\s?(?P<roman>[IVXLC]+)\b"),
                 handle = self.century_abbreviation,

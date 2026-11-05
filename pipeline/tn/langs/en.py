@@ -16,7 +16,9 @@ import re
 from ..numwords import n2w
 from ..rules import UNKNOWN_UNITS, Rule, Skip, alternation
 from .base import Lang, word_after, word_before
-from .euro import abbreviation_rules, initialism_rule, roman_value, sentence_end_after
+from .euro import (
+    abbreviation_rules, initialism_rule, number_word_guard, number_words, roman_value, sentence_end_after,
+)
 
 MONTHS = (
     "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
@@ -196,6 +198,8 @@ class En(Lang):
             Rule(pattern = re.compile(pattern = r"\bmid-(?P<num>1\d{3}|20\d{2})(?P<s>s)?\b"), handle = self.mid_year),
             Rule(pattern = re.compile(pattern = r"(?<![\w.])c\.\s?(?P<num>\d{3,4})(?![\d]|[.,]\d)"), handle = self.circa),
         ]
+        words = number_words(card = self.card, ordinal = lambda n: n2w(n = n, lang = "en", to = "ordinal"))
+        early.append(number_word_guard(words = words, conjunctions = ("and",)))
         early += abbreviation_rules(table = ABBREVIATIONS, starters = STARTERS)
         early.append(Rule(pattern = re.compile(pattern = r"(?<![\w.])(?:Jr|Sr)\.(?![^\W\d_])"), handle = self.junior))
         early.append(initialism_rule(starters = STARTERS))

@@ -18,7 +18,10 @@ import re
 
 from ..rules import Number, Rule, Skip, alternation
 from .base import Lang, word_after, word_before
-from .euro import abbreviation_rules, initialism_rule, roman_value, space_thousands_pattern, unit_follows
+from .euro import (
+    abbreviation_rules, initialism_rule, number_word_guard, number_words, roman_value, space_thousands_pattern,
+    unit_follows,
+)
 
 # 两个字母的 CD、DC、MC 等多为缩写，不算罗马数字（与 detect 一致）
 ROMAN = r"(?<![\w'’-])(?P<roman>[IVXLCDM]+)(?![\w'’-])"
@@ -117,8 +120,14 @@ class Romance(Lang):
     # 规则
     # ------------------------------------------------------------------
 
+    # 数中的连接词（y、e、et）：「2030 y una」读出来像 2031
+    conjunctions = ()
+
     def rules(self) -> list:
-        early = abbreviation_rules(table = self.abbreviations, starters = self.starters) if self.abbreviations else []
+        words = number_words(card = self.card, ordinal = lambda n: self.ordinal_words(n = n) or "")
+        words |= {"un", "une", "uno", "una", "um", "uma"}
+        early = [number_word_guard(words = words, conjunctions = self.conjunctions)]
+        early += abbreviation_rules(table = self.abbreviations, starters = self.starters) if self.abbreviations else []
         if self.number_abbreviations:
             early.append(Rule(
                 pattern = re.compile(
@@ -141,6 +150,19 @@ class Romance(Lang):
 
     def early_rules(self) -> list:
         return []
+
+    def por_guard(self) -> Rule:
+        """西语、葡语 por 后的数读作 ciento…、cento…（por 120、por 130.000）时，听起来像 por ciento（百分之），丢弃。"""
+
+        def handle(m, ctx):
+            n = self.parse(written = m.group())
+            if n is None or not n.is_int:
+                return None
+            if self.card(n = n.value).startswith(("cien", "cento", "cem")):
+                return Skip(reason = f"por 后的数读起来像 por ciento、por cento「por {m.group()}」")
+            return None
+
+        return Rule(pattern = re.compile(pattern = rf"(?<=\b[Pp]or\s){self.num}"), handle = handle)
 
     def extra_rules(self) -> list:
         months = alternation(words = self.months)

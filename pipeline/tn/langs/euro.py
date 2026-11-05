@@ -101,6 +101,47 @@ def unit_follows(text: str, end: int, units = ()) -> bool:
     return re.match(pattern = rf"\s?(?:(?:{alt})(?![^\W\d_])|[%‰€$£¥])", string = text[end:]) is not None
 
 
+def number_word_guard(words, conjunctions = ()) -> Rule:
+    """数字后紧跟数词（2020 one、1730 seis、2030 y una）：读出来会连成另一个数，丢弃。"""
+    from ..rules import Skip
+
+    alt = "|".join(re.escape(pattern = w) for w in sorted(set(words), key = len, reverse = True))
+    conj = "|".join(re.escape(pattern = w) for w in conjunctions)
+    lead = rf"(?:(?:{conj})\s+)?" if conj else ""
+    pattern = re.compile(
+        pattern = rf"(?<![\d.,])\d+(?:[.,]\d+)*(?=\s+{lead}(?:{alt})(?![^\W\d_]))",
+        flags = re.IGNORECASE,
+    )
+    return Rule(
+        pattern = pattern,
+        handle = lambda m, ctx: Skip(reason = f"数字后紧跟数词，读出来会连成另一个数「{ctx.text[m.start():m.end() + 12].strip()}」"),
+    )
+
+
+def number_words(card, ordinal = None) -> set:
+    """一种语言的数词（0–20、整十及 1–10 的序数），用于 number_word_guard。
+
+    不收百、千、百万（2 mil pessoas、5 Millionen 中的量级词是正常写法），也不收数内的连接词（y、e、et、and）。
+    """
+    values = list(range(0, 21)) + [30, 40, 50, 60, 70, 80, 90]
+    words = set()
+    for n in values:
+        words.update(w.lower() for w in re.split(pattern = r"[\s-]+", string = card(n = n)) if w)
+        if ordinal and 1 <= n <= 10:
+            words.update(w.lower() for w in re.split(pattern = r"[\s-]+", string = ordinal(n = n)) if w)
+    return words - {"y", "e", "et", "and", "und", "и", "ed", "o", "u"}
+
+
+def dotted_decimal_guard() -> Rule:
+    """法语、俄语不用点作小数点或千分位：3.8、iOS 4.0 多为版本号或外来写法，读法不固定，丢弃。"""
+    from ..rules import Skip
+
+    return Rule(
+        pattern = re.compile(pattern = r"(?<![\d.,])\d+(?:\.\d+)+(?![\d])"),
+        handle = lambda m, ctx: Skip(reason = f"数字中的点读法不固定（版本号或外来写法）「{m.group()}」"),
+    )
+
+
 def words_before(text: str, start: int, n: int = 3) -> list:
     """前面最多 n 个词（小写，最近的在前），遇到句末标点停止。"""
     head = text[:start]

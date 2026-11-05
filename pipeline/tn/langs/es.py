@@ -195,6 +195,7 @@ class Es(Romance):
     regnal_female = REGNAL_FEMALE
     century_words = {"siglo", "siglos"}
     thousand_word = "mil"
+    conjunctions = ("y", "e")
 
     def card(self, n: int) -> str:
         return apocope(text = n2w(n = n, lang = "es"))
@@ -272,6 +273,7 @@ class Es(Romance):
 
     def early_rules(self) -> list:
         return [
+            self.por_guard(),
             Rule(
                 pattern = re.compile(pattern = rf"(?P<num>{self.num})\s?(?:m\s?s\.\s?n\.\s?m\.|msnm)(?![\w])"),
                 handle = self.altitude,

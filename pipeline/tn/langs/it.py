@@ -155,6 +155,7 @@ class It(Romance):
     regnal_names = REGNAL_NAMES
     regnal_female = REGNAL_FEMALE
     century_words = {"secolo", "secoli"}
+    conjunctions = ("e", "ed")
     # 意语的君主序号、世纪一律读序数
     roman_ordinal_max = 10 ** 4
 

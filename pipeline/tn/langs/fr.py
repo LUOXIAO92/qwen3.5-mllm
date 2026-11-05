@@ -14,6 +14,7 @@ import re
 from ..numwords import n2w
 from ..rules import Rule, Skip
 from .base import word_after
+from .euro import dotted_decimal_guard
 from .romance import Romance, roman_ok
 
 
@@ -153,6 +154,7 @@ class Fr(Romance):
     regnal_names = REGNAL_NAMES
     regnal_female = REGNAL_FEMALE
     century_words = set()
+    conjunctions = ("et",)
     # 法语君主序号读基数（Louis quatorze），Ier 由序数后缀规则读 premier
     roman_ordinal_max = 0
 
@@ -209,6 +211,11 @@ class Fr(Romance):
 
     def early_rules(self) -> list:
         return [
+            dotted_decimal_guard(),
+            Rule(
+                pattern = re.compile(pattern = r"(?<![\w'’-])(?P<roman>[IVXLCDM]+|\d{1,4})(?P<suf>ᵉʳ|ʳᵉ|ᵉ|ᵈ)(?![\w])"),
+                handle = self.superscript_ordinal,
+            ),
             Rule(pattern = re.compile(pattern = r"(?<![\w.])(?:M|MM)\.(?=\s[A-ZÀ-Ý])"), handle = self.monsieur),
             Rule(pattern = re.compile(pattern = r"(?<![\w'’])(?P<de>[Dd]e)\s1(?![\d.,]|\s\d|\s?[%€$]|\s?h\b|er\b|re\b)"), handle = self.de_un),
             Rule(
@@ -230,6 +237,21 @@ class Fr(Romance):
         ctx.kind(name = "省音", surface = m.group())
         spoken = ctx.num(spoken = "une" if gender == "f" else "un", written = "1")
         return m.group("de")[0] + "'" + spoken
+
+    def superscript_ordinal(self, m, ctx):
+        """上标写法的序数：5ᵉ → cinquième，XIXᵉ → dix-neuvième，1ᵉʳ → premier，1ʳᵉ → première。"""
+        token, suf = m.group("roman"), m.group("suf")
+        value = int(token) if token.isdigit() else roman_ok(token = token)
+        if value is None or value == 0 or token.startswith("0") or suf == "ᵈ":
+            return Skip(reason = f"序数写法无法确定「{m.group()}」")
+        if value == 1 and suf in ("ᵉʳ", "ʳᵉ"):
+            spoken = "premier" if suf == "ᵉʳ" else "première"
+        elif value >= 2 and suf == "ᵉ":
+            spoken = self.ordinal_words(n = value)
+        else:
+            return Skip(reason = f"序数写法无法确定「{m.group()}」")
+        ctx.kind(name = "罗马数字" if not token.isdigit() else "序数", surface = m.group())
+        return ctx.num(spoken = spoken, written = str(value))
 
     def monsieur(self, m, ctx):
         """M. Dupont → Monsieur Dupont；前面是大写的名字时（Jean M. Dupont）是首字母，不处理。"""

@@ -23,7 +23,8 @@ from ..numwords import n2w
 from ..rules import Number, Rule, Skip, alternation
 from .base import Lang, word_after, word_before
 from .euro import (
-    abbreviation_rules, initialism_rule, roman_value, sentence_end_after, space_thousands_pattern, unit_follows,
+    abbreviation_rules, initialism_rule, number_word_guard, number_words, roman_value, sentence_end_after,
+    space_thousands_pattern, unit_follows,
 )
 
 MONTHS = (
@@ -247,7 +248,10 @@ class De(Lang):
     # ------------------------------------------------------------------
 
     def rules(self) -> list:
-        early = abbreviation_rules(table = ABBREVIATIONS, starters = STARTERS) + [
+        words = number_words(card = self.card, ordinal = lambda n: n2w(n = n, lang = "de", to = "ordinal"))
+        words |= {"ein", "eine", "einen", "einem", "einer", "eines", "erster", "ersten", "erste", "erstes"}
+        early = [number_word_guard(words = words, conjunctions = ("und",))]
+        early += abbreviation_rules(table = ABBREVIATIONS, starters = STARTERS) + [
             Rule(
                 pattern = re.compile(
                     pattern = rf"(?<![\w.])(?P<abbr>{alternation(words = NUMBER_ABBREVIATIONS)})\.\s?(?P<num>\d+)(?![\d]|[.,]\d)",
