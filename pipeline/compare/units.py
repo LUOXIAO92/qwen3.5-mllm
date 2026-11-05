@@ -89,8 +89,8 @@ LANG_SYMBOLS = {
         "г": "year_ru", "гг": "year_ru", "в": "century_ru", "вв": "century_ru",
         "квт": "kilowatt", "мвт": "megawatt", "гц": "hertz", "кгц": "kilohertz", "мгц": "megahertz",
     },
-    "id": {"rp": "rupiah", "rm": "ringgit"},
-    "ms": {"rm": "ringgit", "rp": "rupiah"},
+    "id": {"rp": "rupiah", "rm": "ringgit", "km persegi": "km2", "m persegi": "m2"},
+    "ms": {"rm": "ringgit", "rp": "rupiah", "km persegi": "km2", "m persegi": "m2"},
     "tr": {"tl": "lira"},
     "vi": {"đ": "dong"},
     "ar": {"كم": "km", "كغ": "kg", "كجم": "kg"},
@@ -362,6 +362,15 @@ READINGS = {
         "lira": ["lira", "türk lirası"],
         "pound": ["sterlin"],
         "yen": ["yen"],
+        "km2": ["kilometrekare", "kilometre kare"],
+        "m2": ["metrekare", "metre kare"],
+        "cm2": ["santimetrekare", "santimetre kare"],
+        "m3": ["metreküp", "metre küp"],
+        "mg": ["miligram"],
+        "ton": ["ton"],
+        "liter": ["litre"],
+        "hectare": ["hektar"],
+        "km/h": ["kilometre saat"],
         "hour": ["saat"],
         "minute": ["dakika"],
     },
@@ -380,6 +389,8 @@ READINGS = {
         "rupiah": ["rupiah"],
         "yen": ["yen"],
         "ringgit": ["ringgit"],
+        "km2": ["kilometer persegi"],
+        "m2": ["meter persegi"],
         "hour": ["jam"],
         "minute": ["menit"],
     },
@@ -398,6 +409,9 @@ READINGS = {
         "ringgit": ["ringgit"],
         "rupiah": ["rupiah"],
         "yen": ["yen"],
+        "km2": ["kilometer persegi", "kilometre persegi"],
+        "m2": ["meter persegi", "metre persegi"],
+        "km/h": ["kilometer sejam", "kilometre sejam", "kilometer per jam", "kilometre per jam"],
         "hour": ["jam"],
         "minute": ["minit"],
     },
@@ -427,6 +441,7 @@ READINGS = {
         "liter": ["lít"],
         "ml": ["mi li lít", "mililít"],
         "km/h": ["ki lô mét trên giờ", "ki lô mét một giờ"],
+        "mg": ["mi li gam", "miligam"],
         "euro": ["euro", "ơ rô"],
         "yen": ["yên"],
         "hour": ["giờ", "tiếng"],
@@ -762,6 +777,15 @@ ABBREVIATIONS = {
         "general": {"พศ": ["พุทธศักราช"], "คศ": ["คริสต์ศักราช"]},
         "number": {},
     },
+    "ms": {
+        # 22hb November：haribulan（日）
+        "general": {"hb": ["haribulan", "hari bulan"]},
+        "number": {},
+    },
+    "fil": {
+        "general": {"atbp": ["at iba pa"]},
+        "number": {},
+    },
     "ru": {
         "general": {
             "т е": ["то есть"], "т д": ["так далее"], "т п": ["тому подобное"], "н э": ["нашей эры"],
@@ -770,6 +794,13 @@ ABBREVIATIONS = {
         "number": {"ок": ["около"], "no": ["номер"], "§": ["параграф"]},
     },
 }
+
+# 读法数后的连接成分：菲律宾语以辅音结尾的数词修饰后面的词时要加 na（apat na taon、anim na porsiyento），
+# 写成阿拉伯数字时通常不写（4 taon、6%）
+LINKERS = {"fil": ["na"]}
+
+# 斜线日期的读法：日/月读作「日 tháng 月」，月/年读作「月 năm 年」，日/月/年读作「日 tháng 月 năm 年」
+SLASH_DATES = {"vi": {"month": ["tháng"], "year": ["năm"]}}
 
 # 前面是这些词时，单个字母 I、V、X 也认作罗马数字（siglo V a. C.、в V веке）
 CENTURY_WORDS = {
@@ -821,6 +852,10 @@ class Extras:
     abbr_words: dict = field(default_factory = dict)   # 读法 → 读法集合（与 abbr 的集合比较）
     abbr_number: set = field(default_factory = set)    # 只在后面接数时才换的写法和读法
     abbr_chars: int = 1
+    unit_suffixes: frozenset = frozenset()            # 单位词后可以连写的词尾（土耳其语 kilometreye、km'ye）
+    date_month: frozenset = frozenset()               # 斜线日期 7/1 读出的「月」词（越南语 bảy tháng một）
+    date_year: frozenset = frozenset()                # 斜线日期 5/2023 读出的「年」词（越南语 tháng năm năm 2023）
+    linkers: frozenset = frozenset()                  # 读法数后的连接成分，阿拉伯数字写法不写出（菲律宾语 apat na taon ↔ 4 taon）
     roman_articles: list = field(default_factory = list)
     months: set = field(default_factory = set)
     compound_any: list = field(default_factory = list)
@@ -877,6 +912,11 @@ def build_extras(spec) -> Extras:
                 ext.abbr_number.add(norm_key)
                 ext.abbr_number.update(readings)
             ext.abbr_chars = max([ext.abbr_chars, len(norm_key)] + [len(r) for r in readings])
+    ext.unit_suffixes = spec.suffixes
+    dates = SLASH_DATES.get(code, {})
+    ext.date_month = frozenset(phrase(text = w, spec = spec) for w in dates.get("month", []))
+    ext.date_year = frozenset(phrase(text = w, spec = spec) for w in dates.get("year", []))
+    ext.linkers = frozenset(spec.norm(word = w) for w in LINKERS.get(code, []))
     ext.roman_articles = [phrase(text = w, spec = spec) for w in ROMAN_ARTICLES.get(code, [])]
     if code == "en":
         ext.months = {spec.norm(word = w) for w in EN_MONTHS}

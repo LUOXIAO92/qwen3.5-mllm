@@ -2,7 +2,7 @@
 
 每条样例为 (语言, 朗读稿, 识别结果, 原文或 None, 说明)，按增强项分组。EXT_POSITIVE 中的样例应判一致，
 EXT_NEGATIVE 中的样例应判不一致（误收必须为 0）。标「冒烟」的样例取自端到端冒烟数据（#29），
-标「T18」「T04a」「T04b」的取自对应任务的朗读稿与原文。ja_reading 组需要 fugashi 和 unidic-lite。
+标「T18」「T04a」「T04b」「T04c」的取自对应任务的朗读稿与原文。ja_reading 组需要 fugashi 和 unidic-lite。
 """
 
 EXT_POSITIVE = {
@@ -216,6 +216,38 @@ EXT_POSITIVE = {
         ("fr", "neuf heures zéro zéro", "9h00", None, "分钟 00 读出"),
         ("ms", "pada akhir seribu sembilan ratus tujuh puluhan", "pada akhir 1970-an", None, "年代 -an"),
     ],
+    "t04c": [
+        ("vi", "bảy tháng một", "7/1", None, "T04c：斜线日期 日/月"),
+        ("vi", "tháng năm năm hai nghìn không trăm hai mươi ba", "tháng 5/2023", None, "T04c：斜线日期 月/年"),
+        ("vi", "ngày mười bảy tháng hai năm hai nghìn không trăm hai mươi", "ngày 17/2/2020", None, "斜线日期 日/月/年"),
+        ("vi", "tháng mười năm hai nghìn không trăm hai mươi", "tháng 10/2020", None, "mười năm 不是 15"),
+        ("vi", "hơn một nghìn sáu trăm tỉ đồng", "hơn 1.600 tỉ đồng", None, "T04c：大单位叠用"),
+        ("vi", "sáp chứa tới ba mươi một số loại", "sáp chứa tới 30 một số loại", None, "ba mươi một 也可以是 30 加 một"),
+        ("vi", "thuốc mười mi li gam", "thuốc 10mg", None, "mi li gam"),
+        ("tr", "bin dokuz yüz yetmiş sekizdeki", "1978'deki", None, "T04c：数词后的词尾"),
+        ("tr", "yaklaşık yüzde doksan yedisini içerir", "yaklaşık % 97'sini içerir", None, "T04c：领属加宾格"),
+        ("tr", "girdilerinin yüzde doksanının hatalı", "girdilerinin yüzde 90'ının hatalı", None, "领属加属格"),
+        ("tr", "on beşinci", "15'inci", None, "T04c：撇号后的序数后缀"),
+        ("tr", "Türkiye doksan dokuzuncusu olarak", "Türkiye 99’uncusu olarak", None, "序数后还有词尾"),
+        ("tr", "Saat on dokuzdaki son arabaya", "Saat 19.00’daki son arabaya", None, "时刻后的词尾"),
+        ("tr", "saat yirmi bir elli sıralarında", "saat 21.50 sıralarında", None, "时刻"),
+        ("tr", "üç bin beş yüz", "3 bin 500", None, "T04c：大单位后的数字"),
+        ("tr", "bin beş yüz elli milyar", "1550 milyar", None, "大单位叠用"),
+        ("tr", "altmış kilometreye", "60 km'ye", None, "T04c：单位后的词尾"),
+        ("tr", "yirmi kilometrekare'lik alana", "20 km²'lik alana", None, "平方单位后的词尾"),
+        ("fil", "apat na taon", "4 taon", None, "T04c：连接成分 na"),
+        ("fil", "apat na taon", "4 na taon", None, "阿拉伯数字后也写 na"),
+        ("fil", "anim na porsiyento", "6%", None, "T04c：na 与百分号"),
+        ("fil", "dalawang libo at labing anim na", "2016", None, "na 在句末"),
+        ("fil", "mansanas, saging, at iba pa", "mansanas, saging, atbp.", None, "T04c：atbp."),
+        ("ms", "Dua puluh dua haribulan November", "22hb November", None, "T04c：hb"),
+        ("ms", "pukul sepuluh empat puluh lima pagi", "pukul 10.45 pagi", None, "T04c：sepuluh 后不接个位"),
+        ("ms", "andai seribu juta hasil Sabah", "andai 1000 juta hasil Sabah", None, "T04c：大单位叠用"),
+        ("ms", "Pada masa itu (dua ribu dua), satu bilion ringgit itu besar.", "Pada masa itu (2002), RM1 bilion itu besar.", None, "T04c：RM 属于后面的数"),
+        ("ms", "antara lapan puluh ringgit - tiga ratus dua puluh ringgit.", "antara RM80 - RM320.", None, "RM 属于后面的数"),
+        ("ms", "adalah tiga perpuluhan satu kilometer persegi", "adalah 3.1 km²", None, "kilometer persegi"),
+        ("ms", "mencecah tiga ratus empat puluh kilometer sejam", "mencecah 340km/h", None, "kilometer sejam"),
+    ],
     "variant": [
         ("de", "Neunzehnhundertzwanzig soll sie in São Paulo verstorben sein.", "1920 soll sie in Sao Paulo verstorben sein.", None, "冒烟：德语中的外来变音符号"),
         (
@@ -359,6 +391,31 @@ EXT_NEGATIVE = {
         ("fr", "neuf heures zéro zéro", "9h05", None, "分钟不同"),
         ("ms", "tujuh puluhan", "70", None, "-an 读出"),
         ("es", "Llegó a las tres y quince.", "Llegó a las 3:51.", None, "冒号对连接词时分钟不同"),
+    ],
+    "t04c": [
+        ("vi", "bảy tháng một", "7/2", None, "月不同"),
+        ("vi", "bảy tháng một", "1/7", None, "日月颠倒"),
+        ("vi", "bảy năm một", "7/1", None, "năm 不对应日/月之间的斜线"),
+        ("vi", "tháng năm năm hai nghìn không trăm hai mươi ba", "tháng 5/2024", None, "年份不同"),
+        ("vi", "năm năm hai nghìn không trăm hai mươi ba", "tháng 5/2023", None, "识别多出 tháng"),
+        ("vi", "hơn một nghìn sáu trăm tỉ đồng", "hơn 1.600 triệu đồng", None, "大单位不同"),
+        ("tr", "bin dokuz yüz yetmiş sekizdeki", "1978'daki", None, "词尾不同"),
+        ("tr", "on beşinci", "15'i", None, "序数与领属"),
+        ("tr", "on beşinci", "16'ıncı", None, "序数不同"),
+        ("tr", "yaklaşık yüzde doksan yedisini", "yaklaşık % 97'si", None, "词尾不同"),
+        ("tr", "altmış kilometreye", "60 m'ye", None, "单位不同"),
+        ("tr", "üç bin beş yüz", "3 bin 600", None, "数不同"),
+        ("tr", "Türkiye doksan dokuzuncusu olarak", "Türkiye 99’uncu olarak", None, "缺少词尾"),
+        ("fil", "apat na taon", "5 taon", None, "数不同"),
+        ("fil", "apat na taon", "apat taon", None, "读法一边缺少 na"),
+        ("fil", "apat nanay", "4 nay", None, "na 是词的一部分"),
+        ("fil", "anim na porsiyento", "7%", None, "数不同"),
+        ("fil", "mansanas, saging, at iba pa", "mansanas, saging, at iba", None, "缺少 pa"),
+        ("ms", "Dua puluh dua haribulan", "23hb", None, "日期不同"),
+        ("ms", "pukul sepuluh empat puluh lima pagi", "pukul 10.54 pagi", None, "分钟不同"),
+        ("ms", "sepuluh empat", "14", None, "sepuluh empat 是 10 和 4"),
+        ("ms", "lima ringgit Juta", "RM5 Juta", None, "语序不同的读法"),
+        ("ms", "andai seribu juta hasil Sabah", "andai 1000 bilion hasil Sabah", None, "大单位不同"),
     ],
     "variant": [
         ("pt", "Ela mora em São Paulo.", "Ela mora em Sao Paulo.", None, "葡语自己的变音符号"),

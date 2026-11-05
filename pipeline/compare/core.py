@@ -7,7 +7,7 @@ import re
 import unicodedata
 from typing import NamedTuple
 
-from . import ja_reading
+from . import ja_reading, zh_convert
 from .langs import get_spec
 from .normalize import normalize_text
 from .numerals import ABBR_FOLD
@@ -135,6 +135,20 @@ def _conn_step(x, b: list, j: int, lang: str) -> int:
     return 0
 
 
+def _date_step(x, b: list, j: int) -> int:
+    """斜线日期的记号对读法中的「tháng」「năm」：返回对上的单元数，0 表示对不上。
+    「năm」同时是数词「五」，读法一边可能是值为 5 的读法数。"""
+    if not (isinstance(x, Mark) and x.kind == "date") or j >= len(b):
+        return 0
+    y = b[j]
+    if isinstance(y, Num) and y.origin == "word" and y.display in x.ids:
+        return 1
+    for word in x.ids:
+        if _text_run(units = b, start = j, text = word.replace(" ", "")):
+            return len(word.replace(" ", ""))
+    return 0
+
+
 def _zero_minutes(x, seq) -> bool:
     """符号写法的分钟 00 对读出的「zéro zéro」「oh oh」。"""
     if not (isinstance(x, Mark) and x.kind == "time00") or not seq:
@@ -213,6 +227,12 @@ def _match_units(a: list, b: list, lang: str) -> bool:
             succ.append((i + step, j + 1))
         if _zero_minutes(x = y, seq = a[i:i + 2]):
             succ.append((i + 2, j + 1))
+        step = _date_step(x = x, b = b, j = j)
+        if step:
+            succ.append((i + 1, j + step))
+        step = _date_step(x = y, b = a, j = i)
+        if step:
+            succ.append((i + step, j + 1))
         succ.extend(_alt_steps(
             x = x,
             a_len = n,
@@ -495,6 +515,7 @@ def compare(script: str, hypothesis: str, lang: str, original: str | None = None
     返回 CompareResult(match, detail)：match 为 True 表示一致；detail 为差异说明，
     一致时为空字符串。给出 original 时，还要求识别结果中的阿拉伯数字都能在原文中找到。
     日语先按写法比较，不一致时再按读音比较（需要 fugashi 和 unidic-lite，见 ja_reading.py）。
+    中文用 OpenCC 词组级转换统一为简体，没有 OpenCC 时退回单字表，并在差异说明中注明（见 zh_convert.py）。
     """
     spec = get_spec(lang = lang)
     matched, s_variants, h_variants = _align(script = script, hypothesis = hypothesis, spec = spec)
@@ -513,6 +534,8 @@ def compare(script: str, hypothesis: str, lang: str, original: str | None = None
                 note = "（按读音）"
         else:
             note = "（" + ja_reading.MISSING_NOTE + "）"
+    elif matched is None and spec.code == "zh" and not zh_convert.available():
+        note = "（" + zh_convert.MISSING_NOTE + "）"
     joiner = "" if spec.scan else " "
     problems = []
     if matched is None:

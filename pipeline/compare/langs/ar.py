@@ -45,7 +45,7 @@ _PROCLITICS = [
 ]
 
 
-def _affixes(word: str, spec: LangSpec):
+def _affixes(word: str, spec: LangSpec, ext: bool = False):
     for p in _PROCLITICS:
         if word.startswith(p) and len(word) - len(p) >= 2:
             # 以 و 开头的附着成分在数内作连接词（خمسة وعشرون）

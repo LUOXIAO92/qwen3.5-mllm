@@ -69,6 +69,7 @@ def extend_items(items: list, spec) -> list:
     if ext is None:
         return items
     joiner = "" if spec.scan else " "
+    items = _slash_dates(items = items, ext = ext)
     items = _scale_after_decimal(items = items, spec = spec)
     items = _compound_suffix(items = items, spec = spec, ext = ext)
     items = _time_and_units(items = items, ext = ext, joiner = joiner)
@@ -81,6 +82,9 @@ def extend_items(items: list, spec) -> list:
 # ---------------------------------------------------------------------------
 # 数词的其他切分
 # ---------------------------------------------------------------------------
+
+# 只与阿拉伯数字写法比较的读法数：surface 加上这个私用区字符，两边都是读法时不会相等
+DIGIT_ONLY = "\ue020"
 
 # 中文「千米」「千克」等以「千」开头的单位：「五千米」也可以是「五千」加「米」
 ZH_KILO = {
@@ -153,6 +157,9 @@ def _attach_alts(items: list, spec) -> list:
         if spec.splitter is not None:
             alts.extend((1, tuple(parts)) for parts in spec.splitter(num = it) if parts)
         nxt = items[k + 1] if k + 1 < len(items) else None
+        if isinstance(nxt, Text) and nxt.text in spec.ext.linkers:
+            # 菲律宾语 apat na taon ↔ 4 taon：读法数连同后面的 na 对应一个阿拉伯数字（na 在比较单元中逐字计）
+            alts.append((1 + len(nxt.text), (dataclasses.replace(it, surface = it.surface + DIGIT_ONLY, alts = ()),)))
         if spec.code == "zh" and isinstance(nxt, Mark) and nxt.kind == "unit" and nxt.origin == "word" and nxt.surface in ZH_KILO:
             base, unit_id = ZH_KILO[nxt.surface]
             value = reparse(text = it.display + "千", spec = spec)
@@ -186,7 +193,7 @@ def _scale_after_decimal(items: list, spec) -> list:
     out = []
     for it in items:
         if isinstance(it, Text) and out and isinstance(out[-1], Num) and out[-1].frac:
-            for a in spec.analyses(word = it.text):
+            for a in spec.analyses(word = it.text, ext = True):
                 if len(a.morphs) == 1 and a.morphs[0].cls == "big" and not a.prefix and not a.suffix:
                     it = Num(
                         value = a.morphs[0].value,
@@ -290,6 +297,59 @@ def _abbreviations(items: list, ext, joiner: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# 斜线日期
+# ---------------------------------------------------------------------------
+
+def _digit_int(it) -> bool:
+    return isinstance(it, Num) and it.origin == "digit" and not it.frac
+
+
+def _slash_dates(items: list, ext) -> list:
+    """越南语斜线日期：7/1 读作 bảy tháng một，5/2023 读作 năm năm 2023，17/2/2020 读作 … tháng … năm …。
+
+    日期中的斜线换成 date 记号，记号的 ids 是读出的词（tháng 或 năm），比较时对应读法中的这个词；
+    不像日期的斜线（1/2、24/7/365）去掉，与原来按标点处理相同。
+    """
+    if not any(isinstance(it, Mark) and it.kind == "slash" for it in items):
+        return items
+    out = []
+    k = 0
+    n = len(items)
+    while k < n:
+        it = items[k]
+        if not (_digit_int(it = it) and k + 2 < n and isinstance(items[k + 1], Mark) and items[k + 1].kind == "slash"):
+            if not (isinstance(it, Mark) and it.kind == "slash"):
+                out.append(it)
+            k += 1
+            continue
+        parts = [it]
+        m = k + 1
+        while m + 1 < n and isinstance(items[m], Mark) and items[m].kind == "slash" and _digit_int(it = items[m + 1]):
+            parts.append(items[m + 1])
+            m += 2
+        values = [p.value for p in parts]
+        words = None
+        if len(parts) == 3 and 1 <= values[0] <= 31 and 1 <= values[1] <= 12 and len(parts[2].digits) == 4:
+            words = [ext.date_month, ext.date_year]
+        elif len(parts) == 2 and 1 <= values[0] <= 12 and len(parts[1].digits) == 4:
+            words = [ext.date_year]
+        elif len(parts) == 2 and 1 <= values[0] <= 31 and 1 <= values[1] <= 12 and len(parts[1].digits) <= 2:
+            words = [ext.date_month]
+        out.append(parts[0])
+        for p, w in zip(parts[1:], words or [None] * (len(parts) - 1)):
+            if w is not None:
+                out.append(Mark(
+                    kind = "date",
+                    origin = "sym",
+                    surface = "/",
+                    ids = w,
+                ))
+            out.append(p)
+        k = m
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 时刻与单位
 # ---------------------------------------------------------------------------
 
@@ -348,10 +408,13 @@ def _time_and_units(items: list, ext, joiner: str) -> list:
                 first = it.surface + (word or ""),
             )
             continue
+        # 写在下一个数前面的货币符号（「(2002), RM1 bilion」「RM80 - RM320」）不归前一个数
+        sym = it.text if isinstance(it, Text) else it.surface if isinstance(it, Mark) else None
+        prefix_next = sym in ext.prefix and k + 1 < n and isinstance(items[k + 1], Num)
         if isinstance(it, Mark) and it.kind == "usym":
             entry = ext.units.get(it.surface)
             if entry is not None:
-                kind = "unit" if isinstance(prev, Num) else "unit_pre"
+                kind = "unit" if isinstance(prev, Num) and not prefix_next else "unit_pre"
                 out.append(Mark(
                     kind = kind,
                     origin = "sym",
@@ -362,7 +425,7 @@ def _time_and_units(items: list, ext, joiner: str) -> list:
                 out.append(it)   # &、§ 交给缩写处理
             k += 1
             continue
-        if isinstance(it, Text) and isinstance(prev, Num):
+        if isinstance(it, Text) and isinstance(prev, Num) and not prefix_next:
             hour, hour_end = (None, k)
             if _hour_num(it = prev):
                 hour, hour_end = _take(
@@ -405,6 +468,10 @@ def _time_and_units(items: list, ext, joiner: str) -> list:
             if abbr is not None and abbr_end > unit_end:
                 # 「514 v. Chr.」的 v 是缩写的一部分，不是伏特
                 unit = None
+            rest = None
+            if unit is None and hour is None and abbr is None and ext.unit_suffixes:
+                unit, rest = _unit_with_suffix(word = it.text, ext = ext)
+                unit_end = k + 1
             if hour is not None and hour_end >= unit_end:
                 k = _emit_time(
                     items = items,
@@ -427,6 +494,8 @@ def _time_and_units(items: list, ext, joiner: str) -> list:
                     surface = unit.replace(" ", ""),
                     ids = ids,
                 ))
+                if rest:
+                    out.append(Text(text = rest))
                 k = unit_end
                 continue
         if isinstance(it, Text) and it.text in ext.prefix and k + 1 < n and isinstance(items[k + 1], Num):
@@ -443,6 +512,16 @@ def _time_and_units(items: list, ext, joiner: str) -> list:
         out.append(it)
         k += 1
     return out
+
+
+def _unit_with_suffix(word: str, ext) -> tuple:
+    """单位词与词尾连写（土耳其语 kilometreye、km'ye、kilometrekarelik）：返回 (单位, 词尾)，不是时返回 (None, None)。
+    单个字母的符号（m、g）只接两个字母以上的词尾，「5 mi」的疑问词 mi 不算米。"""
+    for cut in range(len(word) - 1, 0, -1):
+        unit, rest = word[:cut], word[cut:]
+        if unit in ext.units and rest in ext.unit_suffixes and (len(unit) > 1 or len(rest) > 1):
+            return unit, rest
+    return None, None
 
 
 def _conn_minutes(items: list, k: int, ext, joiner: str) -> bool:

@@ -4,7 +4,8 @@
 ngàn/nghìn、tỉ/tỷ、bẩy/bảy。năm 紧跟在十位之后时不作「五」（hai mươi năm 是「二十年」），
 十位后的五读作 lăm。
 
-「hai trăm năm」可以是 205，也可以是 200 加「năm」（年），读音相同，比对时两种切分都尝试（_splits）。
+「hai trăm năm」可以是 205，也可以是 200 加「năm」（年）；「ba mươi một」可以是 31，也可以是 30 加「một」
+（ba mươi một số loại）。读音相同，比对时两种切分都尝试（_splits）。
 """
 
 from ..extend import word_num
@@ -16,26 +17,40 @@ _BEFORE_YEAR = {"trăm", "nghìn", "ngàn", "triệu", "tỷ", "tỉ"}
 
 
 def _splits(num) -> list:
+    """末尾的「năm」可以是「年」（hai trăm năm），十位后的「một」可以是「一些」的「một」（ba mươi một số）。"""
     words = num.display.split(" ")
-    if len(words) < 2 or words[-1] != "năm" or words[-2] not in _BEFORE_YEAR:
+    if len(words) < 2:
         return []
+    if words[-1] == "năm" and words[-2] in _BEFORE_YEAR:
+        tail_value = 5
+    elif words[-1] == "một" and words[-2] == "mươi":
+        tail_value = 1
+    else:
+        return []
+    tail = words[-1]
     head = word_num(
-        value = num.value - 5,
-        surface = num.surface[:-len("năm")],
+        value = num.value - tail_value,
+        surface = num.surface[:-len(tail)],
         display = " ".join(words[:-1]),
         kinds = num.kinds,
     )
-    year = word_num(
-        value = 5,
-        surface = "năm",
-        display = "năm",
+    rest = word_num(
+        value = tail_value,
+        surface = tail,
+        display = tail,
         kinds = num.kinds,
     )
-    return [[head, year]]
+    return [[head, rest]]
 
 
 def build() -> LangSpec:
-    spec = LangSpec(code = "vi", dec_comma = True, splitter = _splits)
+    spec = LangSpec(
+        code = "vi",
+        dec_comma = True,
+        big_compound = True,
+        digits_after_big = True,
+        splitter = _splits,
+    )
     spec.add(words = "không", morphs = zero())
     # không trăm：百位为零（hai nghìn không trăm hai mươi sáu）
     spec.add(words = "không trăm", morphs = add(value = 0, places = {2}))

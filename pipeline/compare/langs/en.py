@@ -43,7 +43,7 @@ def fill(spec: LangSpec) -> None:
         spec.add(words = w + "th", morphs = ordinal(morph = big(value = v)))
 
 
-def _affixes(word: str, spec: LangSpec):
+def _affixes(word: str, spec: LangSpec, ext: bool = False):
     """年代复数：nineties → ninety + s，与「90s」对齐。"""
     if word.endswith("ies") and word[:-3] + "y" in TENS:
         yield "", word[:-3] + "y", "s", False
