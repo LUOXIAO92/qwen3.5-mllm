@@ -63,6 +63,8 @@ class Morph:
     conn_before: frozenset | None = None
     linker: bool = False
     fold: str | None = None
+    # 数词体系（韩语 sino 汉字词、native 固有词），同一组内不能混用，见 NumState._system_ok
+    system: str | None = None
 
 
 def label(m: Morph) -> str:
@@ -161,7 +163,7 @@ class NumState:
 
     __slots__ = (
         "total", "last_big", "cur", "places", "last", "last_val", "last_places",
-        "ord", "pending", "need", "n", "frac", "teen",
+        "ord", "pending", "need", "n", "frac", "teen", "system",
     )
 
     def __init__(self, frac: bool = False):
@@ -178,6 +180,7 @@ class NumState:
         self.n = 0
         self.frac = frac
         self.teen = False
+        self.system = None
 
     def _copy(self) -> "NumState":
         s = NumState.__new__(NumState)
@@ -300,9 +303,22 @@ class NumState:
         s.n += 1
         if m.ordinal:
             s.ord = True
+        if m.system is not None:
+            s.system = m.system
         return s
 
+    def _system_ok(self, m: Morph) -> bool:
+        """同一组内不混用两套数词：韩语「십세」不是 13，而是「십」（10）加量词「세」（岁）。
+
+        只有汉字词的百位以上后面可以接固有词（백스물셋）。大单位之后开始新的一组，不受限制。
+        """
+        if m.system is None or self.system is None or m.system == self.system or not self.places:
+            return True
+        return self.system == "sino" and m.system == "native" and self.last == "place" and self.last_val >= 100
+
     def _add(self, m: Morph, lab: str, pend, spec):
+        if not self._system_ok(m = m):
+            return None
         value, places = m.value, m.places
         if self.teen:
             value += 10
@@ -331,6 +347,8 @@ class NumState:
         return self.last_big is None or 10 ** max(places) < self.last_big
 
     def _place(self, m: Morph, pend, spec):
+        if not self._system_ok(m = m):
+            return None
         mult = m.value
         exp = len(str(mult)) - 1
         coef_pend_ok = pend is None or pend.linker
@@ -393,6 +411,7 @@ class NumState:
                 s.last = "big"
                 s.last_val = s.total
                 s.last_places = _EMPTY
+                s.system = None
                 return self._finish(s = s, m = m)
             return None
         if self.places:
@@ -413,6 +432,7 @@ class NumState:
         s.last = "big"
         s.last_val = c * mult
         s.last_places = _EMPTY
+        s.system = None
         return self._finish(s = s, m = m)
 
     def _big_lex(self, m: Morph, pend):
@@ -426,6 +446,7 @@ class NumState:
         s.last = "big"
         s.last_val = m.coef * m.value
         s.last_places = _EMPTY
+        s.system = None
         return self._finish(s = s, m = m)
 
     def _teen_suffix(self, pend):
@@ -489,6 +510,10 @@ class LangSpec:
     pct_symbol_prefix: bool = False   # 百分号读在数前（中文 百分之、土耳其语 yüzde）
     split_affixes: Callable | None = None
     post: Callable | None = None
+    # 比对时追加的候选分析（韩语「육십일」也可以是 60 加「일」），输入一串比较单元，返回其他候选
+    variants: Callable | None = None
+    # 比对时用的单位、货币、时刻词表和书写变体合并规则（units.Extras），由 langs.get_spec 挂上
+    ext: object = None
     pieces: dict = field(default_factory = dict)
     bound: set = field(default_factory = set)
     multiword: dict = field(default_factory = dict)

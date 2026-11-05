@@ -7,7 +7,9 @@
   kinds   基数 card、序数 ord；不带序数标记的阿拉伯数字两者都允许
   frac    是否位于小数点之后
   surface 读法的比较用词形（已合并已知书写变体、去掉空格）
+  split   是否是比对时另行切分出来的数（见 extend.split_variants）
 符号记号 Mark：小数点 sep、百分号 pct、负号 minus，区分符号写法 sym 与读法 word。
+比对时（ext = True）还有单位 unit（ids 为单位编号集合）和时刻 time 两种记号，见 units.py、extend.py。
 """
 
 from __future__ import annotations
@@ -17,11 +19,13 @@ import unicodedata
 from dataclasses import dataclass
 
 from .normalize import normalize_text
+from .units import DOLLAR_PREFIXES, SYMBOL_CHARS
 from .numerals import (
     CARD_ONLY, CARD_OR_ORD, CONN_CLITIC, ORD_ONLY, LangSpec, NumState, add, places_of,
 )
 
 MAX_VARIANTS = 8
+MAX_EXT_VARIANTS = 16
 
 
 @dataclass(frozen = True, slots = True)
@@ -39,6 +43,8 @@ class Num:
     surface: str
     display: str
     lead: str = ""
+    # 由 spec.variants 切出的数（韩语「육십일」切成「육십」「일」）；不参与逐段拼接（年份式读法）
+    split: bool = False
 
 
 @dataclass(frozen = True, slots = True)
@@ -46,10 +52,12 @@ class Mark:
     kind: str
     origin: str
     surface: str
+    ids: frozenset = frozenset()
 
 
 class Tok:
-    """切分阶段的记号。kind：word、char、digit、sep、pct、minus、bound、alt。"""
+    """切分阶段的记号。kind：word、char、digit、sep、pct、minus、bound、alt，
+    比对时另有 usym（货币、度数符号）和 colon（数字之间的冒号）。"""
 
     __slots__ = ("kind", "text", "frac", "kinds", "alts")
 
@@ -145,6 +153,9 @@ def _interpret(groups: list, seps: list, spec: LangSpec) -> list:
     def split():
         return [_digit_tok(digits = g) for g in groups]
 
+    def time_split():
+        return [_digit_tok(digits = groups[0]), Tok(kind = "colon"), _digit_tok(digits = groups[1])]
+
     grouped = len(groups[0]) <= 3 and all(len(g) == 3 for g in groups[1:])
     if "٫" in seps:
         head = seps[:-1]
@@ -173,7 +184,7 @@ def _interpret(groups: list, seps: list, spec: LangSpec) -> list:
             alts = [dec]
             # 「14.30」也可能是时刻
             if last == "." and len(groups[0]) <= 2 and len(frac) == 2 and int(groups[0]) <= 24 and int(frac) < 60:
-                alts.append(split())
+                alts.append(time_split())
             return alts
     if len(set(seps)) == 1 and seps[0] in ".," and grouped:
         return [whole()]
@@ -184,7 +195,8 @@ def _interpret(groups: list, seps: list, spec: LangSpec) -> list:
 # 切分
 # ---------------------------------------------------------------------------
 
-def tokenize(text: str, spec: LangSpec) -> list:
+def tokenize(text: str, spec: LangSpec, ext: bool = False) -> list:
+    """切分文本。ext 为 True 时（比对）货币、度数符号和数字之间的冒号单独成为记号，否则按标点处理。"""
     s = normalize_text(text = text, lang = spec.code)
     toks = []
     buf = []
@@ -206,12 +218,16 @@ def tokenize(text: str, spec: LangSpec) -> list:
         if _is_digit(ch = ch):
             flush()
             j, alts = _read_number(s = s, i = i, spec = spec)
-            j = _attach_ordinal(
+            end = _attach_ordinal(
                 s = s,
                 j = j,
                 alts = alts,
                 spec = spec,
             )
+            if ext and end == j + 1 and s[j] == "°":
+                # 西、葡、意语的「20°」可以是序数，也可以是度数
+                alts.append([_digit_tok(digits = alts[0][0].text), Tok(kind = "usym", text = "°")])
+            j = end
             single = len(alts) == 1 and len(alts[0]) == 1
             toks.append(alts[0][0] if single else Tok(kind = "alt", alts = alts))
             i = j
@@ -228,8 +244,24 @@ def tokenize(text: str, spec: LangSpec) -> list:
                 flush()
             i += 1
             continue
+        if ext and ch in SYMBOL_CHARS:
+            text_sym = ch
+            if ch == "$" and "".join(buf) in DOLLAR_PREFIXES:
+                text_sym = "".join(buf) + ch
+                buf.clear()
+            flush()
+            if ch == "°" and i + 1 < n and s[i + 1] in "cf" and not (i + 2 < n and "a" <= s[i + 2] <= "z"):
+                text_sym = s[i:i + 2]
+                i += 1
+            toks.append(Tok(kind = "usym", text = text_sym))
+            i += 1
+            continue
         flush()
         nxt_digit = i + 1 < n and _is_digit(ch = s[i + 1])
+        if ext and ch == ":" and nxt_digit and i and _is_digit(ch = s[i - 1]):
+            toks.append(Tok(kind = "colon"))
+            i += 1
+            continue
         if ch in _WORD_HYPHENS or ch == "−":
             prev = s[i - 1] if i else " "
             if nxt_digit and not (prev.isalnum() or prev in _APOSTROPHES):
@@ -397,6 +429,40 @@ def parse_number(toks: list, start: int, spec: LangSpec, frac: bool = False, fir
     return best
 
 
+def _minutes_follow(toks: list, j: int, spec: LangSpec) -> bool:
+    """中文「点」后面是否是分钟：「十五」「零五」这类小数读法里不会出现的写法，或后面跟着「分」。
+
+    「三点五」仍按小数处理；「三点五分」「三点十五」「三点零五」按时刻处理（另有按小数处理的候选）。
+    """
+    n = len(toks)
+    if j >= n:
+        return False
+    tok = toks[j]
+    zero_lead = False
+    if tok.kind == "word" and any(m.cls == "zero" for a in spec.analyses(word = tok.text) for m in a.morphs):
+        if j + 1 >= n or not _numeral_start(tok = toks[j + 1], spec = spec):
+            return False
+        zero_lead = True
+        j += 1
+        tok = toks[j]
+    if tok.kind == "digit" and not tok.frac:
+        value, end = int(tok.text), j + 1
+    elif tok.kind == "word":
+        res = parse_number(toks = toks, start = j, spec = spec)
+        if res is None:
+            return False
+        end, st, _ = res
+        value = st.value()
+    else:
+        return False
+    minute_word = (
+        end < n
+        and toks[end].text in spec.ext.minute
+        and not (end + 1 < n and toks[end + 1].text == "钟")
+    )
+    return value < 60 and (minute_word or value >= 10 or (zero_lead and value < 10))
+
+
 def _numeral_start(tok: Tok, spec: LangSpec) -> bool:
     return tok.kind == "digit" or (tok.kind == "word" and bool(spec.analyses(word = tok.text)))
 
@@ -405,7 +471,12 @@ def _is_int_num(it) -> bool:
     return isinstance(it, Num) and not it.frac
 
 
-def parse_items(toks: list, spec: LangSpec) -> list:
+def parse_items(toks: list, spec: LangSpec, ext: bool = False, time_first: bool = True) -> list:
+    """把记号组成比较单元。
+
+    ext 为 True 时（比对）保留冒号和单位符号记号，交给 extend.py 处理；time_first 为 True 时，
+    同时是小数点读法和「时」的词（中文「点」）在不超过 24 的整数后读作时刻，否则读作小数点。
+    """
     items = []
     frac_ctx = False
     joiner = "" if spec.scan else " "
@@ -432,6 +503,17 @@ def parse_items(toks: list, spec: LangSpec) -> list:
             items.append(Mark(kind = "minus", origin = "sym", surface = "-"))
             i += 1
             continue
+        if kind == "colon":
+            if ext:
+                items.append(Mark(kind = "colon", origin = "sym", surface = ":"))
+            frac_ctx = False
+            i += 1
+            continue
+        if kind == "usym":
+            items.append(Mark(kind = "usym", origin = "sym", surface = t.text))
+            frac_ctx = False
+            i += 1
+            continue
         if kind == "char":
             items.append(Text(text = t.text))
             frac_ctx = False
@@ -451,6 +533,21 @@ def parse_items(toks: list, spec: LangSpec) -> list:
         w = t.text
         nxt = toks[i + 1] if i + 1 < n else None
         nxt_num = nxt is not None and _numeral_start(tok = nxt, spec = spec)
+        if (
+            ext
+            and time_first
+            and spec.ext is not None
+            and w in spec.sep_words
+            and w in spec.ext.hour
+            and items
+            and _is_int_num(it = items[-1])
+            and items[-1].value <= 24
+            and _minutes_follow(toks = toks, j = i + 1, spec = spec)
+        ):
+            items.append(Mark(kind = "time", origin = "word", surface = w))
+            frac_ctx = False
+            i += 1
+            continue
         if w in spec.sep_words and items and _is_int_num(it = items[-1]) and nxt_num:
             items.append(Mark(kind = "sep", origin = "word", surface = w.replace(" ", "")))
             frac_ctx = True
@@ -585,7 +682,34 @@ def _place_percent(items: list, spec: LangSpec) -> list:
     return out
 
 
-def analyze(text: str, spec: LangSpec) -> list:
-    """返回文本的比较单元序列；数字写法有歧义时返回多种候选。"""
-    toks = tokenize(text = text, spec = spec)
-    return [parse_items(toks = variant, spec = spec) for variant in _expand(toks = toks)]
+def analyze(text: str, spec: LangSpec, ext: bool = False) -> list:
+    """返回文本的比较单元序列；数字写法有歧义时返回多种候选。
+
+    ext 为 True 时用于比对：另外统一单位、货币、时刻的读法与符号写法，合并书写变体，
+    并加入语言自己的候选切分（spec.variants）。评测打分用 ext = False，结果与原来相同。
+    """
+    if not ext:
+        toks = tokenize(text = text, spec = spec)
+        return [parse_items(toks = variant, spec = spec) for variant in _expand(toks = toks)]
+    from .extend import extend_items
+
+    toks = tokenize(text = text, spec = spec, ext = True)
+    conflict = spec.ext is not None and bool(spec.sep_words & spec.ext.hour)
+    out = []
+    for variant in _expand(toks = toks):
+        for time_first in ((True, False) if conflict else (True,)):
+            items = parse_items(
+                toks = variant,
+                spec = spec,
+                ext = True,
+                time_first = time_first,
+            )
+            items = extend_items(items = items, spec = spec)
+            if items not in out:
+                out.append(items)
+    if spec.variants is not None:
+        for items in list(out):
+            for extra in spec.variants(items = items):
+                if extra not in out:
+                    out.append(extra)
+    return out[:MAX_EXT_VARIANTS]

@@ -1,4 +1,4 @@
-"""朗读稿与 ASR 识别结果的比对，以及评测打分用的规范化（实验 v1，任务 T05）。
+"""朗读稿与 ASR 识别结果的比对，以及评测打分用的规范化（实验 v1，任务 T05，比对增强 T21）。
 
 用法
 ====
@@ -46,18 +46,42 @@ zh en ja ko de fr ru pt es it id ms th vi fil ar tr fa。
 比较时合并的书写变体：中文两/二、幺/一、〇/零和大写数字；日语〇/零；越南语 mốt/một、tư/bốn（mươi 之后）、
 lăm/nhăm/năm（十位之后）、lẻ/linh、ngàn/nghìn、tỉ/tỷ、bẩy/bảy；泰语 เอ็ด/หนึ่ง，以及重复符 ๆ 与写出的重复。
 
+比对增强
+========
+
+compare 另外放宽「同一读音的不同写法」，真实的读错、漏读仍判不一致。这些处理只用于 compare，
+normalize_for_scoring 不经过这里（parse.analyze(ext = True)，见 extend.py、units.py）。
+
+- 日语（ja_reading.py）：先按写法比较，不一致时两边都用形态分析换成片假名读音再比较一次，「言って」对「いって」、
+  「嬉しい」对「うれしい」、同音词「交響曲」对「公共局」都判一致；数词和数词后的量词保留原写法。
+  需要 fugashi 和 unidic-lite，没有安装时只按写法比较，差异说明注明，第一次调用时发出警告。
+- 单位、货币（units.py）：紧跟在数后的单位读法与符号写法统一成单位记号，按编号比较（doze quilômetros 对 12 km、
+  five dollars 对 $5、三十摄氏度 对 30°C），写在数前的货币符号移到数后；两边都是读法时仍要求词形一致。
+- 时刻：「14:30」「14.30」「14h30」与「三点十五分」「vierzehn Uhr dreißig」「três horas e quinze minutos」
+  统一成时刻记号；读出的「时」「分」类词和连接词记在记号里，两边都是读法时要求相同，所以「三点十五分」与
+  「三点十五」不一致。冒号本身不读，「5:30」仍可对「five thirty」；分钟 00 不读（14:00 对 vierzehn Uhr）。
+  「2:12:00」这类三段写法不按时刻处理。中文「三点五」仍按小数比较。
+- 韩语：同一组内不混用汉字词和固有词，「십세」是 10 加量词「세」、「이십세기」是 20 加「세기」；汉字词数还尝试
+  另外两种切分：末尾的个位单独成数（「육십일 일간」对「60일 일간」），开头的个位单独成数（「이 천구백칠십」对
+  「이 1970」）。越南语「hai trăm năm」也可以是 200 加「năm」（年）。切分出的数不参与年份式拼接。
+- 书写变体：拉丁字母上不属于该语言字母表的变音符号去掉（德语句中的 São、Stéfano，马来语句中的 José）；
+  葡萄牙语 m、n 前的 ó/ô、é/ê 合并（António、Antônio）；越南语 i/y（Mĩ、Mỹ）和 oa、oe、uy 的声调位置（hòa、hoà）
+  合并。各语言自己的变音符号（德语 ä ö ü、葡语 ã、西语 ñ、越南语声调）不合并。
+- 被标点隔开的同一串数词（「yedi, yüz elli milyon」对「yedi yüz elli milyon」）判一致，要求原词逐字相同。
+
 依赖与许可
 ==========
 
-只依赖 Python 标准库，支持 Python 3.10 及以上。data/zh_t2s.txt 由 OpenCC 的 TSCharacters.txt 生成
-（Apache-2.0，https://github.com/BYVoid/OpenCC）。开发用的词表回归检查 tests/rbnf_check.py 需要
-unicode-rbnf（MIT，数据为 Unicode 许可），只在开发环境中安装。
+必需的只有 Python 标准库，支持 Python 3.10 及以上。data/zh_t2s.txt 由 OpenCC 的 TSCharacters.txt 生成
+（Apache-2.0，https://github.com/BYVoid/OpenCC）。日语按读音比较是可选功能，需要 fugashi（MIT）和
+unidic-lite（MIT，词典为 UniDic，BSD 许可，约 250 MB）：pip install fugashi unidic-lite。开发用的词表回归检查
+tests/rbnf_check.py 需要 unicode-rbnf（MIT，数据为 Unicode 许可），只在开发环境中安装。
 
 测试
 ====
 
-    python -m unittest pipeline.compare.tests.test_compare
-    python -m pipeline.compare.tests.run_cases          # 逐语言统计正例、反例
+    python -m unittest pipeline.compare.tests.test_compare pipeline.compare.tests.test_ext
+    python -m pipeline.compare.tests.run_cases          # 逐语言、逐增强项统计正例、反例
     python -m pipeline.compare.tests.rbnf_check         # 需要 unicode-rbnf
 
 已知局限
@@ -71,12 +95,15 @@ TTS 读成「в пять домах」、ASR 写成「в 5 домах」，会�
 原文核对只针对识别结果中的阿拉伯数字，并且按集合判断：数值在原文任意位置出现即可。识别结果写成读法时，
 朗读稿相对原文的数值错误需要由生成朗读稿的环节检查。
 
-以下情况会误杀：读法与符号写法语序不同（「vierzehn Uhr dreißig」对「14:30 Uhr」，「三点零五分」对「3:05」，
-泰语「ร้อยละห้า」对「5%」）；货币和单位符号不转为读法（「five dollars」对「$5」，「三公里」对「3km」）；
-范围中的连字符不转为「到」（「three to five」对「3-5」）；日语汉字与假名的写法不同；菲律宾语只覆盖常见的
-他加禄语、英语和少量西班牙语来源数词。
+以下情况仍会误杀：泰语「ร้อยละห้า」对「5%」的语序；带辅币的金额（「zwölf Euro fünfzig」对「12,50 €」）；
+平方、立方单位（「kilómetros cuadrados」对「km²」）；范围中的连字符不转为「到」（「three to five」对「3-5」）；
+「50-million-year-old」这类数字与词用连字符相连；菲律宾语只覆盖常见的他加禄语、英语和少量西班牙语来源数词。
+以下读音相同的写法差异没有放宽：中文同音字（江杨、江阳），法语不发音的词尾（sport、sports），俄语非重读元音弱化
+（человекам、человеком），韩语 ㅐ/ㅔ（떼、때），泰语元音长短符号与不发音字母（เซ็นต์、เซน），菲律宾语外来词拼法
+（unibersidad、universidad）。它们是不同的词或需要整套读音规则，放宽容易接受真实的读错。
 
-日语只比较书写形式，汉字数词的读音歧义（十分、一日、八分）无法发现。阿拉伯语附着成分和冠词 ال 在数内的
+日语按读音比较时，同音词和 UniDic 登记的送假名变体（嬉い、引渡し）判一致；朗读稿的读音由形态分析决定，
+有歧义的词（「良い」读作よい还是いい）可能误杀。汉字数词的读音歧义（十分、一日、八分）仍无法发现。阿拉伯语附着成分和冠词 ال 在数内的
 处理是启发式的，双数名词（طالبان，两个学生）不视为数词。泰语没有分词，ๆ 按「重复前面一个完整音节串」近似
 处理。比较时忽略空白，只差在分词或空格的结果视为一致。阿拉伯数字的歧义写法（1.234 可能是千分位或小数）
 会同时尝试两种解释。差异说明显示的是规范化后的文本（小写、日语片假名等）。

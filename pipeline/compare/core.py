@@ -7,6 +7,7 @@ import re
 import unicodedata
 from typing import NamedTuple
 
+from . import ja_reading
 from .langs import get_spec
 from .normalize import normalize_text
 from .parse import Mark, Num, Text, analyze
@@ -58,8 +59,44 @@ def _eq(a, b) -> bool:
             return False
         if a.origin == "word" and b.origin == "word":
             return a.surface == b.surface
+        if a.kind == "unit":
+            return bool(a.ids & b.ids)
+        if a.kind == "time" and a.origin == "sym" and b.origin == "sym":
+            # 「14:30 Uhr」与「14:30」：冒号、h 之外读出的词要相同
+            return a.surface.split("|")[1:] == b.surface.split("|")[1:]
         return True
     return False
+
+
+def _is_word_int(it) -> bool:
+    return isinstance(it, Num) and it.origin == "word" and not it.frac
+
+
+def _regroup_ok(x, seq) -> bool:
+    """同一串数词被标点隔开（「yedi, yüz elli milyon」对「yedi yüz elli milyon」）：原词逐字相同。
+
+    比较的是原来的词（display），不是合并变体后的词形，「hai mươi năm」不会与「hai mươi lăm」一致。
+    """
+    if not _is_word_int(it = x) or not all(_is_word_int(it = w) for w in seq):
+        return False
+    return "".join(w.display for w in seq).replace(" ", "") == x.display.replace(" ", "")
+
+
+def _as_text(it) -> str:
+    """单位的读法记号也可以按普通文字比较（「yen dari」对「yendari」，比较时忽略空白）。"""
+    if isinstance(it, Mark) and it.origin == "word" and it.kind == "unit":
+        return it.surface
+    return ""
+
+
+def _text_run(units: list, start: int, text: str) -> bool:
+    end = start + len(text)
+    return end <= len(units) and all(isinstance(u, str) for u in units[start:end]) and "".join(units[start:end]) == text
+
+
+def _skippable(it) -> bool:
+    """冒号写法的时刻记号（后面没有读出的词）可以不对应任何东西：「5:30」对「five thirty」。"""
+    return isinstance(it, Mark) and it.kind == "time" and it.surface == ":"
 
 
 def _concat_ok(d, seq) -> bool:
@@ -68,7 +105,7 @@ def _concat_ok(d, seq) -> bool:
         return False
     parts = []
     for w in seq:
-        if not isinstance(w, Num) or w.origin != "word" or "card" not in w.kinds or w.frac != d.frac:
+        if not isinstance(w, Num) or w.origin != "word" or "card" not in w.kinds or w.frac != d.frac or w.split:
             return False
         parts.append(w.digits)
     return "".join(parts) == d.digits
@@ -84,6 +121,13 @@ def _match_units(a: list, b: list, lang: str) -> bool:
         if i == n and j == m:
             return True
         if i >= n or j >= m:
+            # 只剩符号写法的时刻记号（「14:00」去掉 00 后剩下的记号）
+            if i < n and _skippable(it = a[i]) and (i + 1, j) not in seen:
+                seen.add((i + 1, j))
+                stack.append((i + 1, j))
+            if j < m and _skippable(it = b[j]) and (i, j + 1) not in seen:
+                seen.add((i, j + 1))
+                stack.append((i, j + 1))
             continue
         x, y = a[i], b[j]
         succ = []
@@ -95,6 +139,23 @@ def _match_units(a: list, b: list, lang: str) -> bool:
         for k in range(2, min(MAX_CONCAT, n - i) + 1):
             if _concat_ok(d = y, seq = a[i:i + k]):
                 succ.append((i + k, j + 1))
+        if isinstance(x, Num) and isinstance(y, Num):
+            for k in range(2, min(MAX_CONCAT, m - j) + 1):
+                if _regroup_ok(x = x, seq = b[j:j + k]):
+                    succ.append((i + 1, j + k))
+            for k in range(2, min(MAX_CONCAT, n - i) + 1):
+                if _regroup_ok(x = y, seq = a[i:i + k]):
+                    succ.append((i + k, j + 1))
+        if _skippable(it = x):
+            succ.append((i + 1, j))
+        if _skippable(it = y):
+            succ.append((i, j + 1))
+        text = _as_text(it = x)
+        if text and _text_run(units = b, start = j, text = text):
+            succ.append((i + 1, j + len(text)))
+        text = _as_text(it = y)
+        if text and _text_run(units = a, start = i, text = text):
+            succ.append((i + len(text), j + 1))
         if lang == "th":
             forward = _mai_yamok(
                 a = a,
@@ -163,6 +224,8 @@ def _key(it) -> str:
         return "T" + it.text
     if isinstance(it, Num):
         return f"N{it.digits}|{it.surface if it.origin == 'word' else ''}"
+    if it.kind == "unit":
+        return f"Munit|{it.origin}|{it.surface}"
     return f"M{it.kind}|{it.surface if it.origin == 'word' else ''}"
 
 
@@ -179,10 +242,10 @@ def _show(items: list, joiner: str) -> str:
             token = it.display
             glue = glue or (it.frac and it.origin != "word")
         else:
-            token = it.surface
+            token = it.surface.split("|")[0] if it.kind == "time" else it.surface
             if it.origin == "sym":
                 glue = it.kind != "minus"
-                glue_next = it.kind != "pct"
+                glue_next = it.kind not in ("pct", "unit")
         if glue and parts:
             parts[-1] += token
         else:
@@ -332,24 +395,43 @@ def _unsupported(items: list, support: set) -> list:
 # 对外接口
 # ---------------------------------------------------------------------------
 
+def _align(script: str, hypothesis: str, spec) -> tuple:
+    """返回 (一致时识别结果的比较单元或 None, 朗读稿的候选, 识别结果的候选)。"""
+    s_variants = analyze(text = script, spec = spec, ext = True)
+    h_variants = analyze(text = hypothesis, spec = spec, ext = True)
+    s_units = [_units(items = s) for s in s_variants]
+    for h in h_variants:
+        h_units = _units(items = h)
+        for units in s_units:
+            if _match_units(a = units, b = h_units, lang = spec.code):
+                return h, s_variants, h_variants
+    return None, s_variants, h_variants
+
+
 def compare(script: str, hypothesis: str, lang: str, original: str | None = None) -> CompareResult:
     """比较朗读稿与识别结果。
 
     返回 CompareResult(match, detail)：match 为 True 表示一致；detail 为差异说明，
     一致时为空字符串。给出 original 时，还要求识别结果中的阿拉伯数字都能在原文中找到。
+    日语先按写法比较，不一致时再按读音比较（需要 fugashi 和 unidic-lite，见 ja_reading.py）。
     """
     spec = get_spec(lang = lang)
-    s_variants = analyze(text = script, spec = spec)
-    h_variants = analyze(text = hypothesis, spec = spec)
-    matched = None
-    for h in h_variants:
-        h_units = _units(items = h)
-        for s in s_variants:
-            if _match_units(a = _units(items = s), b = h_units, lang = spec.code):
-                matched = h
-                break
-        if matched is not None:
-            break
+    matched, s_variants, h_variants = _align(script = script, hypothesis = hypothesis, spec = spec)
+    note = ""
+    if matched is None and spec.code == "ja":
+        if ja_reading.available():
+            reading = _align(
+                script = ja_reading.to_reading(text = script),
+                hypothesis = ja_reading.to_reading(text = hypothesis),
+                spec = spec,
+            )
+            matched = reading[0]
+            if matched is None:
+                # 差异说明按读音给出，只剩真正读音不同的地方
+                s_variants, h_variants = reading[1], reading[2]
+                note = "（按读音）"
+        else:
+            note = "（" + ja_reading.MISSING_NOTE + "）"
     joiner = "" if spec.scan else " "
     problems = []
     if matched is None:
@@ -359,6 +441,8 @@ def compare(script: str, hypothesis: str, lang: str, original: str | None = None
             lang = spec.code,
             joiner = joiner,
         )
+        if note:
+            problems[-1] += note
     if original is not None:
         checked = matched if matched is not None else h_variants[0]
         missing = _unsupported(items = checked, support = _support(original = original, spec = spec))
