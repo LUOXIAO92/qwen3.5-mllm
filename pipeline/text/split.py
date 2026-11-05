@@ -40,7 +40,8 @@ _ABBREVIATIONS = {
     "тт", "лат", "греч", "фр", "итал", "исп", "пр", "напр", "букв", "букв", "ср", "т", "п", "д", "н", "э", "им",
     # 印尼语、马来语、土耳其语、越南语
     "bpk", "ibu", "hj", "dll", "dsb", "yg", "dkk", "tgl", "sdr", "jl", "prof", "dr", "ir", "drs",
-    "bkz", "sn", "tel", "kec", "kab", "kel", "prov", "dgn", "yth", "ybs", "tsb", "spd", "skm", "tbk", "hlm", "jln",
+    "bkz", "sn", "tel", "ybhg", "datuk", "dato", "datin", "hjh", "hj", "pn", "cik", "puan", "tuan", "sdri", "yb", "yab", "rp", "drs", "bpk", "ny",
+    "bhd", "sdn", "kec", "kab", "kel", "prov", "dgn", "yth", "ybs", "tsb", "spd", "skm", "tbk", "hlm", "jln",
 }
 
 # 点前是这些序数的语言：1–2 位数字加句点是序数（am 18. April），不是句末。

@@ -104,6 +104,7 @@ def read_hplt(
     genre: str,
     glotlid_code: str,
     max_chars: int = 40000,
+    max_mt: float = 0.2,
 ) -> Iterator[tuple[str, str]]:
     """读取若干 `.jsonl.zst`（可以是被截断的前缀），只产出指定体裁（`na`、`op`、`in`）的段落。"""
     for path in files:
@@ -117,7 +118,7 @@ def read_hplt(
             text = doc.get("text") or ""
             if len(text) > max_chars:
                 continue
-            if hplt_doc_ok(doc, genres = (genre.upper(),), glotlid_code = glotlid_code) is None:
+            if hplt_doc_ok(doc, genres = (genre.upper(),), glotlid_code = glotlid_code, max_mt = max_mt) is None:
                 continue
             url = doc.get("u") or doc.get("id", "")
             if url_is_spam(url):
@@ -188,6 +189,28 @@ _NAMESPACE_LINK = re.compile(
 )
 
 
+# Wikinews 用模板写内部链接：{{w|页面名|显示文字}}（en、ko）、{{v|…}}（tr）、{{wikipedia|…}}（zh）等。
+# strip_code 会把模板整个丢掉，句子里就缺了实体名；这里先换成显示文字（有第二个参数用第二个，否则用第一个）。
+_LINK_TEMPLATES = {
+    "w", "wikipedia", "wp", "v", "vikipedi", "wikinews", "위키뉴스", "ویکی‌پدیا", "ویکی پدیا", "ویکی\u200cپدیا",
+    "lang", "ill", "iw", "w2", "wl",
+}
+
+
+def expand_link_templates(code) -> None:
+    """把链接模板就地换成显示文字，其余模板保持原样（由 strip_code 删除）。"""
+    for template in code.filter_templates(recursive = False):
+        name = str(template.name).strip().lower()
+        if name not in _LINK_TEMPLATES:
+            continue
+        positional = [str(param.value).strip() for param in template.params if not str(param.name).strip().lower().startswith(("lang", "wd")) and str(param.name).strip().isdigit()]
+        if name in {"lang", "ill", "iw"}:
+            text = positional[1] if len(positional) > 1 else ""
+        else:
+            text = positional[1] if len(positional) > 1 else (positional[0] if positional else "")
+        code.replace(template, text)
+
+
 def wikitext_to_text(wikitext: str) -> str:
     """去掉模板、链接标记、分类和文件，只留正文；遇到「消息来源」等章节就截断。"""
     import mwparserfromhell
@@ -196,6 +219,7 @@ def wikitext_to_text(wikitext: str) -> str:
     if match:
         wikitext = wikitext[: match.start()]
     code = mwparserfromhell.parse(wikitext)
+    expand_link_templates(code)
     for link in code.filter_wikilinks():
         if _NAMESPACE_LINK.match(str(link.title).strip()):
             try:
@@ -243,3 +267,20 @@ def read_wikinews(*, path: str, lang: str, min_chars: int = 200) -> Iterator[tup
 
 def list_files(pattern: str) -> list[str]:
     return sorted(glob.glob(str(Path(pattern))))
+
+
+# ---------------------------------------------------------------- 过滤选项
+WEB_SOURCE_NAMES = {HPLT_NAME, FW2_NAME, FWEDU_NAME, WIKINEWS_NAME}
+SPAM_SOURCE_NAMES = {HPLT_NAME, FW2_NAME, FWEDU_NAME}
+
+
+def entry_options(lang: str, source_name: str):
+    """条目所属来源对应的过滤选项：网页来源开启句级和整条规则，HPLT、FineWeb 系列再开启垃圾关键词；part1 来源返回默认值。"""
+    import dataclasses
+
+    from ..filters import default_options
+
+    options = default_options(lang)
+    if source_name in WEB_SOURCE_NAMES:
+        options = dataclasses.replace(options, web = True, entry = True, spam = source_name in SPAM_SOURCE_NAMES)
+    return options

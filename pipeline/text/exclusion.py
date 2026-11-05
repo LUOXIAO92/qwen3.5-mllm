@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .normalize import norm_key
@@ -46,7 +47,9 @@ def load_blocklist(path: str | Path | None = None) -> set[str]:
     path = Path(path) if path else Path(__file__).parent / "data" / "blocklist_refs.txt"
     refs = set()
     for line in path.read_text(encoding = "utf-8").splitlines():
-        ref = line.split("#", 1)[0].strip()
+        if line.lstrip().startswith("#"):
+            continue
+        ref = re.split(r"\s+#\s", line, maxsplit = 1)[0].strip()  # 行内注释前有空白；URL 里的 # 不算
         if ref:
             refs.add(ref)
     return refs

@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import random
 from collections import Counter, defaultdict
@@ -24,9 +23,11 @@ from pathlib import Path
 from .build import SOURCE_INFO, interleave, read_candidates, to_entry, write_jsonl
 from .dedup import Deduper
 from .exclusion import is_excluded, load_blocklist, load_exclusion
-from .filters import check_text, default_options
+from .filters import check_text
 from .langs import LANGS
 from .lengths import BINS
+from .mtscore import CharLM, percentile
+from .sources.web import entry_options
 
 WEB_SOURCES = ["hplt_na", "hplt_op", "hplt_in", "fw2hq", "fwedu", "wikinews"]
 DEFAULT_TARGETS = {"short": 12000, "medium": 18000, "long": 10000}
@@ -41,6 +42,7 @@ def merge_language(
     exclusion: dict[str, set[str]],
     targets: dict[str, int],
     seed: int,
+    lm_filter: float = 0.0,
 ) -> tuple[list[dict], list[dict], dict]:
     """返回 (最终条目, 新增条目, 统计)。"""
     rng = random.Random(f"merge-{seed}-{lang}")
@@ -52,7 +54,6 @@ def merge_language(
     have = Counter(entry["length_bin"] for entry in part1)
 
     blocklist = load_blocklist()
-    options = dataclasses.replace(default_options(lang), web = True)
     stats: Counter = Counter()
     by_source: dict[str, list[dict]] = {}
     for source in sources:
@@ -64,7 +65,7 @@ def merge_language(
             stats[f"read_{source}"] += 1
             if row["ref"] in blocklist:
                 continue
-            if check_text(row["text"], lang = lang, options = options) is not None:
+            if check_text(row["text"], lang = lang, options = entry_options(lang, SOURCE_INFO[source][0])) is not None:
                 stats["drop_rules"] += 1
                 continue
             if is_excluded(row["text"], lang = lang, exclusion = exclusion):
@@ -77,6 +78,19 @@ def merge_language(
             rows.append(row)
         rng.shuffle(rows)
         by_source[source] = rows
+
+    if lm_filter > 0:
+        # 字符模型交叉熵：用 part1 的人写文本训练，丢弃候选里交叉熵最高的 `lm_filter` 比例（噪声、评论串、外语夹杂）
+        trusted = [entry["original"] for entry in part1][:20000]
+        model = CharLM()
+        for text in trusted:
+            model.train(text)
+        scored = {id(row): model.cross_entropy(row["text"]) for rows in by_source.values() for row in rows}
+        cutoff = percentile(list(scored.values()), 1.0 - lm_filter) if scored else 0.0
+        for source, rows in by_source.items():
+            kept = [row for row in rows if scored[id(row)] <= cutoff]
+            stats["drop_lm"] += len(rows) - len(kept)
+            by_source[source] = kept
 
     chosen: list[dict] = []
     gaps: dict[str, int] = {}
@@ -127,6 +141,8 @@ def main() -> None:
     parser.add_argument("--target-short", type = int, default = DEFAULT_TARGETS["short"])
     parser.add_argument("--target-medium", type = int, default = DEFAULT_TARGETS["medium"])
     parser.add_argument("--target-long", type = int, default = DEFAULT_TARGETS["long"])
+    parser.add_argument("--lm-langs", nargs = "*", default = ["fil", "vi", "th"], help = "启用字符模型过滤的语言")
+    parser.add_argument("--lm-drop", type = float, default = 0.10, help = "字符模型过滤丢弃的比例")
     parser.add_argument("--review-size", type = int, default = 30)
     parser.add_argument("--seed", type = int, default = 0)
     args = parser.parse_args()
@@ -147,6 +163,7 @@ def main() -> None:
             exclusion = exclusion,
             targets = targets,
             seed = args.seed,
+            lm_filter = args.lm_drop if lang in args.lm_langs else 0.0,
         )
         write_jsonl(out_dir / f"{lang}.jsonl", entries)
         # 审阅样本从新增的网页条目里随机取：part1 的条目已经审阅过。

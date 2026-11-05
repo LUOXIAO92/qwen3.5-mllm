@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from .rules import check_language_rules
+from .web_entry_rules import check_web_entry
 from .web_rules import check_web_rules
 from .langs import (
     CASED_LANGS,
@@ -37,6 +38,8 @@ class FilterOptions:
     max_symbols: int = 2
     max_bracket_groups: int = 1  # 括号组超过这个数就丢弃（维基段落里括号注释堆叠）
     max_bracket_ratio: float = 0.25  # 括号内容占全句比例上限
+    entry: bool = False  # 整条文本的网页规则（web_entry_rules），只在合并与核对时开启
+    spam: bool = False  # 赌博、外汇等关键词，只对 HPLT、FineWeb2-HQ-Plus 开启
     web: bool = False  # 网页来源：额外启用样板、社交、电话、价格等规则（web_rules.py）
 
 
@@ -173,6 +176,11 @@ def check_text(text: str, *, lang: str, options: FilterOptions | None = None) ->
 
     if options.web:
         reason = check_web_rules(text, lang = lang)
+        if reason:
+            return reason
+
+    if options.entry:
+        reason = check_web_entry(text, lang = lang, spam = options.spam)
         if reason:
             return reason
 
