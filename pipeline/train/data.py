@@ -42,10 +42,10 @@ def build_prompt(processor, audio_path):
 
 
 def to_simplified(text):
-    """把中文繁体字逐字转成简体，对照表复用 pipeline/compare 中来自 OpenCC 的单字表。"""
-    from pipeline.compare.normalize import _zh_t2s
+    """把中文繁体转成简体，与朗读稿使用同一个词级转换（pipeline.tn.core，OpenCC），保证两种训练目标的字形一致。"""
+    from pipeline.tn.core import to_simplified as tn_to_simplified
 
-    return text.translate(_zh_t2s())
+    return tn_to_simplified(text = text)
 
 
 def target_text(row, target):
