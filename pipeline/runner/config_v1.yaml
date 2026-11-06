@@ -123,11 +123,12 @@ asr_models:
     env: envs/asr-gigaam
     module: pipeline.asr.gigaam
   haas_ja:
-    batch_size: 64
+    batch_size: 32   # #22 ja：批次 64 在长音频上占满 32 GB 并溢出到内存，7742 条用了 15 分钟
     env: envs/asr-nemo
     module: pipeline.asr.haas_ja
     env_vars:
       PYTHONPATH: "{work_dir}/src/Haas-ASR/src"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   typhoon:
     batch_size: 32
     env_vars:
