@@ -149,6 +149,7 @@ asr_models:
 # 各语言 TTS 权重按 #21 试验中「语言 × TTS 模型」的通过率调整：通过率高的模型权重大，OmniVoice（约 27%）只保留少量以保持音色多样；
 # #22 第一轮 en 实测：每秒合成用时产出的通过音频 Supertonic-3 11.2（CPU）、Qwen3-TTS 6.4、OmniVoice 3.9、IndexTTS 0.7，
 # 因此去掉 zh、ja、es 中的 IndexTTS，ar 降到最低权重；ru、id 中 VoxCPM2 降到 1。
+# 正式合成中 VoxCPM2 约 5 倍实时、OmniVoice 约 12 倍实时，两者通过率相近（vi/ru/pt/tr/id），ms、fil 改为以 OmniVoice 为主。
 langs:
   zh:
     tts: {qwen3_tts: 3, omnivoice: 1}
@@ -206,7 +207,7 @@ langs:
     cross_asr: whisper
     sec_per_char: [0.04, 0.24]
   ms:                      # Qwen3-ASR 的马来语明显弱于 Whisper，交叉核对误杀多（#21），不做交叉
-    tts: {voxcpm2: 3, omnivoice: 1}
+    tts: {omnivoice: 3, voxcpm2: 1}
     asr: whisper
     sec_per_char: [0.03, 0.20]
   th:
@@ -220,7 +221,7 @@ langs:
     cross_asr: whisper
     sec_per_char: [0.04, 0.25]
   fil:                     # Whisper 明显优于 Qwen3-ASR（#15 验收），不用 Qwen3-ASR 交叉
-    tts: {voxcpm2: 3, omnivoice: 1}
+    tts: {omnivoice: 3, voxcpm2: 1}
     asr: whisper
     sec_per_char: [0.04, 0.26]
   ar:
