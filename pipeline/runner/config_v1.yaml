@@ -31,6 +31,8 @@ tts_models:
   omnivoice:
     batch_size: 8   # 批次 8 最快（#30：6、8、10、12 的用时相同，4 与 16 以上更慢），多进程无收益
     chunk_size: 2048
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True   # #22 vi：可变长度批次让缓存显存涨到 32 GB（实际峰值 5 GB）
     env: envs/tts-omnivoice
     module: pipeline.tts.omnivoice
     langs: [zh, en, ja, ko, de, fr, ru, pt, es, it, id, ms, th, vi, fil, ar, tr, fa]
@@ -40,6 +42,8 @@ tts_models:
   voxcpm2:
     batch_size: 8   # 上游逐条合成；多进程 2 个无收益（#30），批量大小只影响写盘粒度
     chunk_size: 512
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True   # #22 vi：可变长度批次让缓存显存涨到 32 GB（实际峰值 5 GB）
     env: envs/tts-voxcpm2
     module: pipeline.tts.voxcpm2
     langs: [zh, en, ja, ko, de, fr, ru, pt, es, it, id, ms, th, vi, fil, ar, tr]
