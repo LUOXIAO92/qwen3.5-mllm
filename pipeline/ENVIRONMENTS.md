@@ -340,11 +340,11 @@ uv pip install --python envs/mllm-train/bin/python opencc==1.4.2
 
 ### 7.2 `envs/mllm-eval`
 
-使用者：真人语音评测（`pipeline/eval/run.sh`）。Python 3.14.7，叠加在 conda 环境上，额外安装 numpy 2.5.4 和 soundfile 0.14.0。
+使用者：真人语音评测（`pipeline/eval/run.sh`）。Python 3.14.7，叠加在 conda 环境上，额外安装 numpy 2.5.4、soundfile 0.14.0 和 opencc 1.4.2。opencc 让打分时的中文繁简转换与比对、朗读稿生成一致；没有安装时打分按单字表转换，并给出警告。
 
 ```bash
 uv venv --python <conda py3.14 的 python> --system-site-packages envs/mllm-eval
-uv pip install --python envs/mllm-eval/bin/python numpy==2.5.4 soundfile==0.14.0
+uv pip install --python envs/mllm-eval/bin/python numpy==2.5.4 soundfile==0.14.0 opencc==1.4.2
 ```
 
 ## 8. 模型权重
