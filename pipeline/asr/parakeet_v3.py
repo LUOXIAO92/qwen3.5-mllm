@@ -9,6 +9,9 @@
 环境：envs/asr-nemo（Python 3.12，nemo-toolkit[asr] 2.7.3，torch 2.14.0+cu130），与 Haas-ja 共用，
 不需要额外源码克隆。权重来自 Hugging Face 仓库 nvidia/parakeet-tdt-0.6b-v3，建立方法与实测数字见 issue #33。
 模型以 bf16 在 GPU 上运行；音频统一读成 16 kHz 单声道 float32，按时长排序成批。
+NeMo 的 TDT 解码每遇到一种新的批形状就保留一份显存（实测每批约 0.6–0.9 GB，torch 的已分配量不变、保留量持续增长，
+关闭 use_cuda_graph_decoder 也一样；在批之间 empty_cache 会导致非法显存访问）。按时长排序后几乎每批形状都不同，
+一次处理两千条时几十批之后显存涨满 32 GB。所以每次调用的条数要有限：流水线配置中 parakeet_v3 的 chunk_size 设为 256。
 
 用法::
 

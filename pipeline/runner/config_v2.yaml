@@ -10,6 +10,7 @@ extends: config_v1.yaml
 asr_models:
   parakeet_v3:
     batch_size: 32
+    chunk_size: 256   # 每次调用最多 256 条：TDT 解码的显存随批形状种类增长，见 pipeline/asr/parakeet_v3.py
     env: envs/asr-nemo
     module: pipeline.asr.parakeet_v3
   fun_asr:
