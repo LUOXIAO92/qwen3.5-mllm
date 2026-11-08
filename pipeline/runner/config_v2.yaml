@@ -15,6 +15,8 @@ asr_models:
     module: pipeline.asr.parakeet_v3
   fun_asr:
     batch_size: 1   # 上游每次只解码一条
+    chunk_size: 250
+    processes: 4    # 每个进程约 2 GB 显存，同时开 4 个封装子进程补回逐条解码的速度
     env: envs/asr-funasr-mlt
     module: pipeline.asr.fun_asr_mlt
     args: ["--funasr-src", "{work_dir}/src/Fun-ASR"]

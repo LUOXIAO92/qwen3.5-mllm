@@ -28,7 +28,7 @@ pipeline/CONVENTIONS.md 检查输入格式（缺文件、缺字段、语言代�
     python -m pipeline.runner all $C ...                      # 按上面的顺序依次执行全部（不含分片）
 
 ``tts`` 与 ``asr`` 的 ``--models a b`` 只处理列出的模型，所以 CPU 模型（如 supertonic3）与 GPU 模型可以在两个进程里
-同时跑同一个输出目录（块文件按模型分开，progress.json 合并各进程写入的阶段）；配置里 ``processes`` 大于 1 的模型同时开多个
+同时跑同一个输出目录（块文件按模型分开，progress.json 合并各进程写入的阶段）；配置里 ``processes`` 大于 1 的模型（TTS 与 ASR 都适用）同时开多个
 封装子进程，各处理一块，整个模型阶段只持一次 gpu.lock。配置里的 ``prefer_builtin: true``（可按语言覆盖）让抽到的模型在有
 内置音色可用时只用内置音色，其余语言用克隆。批次与吞吐的测量用 ``pipeline.runner.bench``，结果表用 ``bench_table``。
 

@@ -458,6 +458,7 @@ def asr_stage(
                 done = resumed,
                 counters = _asr_counters(targets = targets),
             )
+        pending = []
         for chunk, target in zip(chunks, targets):
             if target.exists():
                 continue
@@ -474,8 +475,13 @@ def asr_stage(
                     if not primary_match[sample_id]:
                         continue
                 rows.append((task, synth[sample_id]))
-            if rows:
-                budget.consume()
+            pending.append((chunk, target, rows))
+        # 配置里 processes 大于 1 的模型同时开多个封装子进程，各处理一块，整个模型阶段只持一次 gpu.lock
+        processes = int(backend.get("processes", 1))
+        shared_lock = processes > 1 and backend.get("gpu", True)
+
+        def work(item: tuple, name = name, backend = backend, key = key, shared_lock = shared_lock) -> None:
+            chunk, target, rows = item
             records = _asr_chunk(
                 name = name,
                 backend = backend,
@@ -485,6 +491,7 @@ def asr_stage(
                 layout = layout,
                 work_dir = work_dir,
                 progress = progress,
+                lock = not shared_lock,
             )
             if progress is not None:
                 failed = sum(bool(rec["error"]) for rec in records)
@@ -495,6 +502,20 @@ def asr_stage(
                     audio_s = sum(record["duration_s"] or 0 for _, record in rows),
                     counters = {"asr_ok": len(records) - failed, "asr_failed": failed},
                 )
+
+        if processes <= 1:
+            for item in pending:
+                if item[2]:
+                    budget.consume()
+                work(item)
+        else:
+            _run_parallel(
+                items = pending,
+                work = work,
+                workers = processes,
+                budget = budget,
+                lock = GpuLock(path = Path(work_dir) / "gpu.lock") if shared_lock else None,
+            )
     merge_asr_raw(cfg = cfg, layout = layout, role = role)
 
 
@@ -513,6 +534,7 @@ def _asr_chunk(
     layout: Layout,
     work_dir: Path,
     progress = None,
+    lock: bool = True,
 ) -> list:
     results = {}
     if rows:
@@ -543,6 +565,7 @@ def _asr_chunk(
             ],
             log_path = layout.logs / f"asr-{name}.log",
             progress = progress,
+            lock = lock,
         )
         results = {row["sample_id"]: row for row in read_jsonl(path = job_dir / "results.jsonl")}
         if not results:
