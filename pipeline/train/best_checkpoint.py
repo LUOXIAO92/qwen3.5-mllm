@@ -14,7 +14,8 @@ import json
 import sys
 from pathlib import Path
 
-from .checkpoint import INFO_FILE
+# 与 pipeline.train.checkpoint.INFO_FILE 相同。这里不导入训练模块，任何环境都能运行本脚本。
+INFO_FILE = "projector.json"
 
 
 def best_checkpoint(output_dir: Path):

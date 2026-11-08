@@ -330,12 +330,14 @@ uv pip install --python envs/asr-hf/bin/python "huggingface-hub<2" accelerate==1
 
 ### 7.1 `envs/mllm-train`
 
-使用者：阶段 3 的 projector 训练（`pipeline/train/run.sh`、`pipeline.train.*`）。Python 3.14.7，叠加在 conda 环境上，PyTorch（2.13.0+cu130）、transformers 5.16.1 和 torchcodec 都来自 conda。额外装 flash-linear-attention 与 fla-core 0.6.0，并加 `--no-deps`，避免改动 torch 和 transformers；还装有 opencc 1.4.2。没有 fla 时语言模型的线性注意力层退回 PyTorch 实现，结果相同但更慢。
+使用者：阶段 3 的 projector 训练（`pipeline/train/run.sh`、`pipeline.train.*`）。Python 3.14.7，叠加在 conda 环境上，PyTorch（2.13.0+cu130）、transformers 5.16.1 和 torchcodec 都来自 conda。额外装 flash-linear-attention 与 fla-core 0.6.0，并加 `--no-deps`，避免改动 torch 和 transformers；还装有 opencc 1.4.2，以及生成训练标签用的 [mm-assistant-mask](https://github.com/LUOXIAO92/MultimodalAssistantMask)（固定在提交 95e15d7，同样加 `--no-deps`）。没有 fla 时语言模型的线性注意力层退回 PyTorch 实现，结果相同但更慢。
 
 ```bash
 uv venv --python <conda py3.14 的 python> --system-site-packages envs/mllm-train
 uv pip install --python envs/mllm-train/bin/python --no-deps flash-linear-attention==0.6.0 fla-core==0.6.0
 uv pip install --python envs/mllm-train/bin/python opencc==1.4.2
+uv pip install --python envs/mllm-train/bin/python --no-deps \
+    "mm-assistant-mask @ git+https://github.com/LUOXIAO92/MultimodalAssistantMask@95e15d78b5e418e11164fa94a694ee850db4f9f7"
 ```
 
 ### 7.2 `envs/mllm-eval`

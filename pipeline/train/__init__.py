@@ -9,7 +9,8 @@
 ====
 
 - data.py：读取训练清单、选择训练目标（script 朗读稿，或 original 原文，中文转简体）、按时长分组成批、
-  用阶段 1 processor 做特征提取与音频标记展开并生成标签。
+  用阶段 1 processor 做特征提取与音频标记展开，再用 mm_assistant_mask 在最终的 input_ids 上按 token 匹配助手回合生成标签。
+- check_labels.py：核对计损失的内容正好是目标文本加 <|im_end|>，提示部分与推理时一致；更换模板或 processor 后运行。
 - model.py：加载模型（冻结部分 bfloat16，projector float32），损失计算。词表约 25 万，词表投影和
   交叉熵合在一起分块计算，只在计损失的位置进行。
 - train.py：训练入口，梯度累积、线性预热加余弦退火、定期 dev 损失、检查点与断点续训。

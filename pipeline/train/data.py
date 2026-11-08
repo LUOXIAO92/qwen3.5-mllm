@@ -1,9 +1,11 @@
 """训练清单读取、目标文本选择与批次构造。
 
-一条样本在模型中的输入由三段拼成：用阶段 1 processor 展开的提示（chat template 加音频标记），
-目标文本的 token，以及结尾的 <|im_end|>。提示部分的标签填 -100，不计损失；目标文本和
-<|im_end|> 的标签就是它们自己的 token 编号。模型内部再把标签左移一位，用第 t 个位置的输出
-预测第 t + 1 个 token。
+一条样本是一段完整的对话：用户消息为音频加固定指令，助手回答为目标文本。整段对话用阶段 1 模型自带的
+chat template 渲染，再交给 processor 做特征提取和音频标记展开，得到最终的 input_ids。标签由
+mm_assistant_mask（https://github.com/LUOXIAO92/MultimodalAssistantMask）在最终 input_ids 上按 token
+匹配助手回合生成：助手回合开头和空的思考块不计损失，目标文本和结尾的 <|im_end|> 计算损失，其余位置填 -100。
+transformers 的 return_assistant_tokens_mask 按展开音频标记之前的字符位置计算，展开后会错位或全为 0，
+所以不用它。模型内部再把标签左移一位，用第 t 个位置的输出预测第 t + 1 个 token。
 """
 
 import json
@@ -11,11 +13,20 @@ import random
 from pathlib import Path
 
 import torch
+from mm_assistant_mask import AssistantMaskSpec, build_assistant_labels
 
 IGNORE_INDEX = -100
 SAMPLING_RATE = 16000
 INSTRUCTION = "Transcribe the audio."
 TARGETS = ("script", "original")
+# 助手回合在 token 序列中的边界。add_generation_prompt = True 生成的提示以「助手回合开头 + 空的思考块」结尾，
+# 这两段属于提示，不计损失；从目标文本开始到 <|im_end|> 为止计算损失，<|im_end|> 之后的换行不计。
+ASSISTANT_MASK_SPEC = AssistantMaskSpec(
+    assistant_header = "<|im_start|>assistant\n",
+    assistant_end = "<|im_end|>",
+    generation_stop = "<|im_end|>",
+    excluded_assistant_prefixes = ("<think>\n\n</think>\n\n",),
+)
 
 
 def build_messages(audio_path):
@@ -37,6 +48,19 @@ def build_prompt(processor, audio_path):
         conversation = build_messages(audio_path = audio_path),
         tokenize = False,
         add_generation_prompt = True,
+        enable_thinking = False,
+    )
+
+
+def build_training_text(processor, audio_path, target):
+    """渲染带助手回答的完整对话。前半段与 build_prompt 的结果逐字相同，后面接目标文本、<|im_end|> 和换行。"""
+    conversation = build_messages(audio_path = audio_path) + [
+        {"role": "assistant", "content": [{"type": "text", "text": target}]},
+    ]
+    return processor.apply_chat_template(
+        conversation = conversation,
+        tokenize = False,
+        add_generation_prompt = False,
         enable_thinking = False,
     )
 
@@ -131,65 +155,39 @@ class TranscriptionDataset(torch.utils.data.Dataset):
 class TrainCollator:
     """把若干条样本拼成一个批次。
 
-    先用 processor 对整批的提示和波形做特征提取与音频标记展开（与评测推理相同的调用），
-    再在每条提示后接上目标文本的 token 和 <|im_end|>，最后统一在右侧填充。
+    每条样本渲染成带助手回答的完整对话，整批交给 processor 做特征提取、音频标记展开和分词（与评测推理
+    相同的调用），再在最终的 input_ids 上用 mm_assistant_mask 生成标签。
     """
 
     def __init__(self, processor):
         self.processor = processor
         self.tokenizer = processor.tokenizer
-        self.im_end_id = self.tokenizer.convert_tokens_to_ids(tokens = "<|im_end|>")
-        self.pad_id = self.tokenizer.pad_token_id
 
     def __call__(self, items):
-        prompts = [
-            build_prompt(processor = self.processor, audio_path = item["audio_path"])
+        texts = [
+            build_training_text(
+                processor = self.processor,
+                audio_path = item["audio_path"],
+                target = item["target"],
+            )
             for item in items
         ]
         inputs = self.processor(
-            text = prompts,
+            text = texts,
             audio = [item["waveform"] for item in items],
             sampling_rate = SAMPLING_RATE,
             padding = True,
             return_tensors = "pt",
         )
-        target_ids = self.tokenizer(
-            text = [item["target"] for item in items],
-            add_special_tokens = False,
-        )["input_ids"]
-
-        sequences = []
-        for row_index, ids in enumerate(target_ids):
-            # 按 attention_mask 取出这一条提示的有效 token，不依赖填充方向。
-            valid = inputs["attention_mask"][row_index].bool()
-            prompt_ids = inputs["input_ids"][row_index][valid].tolist()
-            prompt_types = inputs["mm_token_type_ids"][row_index][valid].tolist()
-            answer_ids = list(ids) + [self.im_end_id]
-            sequences.append({
-                "input_ids": prompt_ids + answer_ids,
-                "labels": [IGNORE_INDEX] * len(prompt_ids) + answer_ids,
-                "mm_token_type_ids": prompt_types + [0] * len(answer_ids),
-            })
-
-        max_length = max(len(sequence["input_ids"]) for sequence in sequences)
-        batch_size = len(sequences)
-        input_ids = torch.full(size = (batch_size, max_length), fill_value = self.pad_id)
-        labels = torch.full(size = (batch_size, max_length), fill_value = IGNORE_INDEX)
-        attention_mask = torch.zeros(size = (batch_size, max_length), dtype = torch.long)
-        mm_token_type_ids = torch.zeros(size = (batch_size, max_length), dtype = torch.long)
-        for row_index, sequence in enumerate(sequences):
-            length = len(sequence["input_ids"])
-            input_ids[row_index, :length] = torch.tensor(data = sequence["input_ids"])
-            labels[row_index, :length] = torch.tensor(data = sequence["labels"])
-            attention_mask[row_index, :length] = 1
-            mm_token_type_ids[row_index, :length] = torch.tensor(
-                data = sequence["mm_token_type_ids"],
-            )
-
+        labels = build_assistant_labels(
+            batch = inputs,
+            tokenizer = self.tokenizer,
+            spec = ASSISTANT_MASK_SPEC,
+        )
         return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "mm_token_type_ids": mm_token_type_ids,
+            "input_ids": inputs["input_ids"],
+            "attention_mask": inputs["attention_mask"],
+            "mm_token_type_ids": inputs["mm_token_type_ids"],
             "labels": labels,
             "input_features": inputs["input_features"],
             "feature_attention_mask": inputs["feature_attention_mask"],
