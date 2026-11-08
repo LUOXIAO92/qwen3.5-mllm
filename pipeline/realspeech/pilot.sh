@@ -47,16 +47,15 @@ for lang in ko ms id fil th tr fa ja zh ru; do
     --source worldspeech --lang "$lang" --input "$W/${CONFIG[$lang]}"/*.parquet --target "${TARGET[$lang]}" --max-cer 0.5 --limit "$N"
 done
 
-# WorldSpeech B 模式：复制 A 模式的导入结果，改为重新识别，由两个 ASR 互相核对
+# WorldSpeech B 模式：人工转写两端常对不齐，片段又长（中位数近 30 秒），整段逐字一致很难。复制 A 模式选出的条目，
+# 在停顿处切成不超过 15 秒的段，改为重新识别：主 ASR 识别每段，交叉 ASR 核对
 for lang in ko ms id fil th tr fa ja zh ru; do
   src="$P/worldspeech-$lang"
-  dst="$P/worldspeech-$lang-retranscribe"
+  dst="$P/worldspeech-$lang-split"
   [ -f "$dst/manifest.jsonl" ] && continue
   [ -f "$src/selected.jsonl" ] || continue
   mkdir -p "$dst"
   cp "$src/selected.jsonl" "$dst/"
-  [ -d "$dst/audio" ] || ln -s "$src/audio" "$dst/audio"
-  [ -f "$dst/asr_primary.jsonl" ] || { mkdir -p "$dst/state"; cp -r "$src/state/asr_primary" "$dst/state/" 2>/dev/null; }
-  pilot "worldspeech-$lang-retranscribe" env RETRANSCRIBE=1 "$run" "worldspeech-$lang-retranscribe" "$real" "$dst"
+  pilot "worldspeech-$lang-split" env RETRANSCRIBE=1 SPLIT_MAX_SECONDS=15 "$run" "worldspeech-$lang-split" "$real" "$dst"
 done
 echo "pilot finished $(date '+%F %T')"
