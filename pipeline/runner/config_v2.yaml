@@ -1,0 +1,45 @@
+# 实验 v2 的核对配置：在 v1 配置的基础上替换 ASR 的搭配，不再用 Whisper 核对（错误多）。
+# 交叉 ASR 尽量选与主 ASR 结构不同、在该语言上不比主 ASR 差太多的模型。依据是 FLEURS dev 上的实测
+# （每种语言 20–50 句，数词统一后的错误率，见 #33、#34、#35）：
+#   Parakeet-tdt-0.6b-v3（TDT 结构）在 en de fr es it pt 上与 Qwen3-ASR 相近，速度约为它的 3 倍；
+#   Fun-ASR-MLT-Nano 在 zh、ja、ko 上与 Qwen3-ASR 相近或更好（ja 1.1%），在 pt、ar 上明显差；
+#   omniASR-LLM-7B 在 fil、ar、ms、fa 上比 Qwen3-ASR 好，tr 持平，只输出小写、无标点，所以只作交叉 ASR。
+# 马来语、菲律宾语、土耳其语的主 ASR 由 Whisper 改为 Qwen3-ASR：重新识别模式用主 ASR 的结果作训练目标，需要带标点。
+extends: config_v1.yaml
+
+asr_models:
+  parakeet_v3:
+    batch_size: 32
+    env: envs/asr-nemo
+    module: pipeline.asr.parakeet_v3
+  fun_asr:
+    batch_size: 1   # 上游每次只解码一条
+    env: envs/asr-funasr-mlt
+    module: pipeline.asr.fun_asr_mlt
+    args: ["--funasr-src", "{work_dir}/src/Fun-ASR"]
+  omni_asr:
+    batch_size: 16   # 峰值约 26 GB
+    env: envs/asr-omni
+    module: pipeline.asr.omni_asr
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+langs:
+  zh: {asr: qwen3_asr, cross_asr: fun_asr}
+  en: {asr: qwen3_asr, cross_asr: parakeet_v3}
+  ja: {asr: haas_ja, cross_asr: fun_asr}
+  ko: {asr: qwen3_asr, cross_asr: fun_asr}
+  de: {asr: qwen3_asr, cross_asr: parakeet_v3}
+  fr: {asr: qwen3_asr, cross_asr: parakeet_v3}
+  ru: {asr: gigaam, cross_asr: qwen3_asr}
+  pt: {asr: qwen3_asr, cross_asr: parakeet_v3}
+  es: {asr: qwen3_asr, cross_asr: parakeet_v3}
+  it: {asr: qwen3_asr, cross_asr: parakeet_v3}
+  id: {asr: qwen3_asr, cross_asr: fun_asr}
+  ms: {asr: qwen3_asr, cross_asr: omni_asr}
+  th: {asr: typhoon, cross_asr: qwen3_asr}
+  vi: {asr: qwen3_asr, cross_asr: fun_asr}
+  fil: {asr: qwen3_asr, cross_asr: omni_asr}
+  ar: {asr: jais_asr, cross_asr: omni_asr}
+  tr: {asr: qwen3_asr, cross_asr: omni_asr}
+  fa: {asr: nemotron_farsi, cross_asr: omni_asr}

@@ -11,7 +11,7 @@
         --exclusion <FLEURS exclusion.jsonl> \\
         --target transcript
 
---source 取 sources.py 中 SOURCES 的名字；--input 对 makesense_emilia 是数据根目录，对其余数据集是文件列表。
+--source 取 sources.py 中 SOURCES 的名字；--input 对 makesense_emilia 是数据根目录（后面可再跟存放其余音频的同结构目录），对其余数据集是文件列表。
 --target transcript 表示比对通过后用数据集的转写作训练目标；asr 表示改用主 ASR 的识别结果（转写没有标点或大小写时）。
 写出 <输出目录>/selected.jsonl 和 select_stats.json（各丢弃原因的条数）。
 """
@@ -64,7 +64,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.source == "makesense_emilia":
-        rows = SOURCES[args.source](root = args.input[0], lang = args.lang)
+        rows = SOURCES[args.source](root = args.input[0], lang = args.lang, audio_roots = tuple(args.input[1:]))
     elif args.source == "worldspeech":
         rows = SOURCES[args.source](paths = args.input, lang = args.lang, max_cer = args.max_cer)
     else:

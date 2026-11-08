@@ -14,7 +14,7 @@ ASR 识别、比对和训练清单都复用 pipeline.runner。流程分三步：
 识别结果（它已经与人工转写一致，又带标点和大小写），原转写保存在 source_transcript 字段。
 
 核对用的 ASR 不能和生成转写的是同一个模型。例如 MakeSense 里重新识别的 Emilia 转写来自 Qwen3-ASR，而 v1 配置中
-中文、英语、韩语的主 ASR 也是 Qwen3-ASR，这时用 config_real_qwen3text.yaml，改用 Whisper 核对。
+中文、英语、韩语的主 ASR 也是 Qwen3-ASR，这时用 config_real_qwen3text.yaml，改由 Fun-ASR（中文、韩语）、Parakeet（英语）、Haas-ja（日语）核对。
 
 数据集适配见 sources.py；完整的命令见 run.sh。
 """

@@ -6,6 +6,7 @@
 # 输入（需先下载）：
 #   $DATASET/audio/amphion/Emilia-Dataset/{Emilia,Emilia-YODAS}/{DE,FR}/*.tar   Hugging Face 上的 Emilia 分片
 #   $MAKESENSE_EMILIA                                                         MakeSense 重新识别的 Emilia 中英日韩子集
+#   $MAKESENSE_EMILIA_EXTRA（可选）                                           存放其余一部分音频的同结构目录
 #   $DATASET/audio/disco-eth/WorldSpeech/data/<配置>/*.parquet                WorldSpeech 的若干训练分片
 # 输出：$DATASET/audio/qwen3.5-asr/real-pilot/<名称>/
 set -uo pipefail
@@ -25,17 +26,17 @@ pilot() {
   "$@" || echo "FAILED $name"
 }
 
-# Emilia 德语、法语：原始转写不可靠，用重新识别模式（主 ASR Qwen3-ASR 识别，交叉 ASR Whisper 核对）
+# Emilia 德语、法语：原始转写不可靠，用重新识别模式（主 ASR Qwen3-ASR 识别，交叉 ASR Parakeet 核对）
 for lang in de fr; do
   code=$(echo "$lang" | tr a-z A-Z)
   pilot "emilia-$lang" env RETRANSCRIBE=1 "$run" "emilia-$lang" "$real" "$P/emilia-$lang" \
     --source emilia --lang "$lang" --input "$E"/Emilia/"$code"/*.tar "$E"/Emilia-YODAS/"$code"/*.tar --limit "$N"
 done
 
-# MakeSense 的 Emilia 中英日韩：转写已由 Qwen3-ASR 重新生成，中英韩改用 Whisper 核对，日语用 Haas-ja 核对
+# MakeSense 的 Emilia 中英日韩：转写已由 Qwen3-ASR 重新生成，中文、韩语改用 Fun-ASR 核对，英语用 Parakeet，日语用 Haas-ja
 for lang in zh en ja ko; do
   pilot "makesense-$lang" "$run" "makesense-$lang" "$qwen3text" "$P/makesense-$lang" \
-    --source makesense_emilia --lang "$lang" --input "$M" --limit "$N"
+    --source makesense_emilia --lang "$lang" --input "$M" ${MAKESENSE_EMILIA_EXTRA:-} --limit "$N"
 done
 
 # WorldSpeech：人工转写对齐到片段上，两端常对不齐。A 模式用人工转写核对；转写没有标点或空格的语言用 ASR 结果作训练目标
@@ -46,8 +47,8 @@ for lang in ko ms id fil th tr fa ja zh ru; do
     --source worldspeech --lang "$lang" --input "$W/${CONFIG[$lang]}"/*.parquet --target "${TARGET[$lang]}" --max-cer 0.5 --limit "$N"
 done
 
-# WorldSpeech B 模式（有交叉 ASR 的语言）：复制 A 模式的导入结果，改为重新识别，由两个 ASR 互相核对
-for lang in ko id th fa ja zh ru; do
+# WorldSpeech B 模式：复制 A 模式的导入结果，改为重新识别，由两个 ASR 互相核对
+for lang in ko ms id fil th tr fa ja zh ru; do
   src="$P/worldspeech-$lang"
   dst="$P/worldspeech-$lang-retranscribe"
   [ -f "$dst/manifest.jsonl" ] && continue

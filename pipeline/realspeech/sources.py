@@ -49,10 +49,14 @@ def emilia_tar(paths: list, lang: str):
                 }
 
 
-def makesense_emilia(root: str, lang: str):
-    """MakeSense 项目整理的 Emilia 子集：metadata/、transcription/、audio/ 按大写语言代码分目录，转写由 Qwen3-ASR 重新生成。"""
+def makesense_emilia(root: str, lang: str, audio_roots: tuple = ()):
+    """MakeSense 项目整理的 Emilia 子集：metadata/、transcription/、audio/ 按大写语言代码分目录，转写由 Qwen3-ASR 重新生成。
+
+    一部分音频可能放在另一个同样结构的目录里（MakeSense 先下载的一批），audio_roots 给出这些目录，按顺序查找。
+    """
     root = Path(root)
     code = lang.upper()
+    search = [root / "audio" / code] + [Path(extra) / "audio" / code for extra in audio_roots]
     texts = {}
     for path in sorted((root / "transcription" / code).glob(pattern = "*.jsonl")):
         with open(file = path, mode = "r", encoding = "utf-8") as handle:
@@ -65,6 +69,9 @@ def makesense_emilia(root: str, lang: str):
                 meta = json.loads(s = line)
                 if meta["uid"] not in texts:
                     continue
+                audio_path = next((folder / meta["file_name"] for folder in search if (folder / meta["file_name"]).exists()), None)
+                if audio_path is None:
+                    continue
                 subset = meta.get("subset", "Emilia").split("/")[0]
                 yield {
                     "uid": meta["uid"],
@@ -75,7 +82,7 @@ def makesense_emilia(root: str, lang: str):
                     "source_ref": meta["file_name"],
                     "speaker": "",
                     "duration_s": meta.get("duration"),
-                    "audio": {"kind": "file", "path": str((root / "audio" / code / meta["file_name"]).resolve())},
+                    "audio": {"kind": "file", "path": str(audio_path.resolve())},
                     "extra": {"dnsmos": meta.get("quality")},
                 }
 

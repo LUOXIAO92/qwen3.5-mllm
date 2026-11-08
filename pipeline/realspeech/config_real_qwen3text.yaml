@@ -1,9 +1,8 @@
-# 转写本身由 Qwen3-ASR 生成的数据集（如 MakeSense 重新识别的 Emilia）用这份配置。
-# v1 中文、英语、韩语的主 ASR 也是 Qwen3-ASR，用它核对自己的转写没有意义，改用 Whisper 核对，不再设交叉 ASR；
-# 日语的主 ASR 是 Haas-ja，交叉 ASR 是 Qwen3-ASR，去掉交叉 ASR。
+# 转写本身由 Qwen3-ASR 生成的数据集（如 MakeSense 重新识别的 Emilia）用这份配置：核对用的模型不能是 Qwen3-ASR。
+# 中文、韩语改由 Fun-ASR-MLT-Nano 核对，英语由 Parakeet-tdt-0.6b-v3 核对，日语由 Haas-ja 核对，均不再设交叉 ASR。
 extends: config_real.yaml
 langs:
-  zh: {asr: whisper, cross_asr: null}
-  en: {asr: whisper, cross_asr: null}
-  ko: {asr: whisper, cross_asr: null}
-  ja: {cross_asr: null}
+  zh: {asr: fun_asr, cross_asr: null}
+  en: {asr: parakeet_v3, cross_asr: null}
+  ko: {asr: fun_asr, cross_asr: null}
+  ja: {asr: haas_ja, cross_asr: null}
