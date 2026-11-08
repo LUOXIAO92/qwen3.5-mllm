@@ -148,7 +148,7 @@
 已定事项（2026-11-09）：
 
 - 训练模型不视为改编，禁止改编（ND）许可的数据集可以用于训练；本项目不发布数据和训练出的权重。涉及的有 MAGICDATA（OpenSLR SLR68、SLR123，许可为 CC BY-NC-ND 4.0）、CORAA、MSR-86K、Multilingual TEDx、ViMD。Hugging Face 上的 `quanhaol/MagicData` 是 MagicMotion 论文的视频生成数据集（约 2.3 万段视频和分割标注），与这里的普通话语音库只是重名。
-- Emilia 的中英日韩已在关联项目 MakeSense 中使用，本地有一份抽样子集：每种语言 2,000 条，各约 8 小时，合计约 33 小时，附 Qwen3-ASR 重新识别的转写和词级时间戳。需要更多时可以继续从 Hugging Face 下载。
+- Emilia 的中英日韩已在关联项目 MakeSense 中扩充并重新识别：每种语言约 8,900 条（Emilia 与 Emilia-YODAS 各约一半），各约 37–38 小时，合计约 152 小时，转写由 Qwen3-ASR 重新生成，附词级时间戳。Emilia 原始转写质量偏低，常把粤语、英语判成普通话，法语子集里也抽到英语文本，所以每条都要重新识别并检查语言。Emilia 只有中英日韩德法六种语言；德语、法语从 Hugging Face 补下，每个分片约 1 GB、含 34–44 小时音频。核对时要换一个模型：中文、英语、韩语的 v1 主 ASR 也是 Qwen3-ASR，用它核对自己的转写没有意义，这三种语言改用交叉 ASR（Whisper）核对。
 
 以下数据集需要用户本人登录并同意条款（或提交申请）后才能下载：
 
@@ -172,7 +172,4 @@
 
 Babel Tagalog（LDC2016S13，菲律宾语，约 213 小时电话录音）需要从 LDC 付费购买，不在上表中。
 
-尚待决定的事项：
-
-1. 伪标注数据（Granary、EuroSpeech、GigaSpeech 2、Emilia 原始转写等）：用我们的 ASR 去核对另一个模型生成的转写，能筛掉明显的错误，但比核对人工转写的保证弱。
-2. 来自 YouTube 或视频平台、原视频版权没有说明的数据（YODAS2、MASC 的字幕部分、PerSets 等）。
+- 伪标注数据（Granary、EuroSpeech、GigaSpeech 2、Emilia 原始转写等）和来自 YouTube 等视频平台的数据（YODAS2、MASC 的字幕部分、PerSets 等）都可以用，统一经过 4.1 节的核对流程。
