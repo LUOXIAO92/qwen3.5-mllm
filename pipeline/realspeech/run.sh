@@ -12,6 +12,7 @@
 #   GLOTLID   GlotLID 模型文件，默认 $WORK_DIR/tmp/T03/glotlid/model_v3.bin
 #   RETRANSCRIBE  设为 1 时，主 ASR 之后用它的识别结果替换数据集的转写（adopt_asr.py），由交叉 ASR 核对；
 #                 用于转写本身由模型生成、质量不可靠的数据集（如 Emilia 原始转写）
+#   SPLIT_MAX_SECONDS  大于 0 时把长音频在停顿处切成不超过这么长的段（只能与 RETRANSCRIBE=1 一起用）
 set -euo pipefail
 name="${1:?名称}"
 config="${2:?配置}"
@@ -37,7 +38,7 @@ if [ ! -f "$out/selected.jsonl" ]; then
   step select "$work/envs/t03/bin/python" -m pipeline.realspeech.select --out-dir "$out" \
     --glotlid "$glotlid" --exclusion "$work/data/T02/exclusion.jsonl" "$@"
 fi
-step materialize "$work/envs/mllm-eval/bin/python" -m pipeline.realspeech.materialize --out-dir "$out"
+step materialize "$work/envs/mllm-eval/bin/python" -m pipeline.realspeech.materialize --out-dir "$out" --split-max-seconds "${SPLIT_MAX_SECONDS:-0}"
 step length "${runner[@]}" length "${C[@]}"
 step asr-primary "${runner[@]}" asr --role primary "${C[@]}"
 if [ "${RETRANSCRIBE:-0}" = 1 ]; then

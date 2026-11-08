@@ -342,7 +342,12 @@ def count_chars(text: str) -> int:
 
 
 def length_verdict(cfg: dict, task: dict, record: dict) -> str:
-    """音频时长 / 文本长度超出该语言的合理范围时返回原因，否则返回空字符串。"""
+    """音频时长 / 文本长度超出该语言的合理范围时返回原因，否则返回空字符串。
+
+    pipeline.realspeech 切开的真人语音片段还没有文字（text_unknown），不做比例检查，只检查时长不为零。
+    """
+    if task.get("text_unknown"):
+        return "" if record.get("duration_s") else "length_zero_duration"
     low, high = sec_per_char(cfg = cfg, lang = task["lang"])
     chars = max(1, count_chars(text = task["text"]))
     duration = record.get("duration_s")
