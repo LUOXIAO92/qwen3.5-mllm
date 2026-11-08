@@ -4,7 +4,7 @@
 
 ## 目录
 
-代码放在仓库的 `pipeline/` 下，按阶段分子目录：`text/`（抽取原文）、`tn/`（生成朗读稿）、`compare/`（比对规范化与数词统一）、`tts/`、`asr/`、`runner/`（合成—核对流水线）、`train/`、`eval/`。合成数据、下载的数据集和虚拟环境都不进仓库，统一放在工作目录 `/home/luoxiao/workspace/qwen3.5-asr-work/`：
+代码放在仓库的 `pipeline/` 下，按阶段分子目录：`text/`（抽取原文）、`tn/`（生成朗读稿）、`compare/`（比对规范化与数词统一）、`tts/`、`asr/`、`runner/`（合成—核对流水线）、`train/`、`eval/`。合成数据、下载的数据集和虚拟环境都不进仓库，统一放在工作目录（下文写作 `<工作目录>`）。驱动脚本通过环境变量 `WORK_DIR` 找到工作目录，没有设置时使用与仓库目录并列的 `qwen3.5-asr-work/`；各虚拟环境的建立方法见 [ENVIRONMENTS.md](ENVIRONMENTS.md)。工作目录包含：
 
 - `data/<任务编号>/`：各任务的数据产出，例如 `data/T03/`。下游只读取上游目录，不在其中写文件。
 - `envs/<名称>/`：用 `uv venv` 建立的虚拟环境，一个模型或一组相容的模型一个环境。conda 环境 `py3.14` 不安装、不升级任何包。合成—核对流水线（`pipeline.runner`）和比对（`pipeline.compare`）统一用 `envs/runner` 的 python 运行，这个环境装有 PyYAML 6.0.3、opencc 1.4.2、fugashi 1.5.2 和 unidic-lite 1.0.8，建立方法见 `pipeline/runner/__init__.py`。
@@ -20,7 +20,7 @@
 整机只有一张 RTX 5090（32 GB，sm_120，需要 CUDA 12.8 及以上的 PyTorch）。所有使用 GPU 的命令都通过锁文件排队：
 
 ```bash
-flock /home/luoxiao/workspace/qwen3.5-asr-work/gpu.lock python -m pipeline.tts.omnivoice ...
+flock <工作目录>/gpu.lock python -m pipeline.tts.omnivoice ...
 ```
 
 冒烟测试控制在几分钟内；长时间任务（正式合成、训练）只由协调者启动。
