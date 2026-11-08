@@ -56,8 +56,8 @@ LANG_NAMES = {
 
 
 def read_jsonl(path: Path) -> list[dict]:
-    with open(path, encoding = "utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
+    with open(file = path, mode = "r", encoding = "utf-8") as f:
+        return [json.loads(s = line) for line in f if line.strip()]
 
 
 def resolve_audio_path(audio_path: str, audio_root: Path) -> Path:
@@ -128,7 +128,7 @@ def main() -> None:
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents = True, exist_ok = True)
-    with open(output_path, "w", encoding = "utf-8") as f:
+    with open(file = output_path, mode = "w", encoding = "utf-8") as f:
         for i, row in enumerate(rows):
             rec = {
                 "sample_id": row["sample_id"],
@@ -138,7 +138,7 @@ def main() -> None:
             }
             if i in errors:
                 rec["error"] = errors[i]
-            f.write(json.dumps(rec, ensure_ascii = False) + "\n")
+            f.write(json.dumps(obj = rec, ensure_ascii = False) + "\n")
 
     peak_gb = torch.cuda.max_memory_allocated() / 1024**3
     print(
