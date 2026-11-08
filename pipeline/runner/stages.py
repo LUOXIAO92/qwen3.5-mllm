@@ -322,8 +322,13 @@ def _synth_counters(targets: list) -> dict:
 
 
 def merge_synth(cfg: dict, layout: Layout) -> None:
-    """把各块文件合并成 synth_results.jsonl，按 sample_id 排序。"""
+    """把各块文件合并成 synth_results.jsonl，按 sample_id 排序。
+
+    pipeline.realspeech 导入的真人语音（mode 为 real）没有块文件，直接写在 synth_results.jsonl 中，合并时原样保留。
+    """
     records = {}
+    if layout.synth.exists():
+        records.update({row["sample_id"]: row for row in read_jsonl(path = layout.synth) if row.get("mode") == "real"})
     for model in cfg.get("tts_models", {}):
         records.update(load_chunk_dir(directory = layout.synth_dir(model = model)))
     write_jsonl_atomic(path = layout.synth, rows = [records[key] for key in sorted(records)])

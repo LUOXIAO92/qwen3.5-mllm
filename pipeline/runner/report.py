@@ -144,27 +144,32 @@ def write_report(cfg: dict, layout: Layout) -> dict:
         if status == "pass":
             primary = asr[(task["sample_id"], "primary")]
             cross = asr.get((task["sample_id"], "cross"))
-            manifest.append(
-                {
-                    "sample_id": task["sample_id"],
-                    "audio_path": record["audio_path"],
-                    "duration_s": record["duration_s"],
-                    "lang": task["lang"],
-                    "original": task["original"],
-                    "script": task["text"],
-                    "source": task["source"],
-                    "source_license": task["source_license"],
-                    "tts_model": task["tts_model"],
-                    "voice_id": task["voice_id"],
-                    "holdout": task["holdout"],
-                    "cross_lingual": task["cross_lingual"],
-                    "asr_model": primary["asr_model"],
-                    "cross_asr_model": cross["asr_model"] if cross else None,
-                    "entry_id": task["entry_id"],
-                    "mode": task["mode"],
-                    "seed": task["seed"],
-                }
-            )
+            original, script = task["original"], task["text"]
+            if task.get("target_from") == "asr":
+                # 真人语音的转写没有标点或大小写时，改用已与转写比对一致的主 ASR 结果作为训练目标
+                original = script = primary["hypothesis"].strip()
+            item = {
+                "sample_id": task["sample_id"],
+                "audio_path": record["audio_path"],
+                "duration_s": record["duration_s"],
+                "lang": task["lang"],
+                "original": original,
+                "script": script,
+                "source": task["source"],
+                "source_license": task["source_license"],
+                "tts_model": task["tts_model"],
+                "voice_id": task["voice_id"],
+                "holdout": task["holdout"],
+                "cross_lingual": task["cross_lingual"],
+                "asr_model": primary["asr_model"],
+                "cross_asr_model": cross["asr_model"] if cross else None,
+                "entry_id": task["entry_id"],
+                "mode": task["mode"],
+                "seed": task["seed"],
+            }
+            if task.get("target_from") == "asr":
+                item["source_transcript"] = task["original"]
+            manifest.append(item)
     write_jsonl_atomic(path = layout.out / "samples.jsonl", rows = rows)
     write_jsonl_atomic(path = layout.out / "manifest.jsonl", rows = manifest)
     stats = build_stats(rows = rows)

@@ -1,0 +1,24 @@
+# 真人语音的核对配置：在 v1 合成配置的基础上，只放宽时长比例检查。
+# 真人说话有停顿、语速差别大，合成音频的时长比例范围对它过严；对不齐、转写缺词等问题由 ASR 比对筛掉，
+# 这里只去掉「转写几个字配几十秒音频」这类明显的错位。ASR 模型与各语言的主 ASR、交叉 ASR 沿用 v1。
+extends: ../runner/config_v1.yaml
+default_sec_per_char: [0.02, 1.0]
+langs:
+  zh: {sec_per_char: null}
+  en: {sec_per_char: null}
+  ja: {sec_per_char: null}
+  ko: {sec_per_char: null}
+  de: {sec_per_char: null}
+  fr: {sec_per_char: null}
+  ru: {sec_per_char: null}
+  pt: {sec_per_char: null}
+  es: {sec_per_char: null}
+  it: {sec_per_char: null}
+  id: {sec_per_char: null}
+  ms: {sec_per_char: null}
+  th: {sec_per_char: null}
+  vi: {sec_per_char: null}
+  fil: {sec_per_char: null}
+  ar: {sec_per_char: null}
+  tr: {sec_per_char: null}
+  fa: {sec_per_char: null}

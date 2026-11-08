@@ -1,0 +1,9 @@
+# 转写本身由 Qwen3-ASR 生成的数据集（如 MakeSense 重新识别的 Emilia）用这份配置。
+# v1 中文、英语、韩语的主 ASR 也是 Qwen3-ASR，用它核对自己的转写没有意义，改用 Whisper 核对，不再设交叉 ASR；
+# 日语的主 ASR 是 Haas-ja，交叉 ASR 是 Qwen3-ASR，去掉交叉 ASR。
+extends: config_real.yaml
+langs:
+  zh: {asr: whisper, cross_asr: null}
+  en: {asr: whisper, cross_asr: null}
+  ko: {asr: whisper, cross_asr: null}
+  ja: {cross_asr: null}

@@ -16,7 +16,18 @@ def _expand(value, work_dir: str):
     return value
 
 
-def load_config(path: Path, work_dir: Path) -> dict:
+def _merge(base, override):
+    """把 override 合并进 base：字典逐键递归合并，其余类型（含列表、null）直接取 override 的值。"""
+    if isinstance(base, dict) and isinstance(override, dict):
+        merged = dict(base)
+        for key, value in override.items():
+            merged[key] = _merge(base = base.get(key), override = value) if key in base else value
+        return merged
+    return override
+
+
+def _read_raw(path: Path) -> dict:
+    """读取配置文件；有 extends 时先读取它指向的基础配置（相对本文件的路径），再合并本文件的内容。"""
     path = Path(path)
     text = path.read_text(encoding = "utf-8")
     if path.suffix in (".yaml", ".yml"):
@@ -25,6 +36,14 @@ def load_config(path: Path, work_dir: Path) -> dict:
         cfg = yaml.safe_load(text)
     else:
         cfg = json.loads(text)
+    base = cfg.pop("extends", None)
+    if base:
+        cfg = _merge(base = _read_raw(path = path.parent / base), override = cfg)
+    return cfg
+
+
+def load_config(path: Path, work_dir: Path) -> dict:
+    cfg = _read_raw(path = Path(path))
     cfg = _expand(value = cfg, work_dir = str(Path(work_dir)))
     validate_config(cfg = cfg)
     return cfg
