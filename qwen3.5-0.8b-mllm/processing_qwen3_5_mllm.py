@@ -11,6 +11,15 @@ from .audio_video_utils import get_audio_token_timestamps, merge_audio_video_ord
 from .media_io import load_audio_video
 
 
+def _waveform_lengths(audio):
+    """返回每段波形的采样点数，批次的写法与 WhisperFeatureExtractor 的判断一致。"""
+    if isinstance(audio, np.ndarray) and audio.ndim > 1:
+        return [audio.shape[-1]] * audio.shape[0]
+    if isinstance(audio, (list, tuple)) and len(audio) > 0 and not np.isscalar(audio[0]):
+        return [np.asarray(a = wave).shape[-1] for wave in audio]
+    return [np.asarray(a = audio).shape[-1]]
+
+
 class _Qwen3_5AudioVideoProcessor(Qwen3VLProcessor):
     """只扩展联合音视频的占位序列，复用原有图像和视频预处理。"""
 
@@ -149,7 +158,16 @@ class Qwen3_5MLLMProcessor(ProcessorMixin):
                 return_attention_mask = True,
                 return_tensors = return_tensors,
             )
-            feature_lens = np.asarray(a = audio_inputs["attention_mask"]).sum(axis = -1)
+            # WhisperFeatureExtractor 把采样点级的 mask 每隔 hop_length 取一个值，得到「采样点数 ÷ hop_length」
+            # 向上取整的帧数，只在批次补齐后的总长度不能整除时去掉最后一列，因此只修正了批内最长的一条。
+            # 同一段音频单独处理得到向下取整的帧数，成批处理时可能多 1 帧、多 1 个音频 token。
+            # 这里按每段音频自己的采样点数向下取整，重写有效帧的 mask，单独处理与成批处理结果一致。
+            hop_length = self.feature_extractor.hop_length
+            feature_lens = np.asarray(a = [length // hop_length for length in _waveform_lengths(audio = audio)])
+            feature_mask = audio_inputs["attention_mask"]
+            feature_mask[:] = 0
+            for index, length in enumerate(feature_lens):
+                feature_mask[index, :length] = 1
             audio_lengths = _get_feat_extract_output_lengths(
                 input_lengths = feature_lens,
                 n_window = self.audio_n_window,
