@@ -51,7 +51,7 @@ def load_audio(path: Path) -> np.ndarray:
 
 def read_jsonl(path: Path) -> list[dict]:
     with open(file = path, mode = "r", encoding = "utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
+        return [json.loads(s = line) for line in f if line.strip()]
 
 
 def hyp_text(item) -> str:
@@ -87,7 +87,7 @@ def main() -> None:
             errors[i] = f"load_failed: {e}"
 
     model = nemo_asr.models.ASRModel.from_pretrained(model_name = args.model)
-    model = model.to(torch.bfloat16).to("cuda").eval()
+    model = model.to(dtype = torch.bfloat16).to(device = "cuda").eval()
 
     order = sorted(audios, key = lambda i: len(audios[i]))
     hyps: dict[int, str] = {}
@@ -127,7 +127,7 @@ def main() -> None:
             }
             if i in errors:
                 rec["error"] = errors[i]
-            f.write(json.dumps(rec, ensure_ascii = False) + "\n")
+            f.write(json.dumps(obj = rec, ensure_ascii = False) + "\n")
 
     peak_gb = torch.cuda.max_memory_allocated() / 1024**3
     print(
