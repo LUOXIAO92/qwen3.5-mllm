@@ -143,9 +143,36 @@
 
 越南语没有能直接下载的大规模候选：WorldSpeech 只给对齐信息，GigaSpeech 2、Bud500、VietSpeech 都要在 Hugging Face 上同意条款。
 
-### 4.3 需要决定的事项
+### 4.3 获取方式与已定事项
 
-1. 需要账号或同意条款的数据集，由用户本人登录并同意后才能下载：Common Voice（Mozilla Data Collective 账号，覆盖语言最多，波斯语有 373 小时已验证数据）、GigaSpeech 2（泰、印尼、越，合计约 2.2 万小时，非商用）、Emilia（中日韩德法，非商用）、ReazonSpeech（日语，限信息分析用途）、Bud500 和 VietSpeech（越南语）、MGB-2 和 QASR（阿拉伯语）、WenetSpeech（中文）。
-2. 禁止改编（ND）的数据集：MAGICDATA、CORAA、MSR-86K、Multilingual TEDx、ViMD。训练模型是否构成改编，需要决定是否使用。
-3. 伪标注数据（Granary、EuroSpeech、GigaSpeech 2、Emilia）：用我们的 ASR 去核对另一个 ASR 生成的转写，能筛掉明显的错误，但比核对人工转写的保证弱。
-4. 来自 YouTube 或视频平台、原视频版权没有说明的数据（YODAS2、MASC 的字幕部分、PerSets 等）。
+已定事项（2026-11-09）：
+
+- 训练模型不视为改编，禁止改编（ND）许可的数据集可以用于训练；本项目不发布数据和训练出的权重。涉及的有 MAGICDATA（OpenSLR SLR68、SLR123，许可为 CC BY-NC-ND 4.0）、CORAA、MSR-86K、Multilingual TEDx、ViMD。Hugging Face 上的 `quanhaol/MagicData` 是 MagicMotion 论文的视频生成数据集（约 2.3 万段视频和分割标注），与这里的普通话语音库只是重名。
+- Emilia 的中英日韩已在关联项目 MakeSense 中使用，本地有一份抽样子集：每种语言 2,000 条，各约 8 小时，合计约 33 小时，附 Qwen3-ASR 重新识别的转写和词级时间戳。需要更多时可以继续从 Hugging Face 下载。
+
+以下数据集需要用户本人登录并同意条款（或提交申请）后才能下载：
+
+| 数据集 | 语言 | 地址 | 方式 | 许可 |
+| --- | --- | --- | --- | --- |
+| Common Voice 第 27 版 | 17 种（无菲律宾语） | <https://mozilladatacollective.com> | 注册账号，按语言下载 | CC0 |
+| GigaSpeech 2 | th、id、vi | <https://huggingface.co/datasets/speechcolab/gigaspeech2> | HF 点同意 | 卡片 Apache-2.0，条款限非商用研究 |
+| ReazonSpeech | ja | <https://huggingface.co/datasets/reazon-research/reazonspeech> | HF 点同意 | CDLA-Sharing-1.0，限信息分析用途 |
+| J-CHAT | ja | <https://huggingface.co/datasets/sarulab-speech/J-CHAT> | HF 点同意 | 其他（非商用），伪标注 |
+| WenetSpeech4TTS | zh | <https://huggingface.co/datasets/Wenetspeech4TTS/WenetSpeech4TTS> | HF 点同意 | CC BY 4.0（论文写非商用） |
+| WenetSpeech | zh | <https://wenet.org.cn/WenetSpeech/> | 填表申请密码 | CC BY 4.0，非商用 |
+| AISHELL-2 | zh | <https://www.aishelltech.com/aishell_2> | 申请并签协议 | 非商用研究 |
+| MSR-86K | ko 等 | <https://huggingface.co/datasets/Alex-Song/MSR-86K> | HF 人工审批 | CC BY-NC-ND 4.0 |
+| Bud500 | vi | <https://huggingface.co/datasets/linhtran92/viet_bud500> | HF 点同意 | CC BY-NC-SA 4.0 |
+| VietSpeech | vi | <https://huggingface.co/datasets/NhutP/VietSpeech> | HF 点同意 | Apache-2.0 |
+| PhoAudiobook | vi | <https://huggingface.co/datasets/thivux/phoaudiobook> | HF 点同意 | 未写许可，条款禁止再分发 |
+| MGB-2 | ar | <https://huggingface.co/datasets/QCRI/mgb2> | HF 点同意 | 研究用途 |
+| QASR | ar | <https://forms.gle/4U34R3Sy9xcmtuRw8>（见 <https://huggingface.co/datasets/QCRI/QASR>） | 填表申请 | CC BY-NC 2.0（HF 卡片） |
+| ParsVoice | fa | <https://huggingface.co/datasets/MohammadJRanjbar/ParsVoice> | HF 点同意 | CC BY-NC 4.0，伪标注 |
+| Persian-Farsi-Speech | fa | <https://huggingface.co/datasets/Thomcles/Persian-Farsi-Speech> | HF 点同意 | CC BY 4.0 |
+
+Babel Tagalog（LDC2016S13，菲律宾语，约 213 小时电话录音）需要从 LDC 付费购买，不在上表中。
+
+尚待决定的事项：
+
+1. 伪标注数据（Granary、EuroSpeech、GigaSpeech 2、Emilia 原始转写等）：用我们的 ASR 去核对另一个模型生成的转写，能筛掉明显的错误，但比核对人工转写的保证弱。
+2. 来自 YouTube 或视频平台、原视频版权没有说明的数据（YODAS2、MASC 的字幕部分、PerSets 等）。
