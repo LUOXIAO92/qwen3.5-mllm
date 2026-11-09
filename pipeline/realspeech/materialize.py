@@ -94,8 +94,13 @@ def write_group(job: tuple) -> list:
     audio_dir = Path(audio_dir)
     results = []
     pending = []
+    # 切分模式下各条的片段名为 <sample_id>-pNN.flac：列一次目录，不对每条在大目录里通配查找
+    pieces_on_disk = {}
+    if max_seconds:
+        for name in sorted(path.name for path in audio_dir.glob(pattern = "*-p[0-9][0-9].flac")):
+            pieces_on_disk.setdefault(name[: -len("-p00.flac")], []).append(audio_dir / name)
     for item in items:
-        existing = sorted(audio_dir.glob(pattern = f"{item['sample_id']}-p*.flac")) if max_seconds else []
+        existing = pieces_on_disk.get(item["sample_id"], [])
         whole = audio_dir / f"{item['sample_id']}.flac"
         if existing:
             pieces = [(p.stem, round(sf.info(file = str(p)).duration, 3)) for p in existing]
