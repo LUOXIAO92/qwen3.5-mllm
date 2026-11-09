@@ -405,6 +405,31 @@ class RealTargetsTest(unittest.TestCase):
         task = {"lang": "ja", "original": "這個", "text": "這個", "target_from": "transcript"}
         self.assertEqual(real_targets(task = task, primary_hypothesis = ""), ("這個", "這個"))
 
+    def test_punctuation_applied_only_to_same_input(self):
+        from pipeline.runner.report import apply_punctuation, load_punctuation
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "punctuation.jsonl"
+            rows = [
+                {"sample_id": "a", "input": "سلام دنیا", "output": "سلام، دنیا.", "status": "ok"},
+                {"sample_id": "b", "input": "خوب است", "output": None, "status": "failed"},
+            ]
+            path.write_text("".join(json.dumps(obj = row, ensure_ascii = False) + "\n" for row in rows), encoding = "utf-8")
+            punctuation = load_punctuation(path = path)
+        self.assertEqual(
+            apply_punctuation(sample_id = "a", original = "سلام دنیا", script = "سلام دنیا", punctuation = punctuation),
+            ("سلام، دنیا.", "سلام، دنیا.", "سلام دنیا"),
+        )
+        # 训练目标变了（例如主 ASR 重跑）时不套用旧结果；未采用的结果也不套用
+        self.assertEqual(
+            apply_punctuation(sample_id = "a", original = "سلام", script = "سلام", punctuation = punctuation),
+            ("سلام", "سلام", None),
+        )
+        self.assertEqual(
+            apply_punctuation(sample_id = "b", original = "خوب است", script = "خوب است", punctuation = punctuation),
+            ("خوب است", "خوب است", None),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

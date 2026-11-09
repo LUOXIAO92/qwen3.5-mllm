@@ -13,6 +13,9 @@
 #   RETRANSCRIBE  设为 1 时，主 ASR 之后用它的识别结果替换数据集的转写（adopt_asr.py），由交叉 ASR 核对；
 #                 用于转写本身由模型生成、质量不可靠的数据集（如 Emilia 原始转写）
 #   SPLIT_MAX_SECONDS  大于 0 时把长音频在停顿处切成不超过这么长的段（只能与 RETRANSCRIBE=1 一起用）
+#   PUNCTUATE_LANGS  逗号分隔的语言（如 fa）：manifest 之后用 LLM 给这些语言没有标点的训练目标还原标点
+#                    （pipeline/realspeech/punctuate.py），再重新生成 manifest；需要一个兼容 OpenAI 接口的服务，
+#                    地址 PUNCTUATE_ENDPOINT（默认 http://127.0.0.1:8081/v1），并发数 PUNCTUATE_CONCURRENCY（默认 8）
 set -euo pipefail
 name="${1:?名称}"
 config="${2:?配置}"
@@ -48,4 +51,10 @@ step compare-1 "${runner[@]}" compare "${C[@]}"
 step asr-cross "${runner[@]}" asr --role cross "${C[@]}"
 step compare-2 "${runner[@]}" compare "${C[@]}"
 step manifest "${runner[@]}" manifest "${C[@]}"
+if [ -n "${PUNCTUATE_LANGS:-}" ]; then
+  step punctuate "$work/envs/runner/bin/python" -m pipeline.realspeech.punctuate run --out-dir "$out" \
+    --langs "$PUNCTUATE_LANGS" --endpoint "${PUNCTUATE_ENDPOINT:-http://127.0.0.1:8081/v1}" \
+    --concurrency "${PUNCTUATE_CONCURRENCY:-8}"
+  step manifest-punctuated "${runner[@]}" manifest "${C[@]}"
+fi
 echo "=== 全部完成" | tee -a "$log"

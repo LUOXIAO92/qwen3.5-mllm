@@ -27,6 +27,25 @@ def real_targets(task: dict, primary_hypothesis: str) -> tuple:
     return original, script
 
 
+def load_punctuation(path: Path) -> dict:
+    """读取标点还原结果（pipeline/realspeech/punctuate.py 写出的 punctuation.jsonl），只保留采用的结果。
+
+    同一 sample_id 有多行时取最后一行；状态 ok 或 aligned 的结果才采用。
+    """
+    rows = {}
+    for row in read_jsonl(path = path):
+        rows[row["sample_id"]] = row
+    return {key: row for key, row in rows.items() if row["status"] in ("ok", "aligned")}
+
+
+def apply_punctuation(sample_id: str, original: str, script: str, punctuation: dict) -> tuple:
+    """训练目标与标点还原时的输入相同时换成加了标点的文本，返回 (original, script, 原文本或 None)。"""
+    row = punctuation.get(sample_id)
+    if row is None or row["input"] != original:
+        return original, script, None
+    return row["output"], row["output"], original
+
+
 def judge(cfg: dict, task: dict, synth: dict, length: dict, asr: dict) -> tuple:
     """返回 (状态, 原因)。状态为 pass、fail 或 pending（阶段尚未跑到）。"""
     record = synth.get(task["sample_id"])
@@ -135,6 +154,7 @@ def write_report(cfg: dict, layout: Layout) -> dict:
     if layout.asr_results.exists():
         for row in load_checked(path = layout.asr_results, kind = "asr_results"):
             asr[(row["sample_id"], row["asr_role"])] = row
+    punctuation = load_punctuation(path = layout.out / "punctuation.jsonl")
     rows = []
     manifest = []
     for task in tasks:
@@ -161,8 +181,15 @@ def write_report(cfg: dict, layout: Layout) -> dict:
         if status == "pass":
             primary = asr[(task["sample_id"], "primary")]
             cross = asr.get((task["sample_id"], "cross"))
+            unpunctuated = None
             if task["mode"] == "real":
                 original, script = real_targets(task = task, primary_hypothesis = primary["hypothesis"])
+                original, script, unpunctuated = apply_punctuation(
+                    sample_id = task["sample_id"],
+                    original = original,
+                    script = script,
+                    punctuation = punctuation,
+                )
             else:
                 original, script = task["original"], task["text"]
             item = {
@@ -186,6 +213,8 @@ def write_report(cfg: dict, layout: Layout) -> dict:
             }
             if task.get("target_from") == "asr":
                 item["source_transcript"] = task["original"]
+            if unpunctuated is not None:
+                item["unpunctuated_target"] = unpunctuated
             manifest.append(item)
     write_jsonl_atomic(path = layout.out / "samples.jsonl", rows = rows)
     write_jsonl_atomic(path = layout.out / "manifest.jsonl", rows = manifest)
