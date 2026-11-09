@@ -58,6 +58,20 @@ def resolve_audio_path(audio_path: str, audio_root: Path) -> Path:
     return p if p.is_absolute() else audio_root / p
 
 
+def duration_batches(order: list, seconds: list, max_items: int, max_seconds: float) -> list:
+    """把按时长升序排好的下标切成批：每批不超过 max_items 条；max_seconds 大于 0 时，
+    「条数 × 批内最长时长」（补零后的总时长）也不超过它。短音频一批能放更多条，长音频一批放得少，显存峰值相近。"""
+    batches, current = [], []
+    for i in order:
+        if current and (len(current) >= max_items or (max_seconds > 0 and (len(current) + 1) * seconds[i] > max_seconds)):
+            batches.append(current)
+            current = []
+        current.append(i)
+    if current:
+        batches.append(current)
+    return batches
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description = "Qwen3-ASR-1.7B 批量转写")
     parser.add_argument("--input", required = True, help = "含 sample_id、audio_path、lang 的 JSONL")
@@ -66,6 +80,8 @@ def main() -> None:
     parser.add_argument("--model", default = DEFAULT_MODEL, help = "模型 ID 或本地目录")
     parser.add_argument("--audio-root", default = None, help = "相对 audio_path 的根目录，默认为输入文件所在目录")
     parser.add_argument("--max-new-tokens", type = int, default = 512)
+    parser.add_argument("--max-batch-seconds", type = float, default = 0.0,
+                        help = "大于 0 时按补零后的总时长组批，--batch-size 为每批条数上限")
     args = parser.parse_args()
 
     from transformers import AutoProcessor, Qwen3ASRForConditionalGeneration
@@ -97,8 +113,8 @@ def main() -> None:
     t0 = time.time()
     for lang in sorted({rows[i]["lang"] for i in order}):
         idx = [i for i in order if rows[i]["lang"] == lang]
-        for start in range(0, len(idx), args.batch_size):
-            chunk = idx[start : start + args.batch_size]
+        seconds = {i: len(audios[i]) / SAMPLE_RATE for i in idx}
+        for chunk in duration_batches(order = idx, seconds = seconds, max_items = args.batch_size, max_seconds = args.max_batch_seconds):
             try:
                 inputs = processor.apply_transcription_request(
                     audio = [audios[i] for i in chunk],

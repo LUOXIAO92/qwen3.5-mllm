@@ -55,6 +55,20 @@ def load_audio(path: str) -> np.ndarray:
     return np.ascontiguousarray(wav, dtype = np.float32)
 
 
+def duration_batches(order: list, seconds: list, max_items: int, max_seconds: float) -> list:
+    """把按时长升序排好的下标切成批：每批不超过 max_items 条；max_seconds 大于 0 时，
+    「条数 × 批内最长时长」（补零后的总时长）也不超过它。短音频一批能放更多条，长音频一批放得少，显存峰值相近。"""
+    batches, current = [], []
+    for i in order:
+        if current and (len(current) >= max_items or (max_seconds > 0 and (len(current) + 1) * seconds[i] > max_seconds)):
+            batches.append(current)
+            current = []
+        current.append(i)
+    if current:
+        batches.append(current)
+    return batches
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description = "Typhoon ASR 泰语识别")
     parser.add_argument("--input", required = True)
@@ -63,6 +77,8 @@ def main() -> None:
     parser.add_argument("--model", default = "typhoon-ai/typhoon-asr-qwen-1.7b-ctx", help = "模型 ID 或本地目录")
     parser.add_argument("--audio-root", default = None)
     parser.add_argument("--max-new-tokens", type = int, default = 440)
+    parser.add_argument("--max-batch-seconds", type = float, default = 0.0,
+                        help = "大于 0 时按补零后的总时长组批，--batch-size 为每批条数上限")
     args = parser.parse_args()
 
     from transformers import AutoModelForMultimodalLM, AutoProcessor
@@ -89,8 +105,8 @@ def main() -> None:
 
     torch.cuda.synchronize()
     start = time.time()
-    for b in range(0, len(order), args.batch_size):
-        idx = order[b : b + args.batch_size]
+    seconds = [len(a) / SAMPLE_RATE for a in audios]
+    for idx in duration_batches(order = order, seconds = seconds, max_items = args.batch_size, max_seconds = args.max_batch_seconds):
         conversations = [
             [
                 {"role": "system", "content": [{"type": "text", "text": "Thai"}]},
