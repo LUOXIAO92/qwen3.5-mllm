@@ -10,6 +10,23 @@ from .stages import Layout
 from .validate import load_checked
 
 
+def real_targets(task: dict, primary_hypothesis: str) -> tuple:
+    """返回真人语音样本的 (original, script) 训练目标。
+
+    转写没有标点或大小写（target_from 为 asr）时用已与转写比对一致的主 ASR 结果。中文一律转为简体
+    （与朗读稿相同的 OpenCC 词组级转换，见 pipeline.tn.core.to_simplified）：台湾普通话等繁体转写的录音也按
+    简体训练，避免模型在普通话上输出繁体字。合成样本的朗读稿生成时已经转过，不再转换。
+    """
+    original, script = task["original"], task["text"]
+    if task.get("target_from") == "asr":
+        original = script = primary_hypothesis.strip()
+    if task["lang"] == "zh":
+        from pipeline.tn.core import to_simplified
+
+        original, script = to_simplified(text = original), to_simplified(text = script)
+    return original, script
+
+
 def judge(cfg: dict, task: dict, synth: dict, length: dict, asr: dict) -> tuple:
     """返回 (状态, 原因)。状态为 pass、fail 或 pending（阶段尚未跑到）。"""
     record = synth.get(task["sample_id"])
@@ -144,10 +161,10 @@ def write_report(cfg: dict, layout: Layout) -> dict:
         if status == "pass":
             primary = asr[(task["sample_id"], "primary")]
             cross = asr.get((task["sample_id"], "cross"))
-            original, script = task["original"], task["text"]
-            if task.get("target_from") == "asr":
-                # 真人语音的转写没有标点或大小写时，改用已与转写比对一致的主 ASR 结果作为训练目标
-                original = script = primary["hypothesis"].strip()
+            if task["mode"] == "real":
+                original, script = real_targets(task = task, primary_hypothesis = primary["hypothesis"])
+            else:
+                original, script = task["original"], task["text"]
             item = {
                 "sample_id": task["sample_id"],
                 "audio_path": record["audio_path"],

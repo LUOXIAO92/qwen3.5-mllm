@@ -380,5 +380,31 @@ class RunTests(unittest.TestCase):
         self.assertIn("voice_id", proc.stderr)
 
 
+class RealTargetsTest(unittest.TestCase):
+    """真人语音的训练目标：中文一律转为简体，target_from 为 asr 时用主 ASR 结果。"""
+
+    def test_traditional_transcript_becomes_simplified(self):
+        from pipeline.runner.report import real_targets
+
+        task = {"lang": "zh", "original": "這個軟體很好用。", "text": "這個軟體很好用。", "target_from": "transcript"}
+        original, script = real_targets(task = task, primary_hypothesis = "")
+        # 只换字形，不把台湾用词换成大陆用词（软体保持软体）
+        self.assertEqual(original, "这个软体很好用。")
+        self.assertEqual(script, original)
+
+    def test_asr_target_is_simplified(self):
+        from pipeline.runner.report import real_targets
+
+        task = {"lang": "zh", "original": "这个软体很好用", "text": "这个软体很好用", "target_from": "asr"}
+        original, _ = real_targets(task = task, primary_hypothesis = " 這個軟體很好用。 ")
+        self.assertEqual(original, "这个软体很好用。")
+
+    def test_other_languages_unchanged(self):
+        from pipeline.runner.report import real_targets
+
+        task = {"lang": "ja", "original": "這個", "text": "這個", "target_from": "transcript"}
+        self.assertEqual(real_targets(task = task, primary_hypothesis = ""), ("這個", "這個"))
+
+
 if __name__ == "__main__":
     unittest.main()
