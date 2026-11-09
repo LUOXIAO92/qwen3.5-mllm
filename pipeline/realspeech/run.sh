@@ -48,6 +48,10 @@ if [ ! -f "$out/selected.jsonl" ]; then
     --glotlid "$glotlid" --exclusion "$work/data/T02/exclusion.jsonl" "${verified[@]}" "$@"
 fi
 step materialize "$work/envs/mllm-eval/bin/python" -m pipeline.realspeech.materialize --out-dir "$out" --split-max-seconds "${SPLIT_MAX_SECONDS:-0}"
+if [ ! -s "$out/tasks.jsonl" ]; then
+  echo "=== materialize 没有转出任何音频，见 $out/materialize_errors.json" | tee -a "$log"
+  exit 1
+fi
 step length "${runner[@]}" length "${C[@]}"
 if [ "${HUMAN_VERIFIED:-0}" != 1 ]; then
   step asr-primary "${runner[@]}" asr --role primary "${C[@]}"
