@@ -107,22 +107,47 @@ def write_group(job: tuple) -> list:
     if not pending:
         return results
     if kind == "tar":
-        tar = tarfile.open(name = path)
-        load = lambda item: decode(source = tar.extractfile(member = item["audio"]["member"]).read())
-    elif kind == "parquet":
-        import pyarrow.parquet as pq
-
-        audio_column = pq.read_table(source = path, columns = ["audio"]).column(0).to_pylist()
-        load = lambda item: decode(source = audio_column[item["audio"]["row"]]["bytes"])
-    elif kind == "segment":
-        # 同一段长录音只解码一次，再按起止时间截取
-        full = decode(source = path)
-        load = lambda item: full[int(item["audio"]["start"] * SAMPLING_RATE):int(item["audio"]["end"] * SAMPLING_RATE)]
+        # 按包内顺序读一遍：.tar.gz 不能随机定位，按条目顺序逐个取会让每次读取都从头解压
+        def waves():
+            wanted = {item["audio"]["member"]: item for item in pending}
+            with tarfile.open(name = path, mode = "r|*") as tar:
+                for member in tar:
+                    item = wanted.pop(member.name, None)
+                    if item is None:
+                        continue
+                    try:
+                        yield item, decode(source = tar.extractfile(member = member).read()), None
+                    except Exception as error:
+                        yield item, None, error
+                    if not wanted:
+                        break
+            for item in wanted.values():
+                yield item, None, KeyError(f"{item['audio']['member']} not in archive")
     else:
-        load = lambda item: decode(source = item["audio"]["path"])
-    for item in pending:
+        if kind == "parquet":
+            import pyarrow.parquet as pq
+
+            audio_column = pq.read_table(source = path, columns = ["audio"]).column(0).to_pylist()
+            load = lambda item: decode(source = audio_column[item["audio"]["row"]]["bytes"])
+        elif kind == "segment":
+            # 同一段长录音只解码一次，再按起止时间截取
+            full = decode(source = path)
+            load = lambda item: full[int(item["audio"]["start"] * SAMPLING_RATE):int(item["audio"]["end"] * SAMPLING_RATE)]
+        else:
+            load = lambda item: decode(source = item["audio"]["path"])
+
+        def waves():
+            for item in pending:
+                try:
+                    yield item, load(item), None
+                except Exception as error:
+                    yield item, None, error
+
+    for item, wave, error in waves():
+        if error is not None:
+            results.append((item["sample_id"], [], f"{type(error).__name__}: {error}"[:200]))
+            continue
         try:
-            wave = load(item)
             spans = split_points(wave = wave, max_seconds = max_seconds) if max_seconds else [(0, len(wave))]
             pieces = []
             for index, (begin, end) in enumerate(spans):
