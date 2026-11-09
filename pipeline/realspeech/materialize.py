@@ -112,7 +112,13 @@ def write_group(job: tuple) -> list:
             wanted = {item["audio"]["member"]: item for item in pending}
             with tarfile.open(name = path, mode = "r|*") as tar:
                 for member in tar:
-                    item = wanted.pop(member.name, None)
+                    # 有的数据集打包时多一层目录（如 GigaSpeech 2 越南语的 release1/train/），依次去掉开头的目录再找
+                    parts = member.name.split("/")
+                    item = None
+                    for start in range(len(parts)):
+                        item = wanted.pop("/".join(parts[start:]), None)
+                        if item is not None:
+                            break
                     if item is None:
                         continue
                     try:
