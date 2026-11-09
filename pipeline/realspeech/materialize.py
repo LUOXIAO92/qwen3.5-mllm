@@ -108,17 +108,21 @@ def write_group(job: tuple) -> list:
         return results
     if kind == "tar":
         tar = tarfile.open(name = path)
-        load = lambda item: tar.extractfile(member = item["audio"]["member"]).read()
+        load = lambda item: decode(source = tar.extractfile(member = item["audio"]["member"]).read())
     elif kind == "parquet":
         import pyarrow.parquet as pq
 
         audio_column = pq.read_table(source = path, columns = ["audio"]).column(0).to_pylist()
-        load = lambda item: audio_column[item["audio"]["row"]]["bytes"]
+        load = lambda item: decode(source = audio_column[item["audio"]["row"]]["bytes"])
+    elif kind == "segment":
+        # 同一段长录音只解码一次，再按起止时间截取
+        full = decode(source = path)
+        load = lambda item: full[int(item["audio"]["start"] * SAMPLING_RATE):int(item["audio"]["end"] * SAMPLING_RATE)]
     else:
-        load = lambda item: item["audio"]["path"]
+        load = lambda item: decode(source = item["audio"]["path"])
     for item in pending:
         try:
-            wave = decode(source = load(item))
+            wave = load(item)
             spans = split_points(wave = wave, max_seconds = max_seconds) if max_seconds else [(0, len(wave))]
             pieces = []
             for index, (begin, end) in enumerate(spans):
@@ -155,6 +159,8 @@ def to_task(item: dict, sample_id: str, split: bool) -> dict:
         "target_from": item["target_from"],
         **{key: value for key, value in (item.get("extra") or {}).items() if value is not None},
     }
+    if item.get("human_verified"):
+        task["human_verified"] = True
     if split:
         # 切开的片段没有对应的转写；整段转写留作参考
         task["text_unknown"] = True
@@ -176,7 +182,7 @@ def main() -> None:
     groups = defaultdict(list)
     for item in items:
         audio = item["audio"]
-        key = (audio["kind"], audio["path"]) if audio["kind"] in ("tar", "parquet") else ("file", "")
+        key = (audio["kind"], audio["path"]) if audio["kind"] in ("tar", "parquet", "segment") else ("file", "")
         groups[key].append(item)
     # 独立文件按每 500 条一组分给进程
     jobs = []

@@ -405,6 +405,17 @@ class RealTargetsTest(unittest.TestCase):
         task = {"lang": "ja", "original": "這個", "text": "這個", "target_from": "transcript"}
         self.assertEqual(real_targets(task = task, primary_hypothesis = ""), ("這個", "這個"))
 
+    def test_human_verified_skips_asr(self):
+        from pipeline.runner.report import judge
+
+        cfg = {"langs": {"de": {"asr": "qwen3_asr", "cross_asr": "parakeet_v3"}}}
+        synth = {"a": {"status": "ok"}, "b": {"status": "ok"}}
+        length = {"a": {"ok": True}, "b": {"ok": True}}
+        verified = {"sample_id": "a", "lang": "de", "human_verified": True}
+        plain = {"sample_id": "b", "lang": "de"}
+        self.assertEqual(judge(cfg = cfg, task = verified, synth = synth, length = length, asr = {}), ("pass", ""))
+        self.assertEqual(judge(cfg = cfg, task = plain, synth = synth, length = length, asr = {}), ("pending", "primary_pending"))
+
     def test_punctuation_applied_only_to_same_input(self):
         from pipeline.runner.report import apply_punctuation, load_punctuation
 

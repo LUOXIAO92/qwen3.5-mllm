@@ -13,6 +13,8 @@
 #   RETRANSCRIBE  设为 1 时，主 ASR 之后用它的识别结果替换数据集的转写（adopt_asr.py），由交叉 ASR 核对；
 #                 用于转写本身由模型生成、质量不可靠的数据集（如 Emilia 原始转写）
 #   SPLIT_MAX_SECONDS  大于 0 时把长音频在停顿处切成不超过这么长的段（只能与 RETRANSCRIBE=1 一起用）
+#   HUMAN_VERIFIED  设为 1 时转写视为已人工核验（如 Common Voice 的已验证录音）：select 加 --human-verified，
+#                   跳过主 ASR、交叉 ASR 和比对，时长检查通过即进入清单
 #   PUNCTUATE_LANGS  逗号分隔的语言（如 fa）：manifest 之后用 LLM 给这些语言没有标点的训练目标还原标点
 #                    （pipeline/realspeech/punctuate.py），再重新生成 manifest；需要一个兼容 OpenAI 接口的服务，
 #                    地址 PUNCTUATE_ENDPOINT（默认 http://127.0.0.1:8081/v1），并发数 PUNCTUATE_CONCURRENCY（默认 8）
@@ -37,19 +39,25 @@ step() {
 }
 C=(--config "$config" --work-dir "$work" --out-dir "$out")
 runner=("$work/envs/runner/bin/python" -m pipeline.runner)
+verified=()
+if [ "${HUMAN_VERIFIED:-0}" = 1 ]; then
+  verified=(--human-verified)
+fi
 if [ ! -f "$out/selected.jsonl" ]; then
   step select "$work/envs/t03/bin/python" -m pipeline.realspeech.select --out-dir "$out" \
-    --glotlid "$glotlid" --exclusion "$work/data/T02/exclusion.jsonl" "$@"
+    --glotlid "$glotlid" --exclusion "$work/data/T02/exclusion.jsonl" "${verified[@]}" "$@"
 fi
 step materialize "$work/envs/mllm-eval/bin/python" -m pipeline.realspeech.materialize --out-dir "$out" --split-max-seconds "${SPLIT_MAX_SECONDS:-0}"
 step length "${runner[@]}" length "${C[@]}"
-step asr-primary "${runner[@]}" asr --role primary "${C[@]}"
-if [ "${RETRANSCRIBE:-0}" = 1 ]; then
-  step adopt-asr "$work/envs/runner/bin/python" -m pipeline.realspeech.adopt_asr --out-dir "$out"
+if [ "${HUMAN_VERIFIED:-0}" != 1 ]; then
+  step asr-primary "${runner[@]}" asr --role primary "${C[@]}"
+  if [ "${RETRANSCRIBE:-0}" = 1 ]; then
+    step adopt-asr "$work/envs/runner/bin/python" -m pipeline.realspeech.adopt_asr --out-dir "$out"
+  fi
+  step compare-1 "${runner[@]}" compare "${C[@]}"
+  step asr-cross "${runner[@]}" asr --role cross "${C[@]}"
+  step compare-2 "${runner[@]}" compare "${C[@]}"
 fi
-step compare-1 "${runner[@]}" compare "${C[@]}"
-step asr-cross "${runner[@]}" asr --role cross "${C[@]}"
-step compare-2 "${runner[@]}" compare "${C[@]}"
 step manifest "${runner[@]}" manifest "${C[@]}"
 if [ -n "${PUNCTUATE_LANGS:-}" ]; then
   step punctuate "$work/envs/runner/bin/python" -m pipeline.realspeech.punctuate run --out-dir "$out" \

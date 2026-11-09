@@ -59,6 +59,9 @@ def judge(cfg: dict, task: dict, synth: dict, length: dict, asr: dict) -> tuple:
         return "pending", "length_pending"
     if not check["ok"]:
         return "fail", check["reason"]
+    if task.get("human_verified"):
+        # 转写已经人工核验（如 Common Voice 的已验证录音）：时长检查通过即可，不做 ASR 核对
+        return "pass", ""
     lang_cfg = cfg.get("langs", {}).get(task["lang"], {})
     for role, label in (("primary", "asr"), ("cross", "cross")):
         if role == "cross" and not lang_cfg.get("cross_asr"):
@@ -179,7 +182,7 @@ def write_report(cfg: dict, layout: Layout) -> dict:
         }
         rows.append(row)
         if status == "pass":
-            primary = asr[(task["sample_id"], "primary")]
+            primary = asr.get((task["sample_id"], "primary")) or {"hypothesis": "", "asr_model": None}
             cross = asr.get((task["sample_id"], "cross"))
             unpunctuated = None
             if task["mode"] == "real":
