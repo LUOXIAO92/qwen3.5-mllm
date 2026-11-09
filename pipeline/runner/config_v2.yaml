@@ -26,7 +26,19 @@ asr_models:
     module: pipeline.asr.omni_asr
     env_vars:
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  cohere:
+    batch_size: 32   # 显存峰值约 5.5 GB，FLEURS dev 上约 340 倍实时（#38）
+    env: envs/asr-cohere
+    module: pipeline.asr.cohere_transcribe
+  cohere_ar:
+    batch_size: 32
+    env: envs/asr-cohere
+    module: pipeline.asr.cohere_transcribe
+    args: ["--model", "CohereLabs/cohere-transcribe-arabic-07-2026"]
 
+# 越南语、阿拉伯语的交叉 ASR 依据 #38（FLEURS dev 各 50 句）：越南语 Cohere 6.0% 对 Fun-ASR 6.6%，速度约为 Fun-ASR 的 10 倍；
+# 阿拉伯语 Cohere 阿拉伯语版 3.5% 对 omniASR 4.1%，速度约 6 倍、显存约四分之一。中文、韩语 Cohere 明显不如 Fun-ASR，
+# 日语 Fun-ASR 更准，印尼语 Cohere 不支持，这四种仍用 Fun-ASR。
 langs:
   zh: {asr: qwen3_asr, cross_asr: fun_asr}
   en: {asr: qwen3_asr, cross_asr: parakeet_v3}
@@ -41,8 +53,8 @@ langs:
   id: {asr: qwen3_asr, cross_asr: fun_asr}
   ms: {asr: qwen3_asr, cross_asr: omni_asr}
   th: {asr: typhoon, cross_asr: qwen3_asr}
-  vi: {asr: qwen3_asr, cross_asr: fun_asr}
+  vi: {asr: qwen3_asr, cross_asr: cohere}
   fil: {asr: qwen3_asr, cross_asr: omni_asr}
-  ar: {asr: jais_asr, cross_asr: omni_asr}
+  ar: {asr: jais_asr, cross_asr: cohere_ar}
   tr: {asr: qwen3_asr, cross_asr: omni_asr}
   fa: {asr: nemotron_farsi, cross_asr: omni_asr}
