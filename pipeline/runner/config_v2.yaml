@@ -14,12 +14,12 @@ asr_models:
     env: envs/asr-nemo
     module: pipeline.asr.parakeet_v3
   fun_asr:
-    batch_size: 1   # 上游每次只解码一条
-    chunk_size: 250
-    processes: 4    # 每个进程约 2 GB 显存，同时开 4 个封装子进程补回逐条解码的速度
+    # 封装自己实现成批解码，按补零后的总时长组批（每批不超过 960 秒）。FLEURS dev zh ja ko id 实测约 330–350 音频秒/墙钟秒，
+    # 显存峰值约 4.9 GB；逐条解码约 19 音频秒/墙钟秒（#40）。
+    batch_size: 256
     env: envs/asr-funasr-mlt
     module: pipeline.asr.fun_asr_mlt
-    args: ["--funasr-src", "{work_dir}/src/Fun-ASR"]
+    args: ["--funasr-src", "{work_dir}/src/Fun-ASR", "--max-batch-seconds", "960"]
   omni_asr:
     batch_size: 16   # 峰值约 26 GB
     env: envs/asr-omni

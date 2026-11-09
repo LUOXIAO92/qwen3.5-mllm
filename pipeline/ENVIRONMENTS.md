@@ -23,7 +23,7 @@
 | 类别 | 说明 | 包含的环境 |
 | --- | --- | --- |
 | 独立环境 | 自带 Python，不继承任何包 | runner、tn、全部 `tts-*`、asr-gigaam、asr-nemo |
-| 叠加在 conda 环境上 | 用 `--system-site-packages` 继承项目 conda 环境 `py3.14`（Python 3.14.7、torch 2.13.0+cu130、torchaudio 2.11.0、transformers 5.16.1、numpy 2.4.6），只在上面补装少量包 | asr-qwen3、asr-nemo-fa、asr-hf、mllm-train、mllm-eval |
+| 叠加在 conda 环境上 | 用 `--system-site-packages` 继承项目 conda 环境 `py3.14`（Python 3.14.7、torch 2.13.0+cu130、torchaudio 2.11.0、transformers 5.16.1、numpy 2.4.6），只在上面补装少量包 | asr-qwen3、asr-nemo-fa、asr-hf、asr-funasr-mlt、mllm-train、mllm-eval |
 
 conda 环境 `py3.14` 本身不安装、不升级任何包。叠加类环境的创建命令是：
 
@@ -62,7 +62,7 @@ asr-hf 和 asr-gigaam 里的 torch 2.15.0 是 `+cu132` 构建，asr-nemo 里的 
 | `envs/asr-hf` | 3.14.7 | `pipeline.asr.typhoon`、`pipeline.asr.jais_asr` | 叠加 conda |
 | `envs/mllm-train` | 3.14.7 | 阶段 3 训练（`pipeline/train/run.sh`） | 叠加 conda |
 | `envs/mllm-eval` | 3.14.7 | 真人语音评测（`pipeline/eval/run.sh`） | 叠加 conda |
-| `envs/asr-funasr-mlt` | 3.14.7 | `pipeline.asr.fun_asr_mlt`（v2，建立命令见 #34） | 叠加 conda |
+| `envs/asr-funasr-mlt` | 3.14.7 | `pipeline.asr.fun_asr_mlt`（v2，见 6.6） | 叠加 conda |
 | `envs/asr-omni` | 3.12.13 | `pipeline.asr.omni_asr`（v2，建立命令见 #35） | 独立 |
 | `envs/asr-cohere` | 3.14.7 | `pipeline.asr.cohere_transcribe`（v2，建立命令见 #38） | 叠加 conda |
 | `envs/asr-nemotron` | 3.12.13 | `pipeline.asr.nemotron_transcribe`（v2，vLLM 0.32.0 加 NeMo Speech 插件，建立命令见 #37；运行时占满整张 32 GB 显卡） | 独立 |
@@ -89,6 +89,7 @@ git -C <目录名> checkout <提交>
 | `Qwen3-TTS` | https://github.com/QwenLM/Qwen3-TTS.git | `022e286b98fbec7e1e916cb940cdf532cd9f488e` | tts-qwen3（可编辑安装） |
 | `index-tts` | https://github.com/index-tts/index-tts.git | `d9e41aac89fd00b3d71497fddb287b7f24613712` | tts-indextts25（可编辑安装），权重在其 `checkpoints/` |
 | `Haas-ASR` | https://github.com/third-intelligence/Haas-ASR.git | `acc614f68769dcbfae9dba96b48439c4a66295af` | asr-nemo（通过 `PYTHONPATH` 使用，不安装） |
+| `Fun-ASR` | https://github.com/FunAudioLLM/Fun-ASR.git | `c0a20e2bb698bbad11d143bdccd6c0760e9d6e5b` | asr-funasr-mlt（封装用 `--funasr-src` 指向它，读取其中的 `model.py`，不安装） |
 
 `src/` 下还有 `VieNeu-TTS`、`nanovllm-voxcpm`、`supertonic` 三个克隆和 `supertonic3-model` 目录。当前 `config_v1.yaml` 引用的环境都不依赖它们（tts-vieneu、tts-supertonic3 直接从 PyPI 安装），重建 v1 环境时不需要克隆。它们的提交分别是 `VieNeu-TTS` 为 `04044e1b8f822f946bafb2c88b716459f4164152`（https://github.com/pnnbao97/VieNeu-TTS），`nanovllm-voxcpm` 为 `5fa1d74d7ad6072661d3c3da02ac734a752a993b`（https://github.com/a710128/nanovllm-voxcpm），`supertonic` 为 `1e9799e964ea4c0dad7cde993b65c3c813a7b373`（https://github.com/supertone-inc/supertonic）。
 
@@ -333,6 +334,24 @@ uv pip install --python envs/asr-hf/bin/python --index-url https://download.pyto
 uv pip install --python envs/asr-hf/bin/python "huggingface-hub<2" accelerate==1.15.0 soundfile==0.14.0 soxr==1.1.0 sentencepiece==0.2.2
 ```
 
+### 6.6 `envs/asr-funasr-mlt`
+
+使用者：`pipeline.asr.fun_asr_mlt`（模型 `FunAudioLLM/Fun-ASR-MLT-Nano-2512`）。Python 3.14.7，叠加在 conda 环境上，torch 2.13.0+cu130 来自 conda。安装 funasr 时 transformers 随之升级到 5.22.2，numpy、librosa 等也由 funasr 的依赖带入，只影响这个环境。模型的网络结构和权重加载用上游仓库的 `model.py`（第 3 节的 `src/Fun-ASR`），运行封装时用 `--funasr-src` 指定这个目录。
+
+上游推理每次只解码一条，上游也没有 MLT-Nano 的原生 Transformers 或 vLLM 导出，所以封装在 PyTorch 里自己实现成批解码：编码器成批计算，左侧补齐后用 `inputs_embeds` 成批 `generate`，不需要额外安装包。流水线设置为 `--batch-size 256 --max-batch-seconds 960`，在 FLEURS dev 中文、日语、韩语、印尼语上约 330–350 音频秒/墙钟秒，显存峰值约 4.9 GB；原来的逐条解码约 19 音频秒/墙钟秒（#40）。
+
+| 包 | 版本 |
+| --- | --- |
+| funasr / modelscope | 1.4.24 / 1.40.2 |
+| transformers | 5.22.2 |
+| huggingface-hub | 2.4.0 |
+| librosa / numpy / soundfile | 1.0.0 / 2.5.4 / 0.14.0 |
+
+```bash
+uv venv --python <conda py3.14 的 python> --system-site-packages envs/asr-funasr-mlt
+uv pip install --python envs/asr-funasr-mlt/bin/python funasr==1.4.24
+```
+
 ## 7. 训练与评测环境
 
 ### 7.1 `envs/mllm-train`
@@ -376,6 +395,7 @@ uv pip install --python envs/mllm-eval/bin/python numpy==2.5.4 soundfile==0.14.0
 | `asr.haas_ja` | `third-intelligence/Haas-ja-v1.0` | 预先下载（见下） |
 | `asr.typhoon` | `typhoon-ai/typhoon-asr-qwen-1.7b-ctx` | 预先下载（见下） |
 | `asr.jais_asr` | `IFM/Jais-ASR` | 预先下载（见下） |
+| `asr.fun_asr_mlt` | `FunAudioLLM/Fun-ASR-MLT-Nano-2512`（提交 `2c088f53…`） | 首次运行由 funasr 自动下载 |
 
 GigaAM、Haas、Typhoon 和 Jais-ASR 在任务 #8b 里先用一小段脚本整体下载到 Hugging Face 缓存，之后封装直接读缓存。脚本只有一个 `snapshot_download` 调用：
 
