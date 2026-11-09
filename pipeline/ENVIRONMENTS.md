@@ -62,6 +62,12 @@ asr-hf 和 asr-gigaam 里的 torch 2.15.0 是 `+cu132` 构建，asr-nemo 里的 
 | `envs/asr-hf` | 3.14.7 | `pipeline.asr.typhoon`、`pipeline.asr.jais_asr` | 叠加 conda |
 | `envs/mllm-train` | 3.14.7 | 阶段 3 训练（`pipeline/train/run.sh`） | 叠加 conda |
 | `envs/mllm-eval` | 3.14.7 | 真人语音评测（`pipeline/eval/run.sh`） | 叠加 conda |
+| `envs/asr-funasr-mlt` | 3.14.7 | `pipeline.asr.fun_asr_mlt`（v2，建立命令见 #34） | 叠加 conda |
+| `envs/asr-omni` | 3.12.13 | `pipeline.asr.omni_asr`（v2，建立命令见 #35） | 独立 |
+| `envs/asr-cohere` | 3.14.7 | `pipeline.asr.cohere_transcribe`（v2，建立命令见 #38） | 叠加 conda |
+| `envs/asr-nemotron` | 3.12.13 | `pipeline.asr.nemotron_transcribe`（v2，vLLM 0.32.0 加 NeMo Speech 插件，建立命令见 #37；运行时占满整张 32 GB 显卡） | 独立 |
+
+Parakeet（`pipeline.asr.parakeet_v3`）用 `envs/asr-nemo`。
 
 `envs/` 下还有 `data-tools`、`t03`、`t04b`、`t05-dev`，它们是早期任务留下的环境，`config_v1.yaml` 没有引用，本文不覆盖。
 

@@ -35,6 +35,12 @@ asr_models:
     env: envs/asr-cohere
     module: pipeline.asr.cohere_transcribe
     args: ["--model", "CohereLabs/cohere-transcribe-arabic-07-2026"]
+  nemotron:
+    # 备用，暂不用于任何语言（#37）：FLEURS 上只在部分欧洲语言、日语、韩语、阿拉伯语略好于 Qwen3-ASR，但模型训练数据含 FLEURS；
+    # 同一输入重复运行约三分之一的句子有差别；运行时占满整张显卡。
+    batch_size: 32
+    env: envs/asr-nemotron
+    module: pipeline.asr.nemotron_transcribe
 
 # 越南语、阿拉伯语的交叉 ASR 依据 #38（FLEURS dev 各 50 句）：越南语 Cohere 6.0% 对 Fun-ASR 6.6%，速度约为 Fun-ASR 的 10 倍；
 # 阿拉伯语 Cohere 阿拉伯语版 3.5% 对 omniASR 4.1%，速度约 6 倍、显存约四分之一。中文、韩语 Cohere 明显不如 Fun-ASR，
@@ -46,7 +52,7 @@ langs:
   ko: {asr: qwen3_asr, cross_asr: fun_asr}
   de: {asr: qwen3_asr, cross_asr: parakeet_v3}
   fr: {asr: qwen3_asr, cross_asr: parakeet_v3}
-  ru: {asr: gigaam, cross_asr: qwen3_asr}
+  ru: {asr: qwen3_asr, cross_asr: gigaam}   # 重新识别模式用主 ASR 的结果作训练目标，GigaAM 不输出标点，所以改由 Qwen3-ASR 作主 ASR
   pt: {asr: qwen3_asr, cross_asr: parakeet_v3}
   es: {asr: qwen3_asr, cross_asr: parakeet_v3}
   it: {asr: qwen3_asr, cross_asr: parakeet_v3}
