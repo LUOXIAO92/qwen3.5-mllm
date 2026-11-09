@@ -66,6 +66,7 @@ asr-hf 和 asr-gigaam 里的 torch 2.15.0 是 `+cu132` 构建，asr-nemo 里的 
 | `envs/asr-omni` | 3.12.13 | `pipeline.asr.omni_asr`（v2，建立命令见 #35） | 独立 |
 | `envs/asr-cohere` | 3.14.7 | `pipeline.asr.cohere_transcribe`（v2，建立命令见 #38） | 叠加 conda |
 | `envs/asr-nemotron` | 3.12.13 | `pipeline.asr.nemotron_transcribe`（v2，vLLM 0.32.0 加 NeMo Speech 插件，建立命令见 #37；运行时占满整张 32 GB 显卡） | 独立 |
+| `envs/vad` | 3.14.7 | `pipeline.realspeech.nonspeech`（Silero VAD 6.2.3，`uv pip install --no-deps silero-vad`，torch 与 torchcodec 来自 conda） | 叠加 conda |
 
 Parakeet（`pipeline.asr.parakeet_v3`）用 `envs/asr-nemo`。
 
