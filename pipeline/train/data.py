@@ -6,15 +6,28 @@ mm_assistant_mask（https://github.com/LUOXIAO92/MultimodalAssistantMask）在�
 匹配助手回合生成：助手回合开头和空的思考块不计损失，目标文本和结尾的 <|im_end|> 计算损失，其余位置填 -100。
 transformers 的 return_assistant_tokens_mask 按展开音频标记之前的字符位置计算，展开后会错位或全为 0，
 所以不用它。模型内部再把标签左移一位，用第 t 个位置的输出预测第 t + 1 个 token。
+
+训练目标为空字符串的样本（空目标样本，即无人声片段）照常渲染：助手回合只有空的思考块和 <|im_end|>，
+按同样的规则只有 <|im_end|> 计算损失，模型学着听到无人声的音频时直接结束输出。
+
+训练时数据集按 sampling.SampleKey 取样本，给出背景声混音器时对语音样本实时混音（mixing.py），
+空目标样本不混音；按整数下标取样本时（dev 评估、标签核对）不混音。
 """
 
 import json
 import random
+from collections import namedtuple
 from pathlib import Path
 
+import numpy as np
 import torch
 from mm_assistant_mask import AssistantMaskSpec, build_assistant_labels
 
+# 训练时数据集的下标：清单行号、轮次、在本轮样本序列中的位置（见 sampling.py）。
+SampleKey = namedtuple(typename = "SampleKey", field_names = ("index", "epoch", "position"))
+# 随机数流的编号：每轮的抽样次数和混音各用一条，互不影响。
+STREAM_OCCURRENCES = 1
+STREAM_MIXING = 2
 IGNORE_INDEX = -100
 SAMPLING_RATE = 16000
 INSTRUCTION = "Transcribe the audio."
@@ -116,8 +129,8 @@ def read_manifest(
     return rows
 
 
-def load_audio(path):
-    """读取音频，统一为 16 kHz 单声道 float32 波形。"""
+def load_audio(path, start_s = None, stop_s = None):
+    """读取音频，统一为 16 kHz 单声道 float32 波形。给出 start_s、stop_s 时只解码这一段（秒）。"""
     from torchcodec.decoders import AudioDecoder
 
     decoder = AudioDecoder(
@@ -125,30 +138,58 @@ def load_audio(path):
         sample_rate = SAMPLING_RATE,
         num_channels = 1,
     )
-    samples = decoder.get_all_samples()
+    if start_s is None and stop_s is None:
+        samples = decoder.get_all_samples()
+    else:
+        samples = decoder.get_samples_played_in_range(
+            start_seconds = start_s or 0.0,
+            stop_seconds = stop_s,
+        )
     return samples.data.squeeze(dim = 0).numpy()
 
 
 class TranscriptionDataset(torch.utils.data.Dataset):
-    """每条样本给出波形和目标文本；特征提取和分词放在批次构造中统一完成。"""
+    """每条样本给出波形和目标文本；特征提取和分词放在批次构造中统一完成。
 
-    def __init__(self, rows, target):
+    下标可以是整数（不混音），也可以是 sampling.SampleKey(index, epoch, position)：给出 mixer 时，
+    按 (seed, epoch, position) 生成随机数，由 mixer 决定这条语音样本是否混音以及怎样混音。
+    """
+
+    def __init__(
+        self,
+        rows,
+        target,
+        mixer = None,
+        seed = 0,
+    ):
         self.rows = rows
         self.target = target
         self.targets = [target_text(row = row, target = target) for row in rows]
+        self.empty = [text == "" for text in self.targets]
+        self.mixer = mixer
+        self.seed = seed
 
     def __len__(self):
         return len(self.rows)
 
-    def __getitem__(self, index):
+    def __getitem__(self, key):
+        keyed = isinstance(key, SampleKey)
+        index = key.index if keyed else int(key)
         row = self.rows[index]
+        waveform = load_audio(path = row["audio_path"])
+        mix = None
+        if self.mixer is not None and keyed and not self.empty[index]:
+            rng = np.random.default_rng(seed = [self.seed, key.epoch, STREAM_MIXING, key.position])
+            waveform, mix = self.mixer(waveform = waveform, rng = rng)
         return {
             "sample_id": row["sample_id"],
             "lang": row["lang"],
             "audio_path": row["audio_path"],
             "duration_s": float(row["duration_s"]),
-            "waveform": load_audio(path = row["audio_path"]),
+            "waveform": waveform,
             "target": self.targets[index],
+            "empty": self.empty[index],
+            "mix": mix,
         }
 
 
@@ -194,6 +235,10 @@ class TrainCollator:
             "sample_ids": [item["sample_id"] for item in items],
             "langs": [item["lang"] for item in items],
             "audio_seconds": sum(item["duration_s"] for item in items),
+            # 本批的空目标样本数和混音样本数，训练日志按它们统计实际比例。
+            "n_empty": sum(bool(item.get("empty")) for item in items),
+            "empty_rows": torch.tensor(data = [bool(item.get("empty")) for item in items], dtype = torch.bool),
+            "n_mixed": sum(item.get("mix") is not None for item in items),
         }
 
 

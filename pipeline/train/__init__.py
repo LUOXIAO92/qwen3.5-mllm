@@ -1,4 +1,4 @@
-"""音频 projector 训练（实验 v1，任务 T10）。
+"""音频 projector 训练（实验 v1，任务 T10；空目标、加权抽样与混音，实验 v2，任务 T1）。
 
 只训练阶段 1 模型中的 model.audio_projector（Linear → SiLU → Linear），音频塔、视觉塔和语言模型冻结。
 输入使用 CONVENTIONS 中「训练与评测的对话格式」：用户消息是一段音频加指令 Transcribe the audio.，
@@ -10,7 +10,11 @@
 
 - data.py：读取训练清单、选择训练目标（script 朗读稿，或 original 原文，中文转简体）、按时长分组成批、
   用阶段 1 processor 做特征提取与音频标记展开，再用 mm_assistant_mask 在最终的 input_ids 上按 token 匹配助手回合生成标签。
-- check_labels.py：核对计损失的内容正好是目标文本加 <|im_end|>，提示部分与推理时一致；更换模板或 processor 后运行。
+- check_labels.py：核对计损失的内容正好是目标文本加 <|im_end|>（空目标样本只有 <|im_end|>），提示部分与推理时一致；
+  更换模板或 processor 后运行。
+- sampling.py：按清单字段（lang、source 等）设定抽样权重，空目标样本按设定占比抽取；每轮的抽样和分批只由
+  (seed, 轮次) 决定，续训时与不中断的训练一致。
+- mixing.py：在数据读取进程中给语音样本实时混入背景声，信噪比在设定范围内均匀随机，背景声可按类别加权。
 - model.py：加载模型（冻结部分 bfloat16，projector float32），损失计算。词表约 25 万，词表投影和
   交叉熵合在一起分块计算，只在计损失的位置进行。
 - train.py：训练入口，梯度累积、线性预热加余弦退火、定期 dev 损失、检查点与断点续训。
@@ -21,6 +25,8 @@
 - export.py：把 projector 合入阶段 1 模型，导出完整模型目录。
 - bench.py：不同批量下的显存与吞吐。
 - fleurs_dev.py：把 FLEURS dev 清单转成训练清单格式，并抽取过拟合测试子集。
+- tests/：空目标标签、混音信噪比与比例、加权抽样比例与续训一致性的单元测试，
+  在仓库根目录运行 python -m unittest discover -s pipeline/train/tests -t .。
 
 训练清单
 ========

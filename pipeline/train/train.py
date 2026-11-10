@@ -9,6 +9,17 @@
         --output-dir <输出目录> \\
         --batch-size 32 --grad-accum 2 --lr 1e-3 --warmup-steps 200 --epochs 2
 
+实验 v2 增加的三项（任务 T1）：
+
+- 空目标样本：清单中训练目标为空字符串的样本（无人声片段），助手回合只有 <|im_end|> 计算损失。
+  --empty-target-share（默认 0.03）设定它们在每轮样本中的期望占比，由抽样权重实现，见 sampling.py。
+- 加权抽样：--sample-weight 字段:取值=权重，可重复，例如 --sample-weight lang:fa=2，见 sampling.py。
+- 实时混音：--noise-manifest 给出背景声列表时，语音样本按 --noise-prob（默认 0.3）的比例、在
+  [--noise-snr-min, --noise-snr-max]（默认 0–20 dB）内均匀随机的信噪比混入背景声；--noise-category-weight
+  类别=权重 调整各类背景声的抽中概率。混音在数据读取进程中完成，见 mixing.py。
+
+抽样和混音的随机数都只由 --seed、轮次和样本在本轮中的位置决定，断点续训与不中断的训练得到相同的批次。
+
 断点续训：加 --resume，从 <输出目录>/latest 指向的检查点继续。--stop-after-minutes 到时保存并退出，
 收到 SIGTERM 或 Ctrl-C 时也在当前一步结束后保存并退出，便于分段占用 GPU。退出码 0 表示已训练到
 最后一步，退出码 75 表示中途停止、可以用 --resume 继续。
@@ -42,11 +53,17 @@ from pipeline.train.data import (
     TARGETS,
     TrainCollator,
     TranscriptionDataset,
-    length_grouped_batches,
     read_manifest,
     summarize_rows,
 )
+from pipeline.train.mixing import BackgroundMixer, parse_category_weights
 from pipeline.train.progress import Progress
+from pipeline.train.sampling import (
+    EpochPlan,
+    expected_composition,
+    parse_weight_rules,
+    sample_weights,
+)
 from pipeline.train.model import (
     PROJECTOR_PREFIX,
     frozen_fingerprint,
@@ -54,11 +71,12 @@ from pipeline.train.model import (
     load_projector,
     move_batch,
     projector_parameters,
-    target_loss,
     token_losses,
 )
 
 EXIT_STOPPED = 75
+# 只为取得各选项的默认值而解析一次参数时，填入必填项的占位值。
+REQUIRED_PLACEHOLDERS = ["--model-dir", "", "--train-manifest", "", "--target", TARGETS[0], "--output-dir", ""]
 # 续训时必须与原训练一致的配置：它们决定数据顺序、批次内容和损失。
 RESUME_KEYS = (
     "train_manifest",
@@ -71,6 +89,14 @@ RESUME_KEYS = (
     "group_batches",
     "max_batch_seconds",
     "seed",
+    "sample_weight",
+    "empty_target_share",
+    "noise_manifest",
+    "noise_audio_root",
+    "noise_prob",
+    "noise_snr_min",
+    "noise_snr_max",
+    "noise_category_weight",
 )
 
 
@@ -174,6 +200,44 @@ def parse_args(argv = None):
         help = "dev 每种语言最多用多少条",
     )
     parser.add_argument("--eval-batch-size", type = int, default = 32)
+    parser.add_argument(
+        "--sample-weight",
+        action = "append",
+        default = [],
+        help = "抽样权重规则「字段:取值=权重」，可重复，命中多条时相乘，例如 lang:fa=2",
+    )
+    parser.add_argument(
+        "--empty-target-share",
+        type = float,
+        default = 0.03,
+        help = "空目标样本在每轮样本中的期望占比，清单中没有空目标样本时不起作用",
+    )
+    parser.add_argument("--noise-manifest", default = None, help = "背景声列表 JSONL，给出时对语音样本实时混音")
+    parser.add_argument("--noise-audio-root", default = None, help = "背景声相对 audio_path 的基准目录，默认是列表所在目录")
+    parser.add_argument(
+        "--noise-prob",
+        type = float,
+        default = 0.3,
+        help = "语音样本中混音的比例",
+    )
+    parser.add_argument(
+        "--noise-snr-min",
+        type = float,
+        default = 0.0,
+        help = "混音信噪比下限（dB）",
+    )
+    parser.add_argument(
+        "--noise-snr-max",
+        type = float,
+        default = 20.0,
+        help = "混音信噪比上限（dB）",
+    )
+    parser.add_argument(
+        "--noise-category-weight",
+        action = "append",
+        default = [],
+        help = "背景声类别权重「类别=权重」，可重复，例如 music=0.5",
+    )
     parser.add_argument("--resume", action = "store_true", help = "从输出目录中最近的检查点继续")
     parser.add_argument(
         "--stop-after-minutes",
@@ -221,7 +285,7 @@ class WorkerInit:
 
 
 class EpochBatchSampler:
-    """从给定位置开始，一轮接一轮地给出批次下标，不停止。"""
+    """从给定位置开始，一轮接一轮地给出批次（SampleKey 列表），不停止。"""
 
     def __init__(self, stream, epoch, offset):
         self.stream = stream
@@ -252,14 +316,18 @@ class BatchStream:
         max_batch_seconds,
         seed,
         num_workers,
+        weights = None,
     ):
         self.dataset = dataset
         self.collator = collator
-        self.durations = [float(row["duration_s"]) for row in dataset.rows]
-        self.batch_size = batch_size
-        self.group_batches = group_batches
-        self.max_batch_seconds = max_batch_seconds
-        self.seed = seed
+        self.plan = EpochPlan(
+            durations = [float(row["duration_s"]) for row in dataset.rows],
+            weights = weights,
+            batch_size = batch_size,
+            group_batches = group_batches,
+            max_batch_seconds = max_batch_seconds,
+            seed = seed,
+        )
         self.num_workers = num_workers
         self.epoch = 0
         self.offset = 0
@@ -269,14 +337,7 @@ class BatchStream:
         self._iterator = None
 
     def epoch_batches(self, epoch):
-        return length_grouped_batches(
-            durations = self.durations,
-            batch_size = self.batch_size,
-            seed = self.seed,
-            epoch = epoch,
-            group_batches = self.group_batches,
-            max_batch_seconds = self.max_batch_seconds,
-        )
+        return self.plan.batches(epoch = epoch)
 
     def epoch_length(self, epoch):
         if epoch not in self._epoch_lengths:
@@ -386,6 +447,8 @@ def main(argv = None):
         key: value for key, value in vars(args).items()
         if key not in ("resume", "stop_after_minutes")
     }
+    weight_rules = parse_weight_rules(specs = args.sample_weight)
+    category_weights = parse_category_weights(specs = args.noise_category_weight)
 
     langs = set(args.langs.split(sep = ",")) if args.langs else None
     rows = read_manifest(
@@ -402,7 +465,9 @@ def main(argv = None):
     if resume_dir is not None:
         trainer_state = torch.load(f = resume_dir / STATE_FILE, weights_only = False)
         saved = trainer_state["config"]
-        changed = [key for key in RESUME_KEYS if saved.get(key) != config.get(key)]
+        # 旧检查点的配置中没有后来新增的选项，按选项的默认值比较。
+        defaults = {key: parse_args(argv = REQUIRED_PLACEHOLDERS).__dict__[key] for key in RESUME_KEYS}
+        changed = [key for key in RESUME_KEYS if saved.get(key, defaults[key]) != config.get(key)]
         if changed:
             raise SystemExit(f"续训的配置与原训练不一致：{changed}")
     elif args.resume:
@@ -419,7 +484,30 @@ def main(argv = None):
     if not trainable or any(not name.startswith(PROJECTOR_PREFIX) for name in trainable):
         raise RuntimeError(f"可训练参数应当只有 projector：{trainable}")
 
-    dataset = TranscriptionDataset(rows = rows, target = args.target)
+    mixer = None
+    if args.noise_manifest:
+        mixer = BackgroundMixer(
+            manifest = args.noise_manifest,
+            prob = args.noise_prob,
+            snr_min = args.noise_snr_min,
+            snr_max = args.noise_snr_max,
+            category_weights = category_weights,
+            audio_root = args.noise_audio_root,
+        )
+    dataset = TranscriptionDataset(
+        rows = rows,
+        target = args.target,
+        mixer = mixer,
+        seed = args.seed,
+    )
+    weights = sample_weights(
+        rows = rows,
+        empty = dataset.empty,
+        rules = weight_rules,
+        empty_share = args.empty_target_share,
+    )
+    if weights.sum() == 0:
+        raise SystemExit("全部样本的抽样权重都是 0。")
     collator = TrainCollator(processor = processor)
     stream = BatchStream(
         dataset = dataset,
@@ -429,6 +517,7 @@ def main(argv = None):
         max_batch_seconds = args.max_batch_seconds,
         seed = args.seed,
         num_workers = args.num_workers,
+        weights = weights,
     )
     batches_per_epoch = stream.batches_per_epoch
     steps_per_epoch = batches_per_epoch / args.grad_accum
@@ -497,6 +586,15 @@ def main(argv = None):
         "samples": len(rows),
         "hours": round(number = sum(row["duration_s"] for row in rows) / 3600, ndigits = 2),
         "per_lang": summarize_rows(rows = rows),
+        # 按抽样权重算出的每轮期望样本数、占比和音频小时数，空目标样本单列为 empty。
+        "per_epoch": expected_composition(rows = rows, weights = weights, empty = dataset.empty),
+        "sample_weight_rules": args.sample_weight,
+        "noise": None if mixer is None else {
+            "clips": len(mixer),
+            "prob": args.noise_prob,
+            "snr_db": [args.noise_snr_min, args.noise_snr_max],
+            "categories": mixer.category_shares(),
+        },
         "batches_per_epoch": batches_per_epoch,
         "steps_per_epoch": round(number = steps_per_epoch, ndigits = 1),
         "total_steps": total_steps,
@@ -518,7 +616,19 @@ def main(argv = None):
 
     log_path = output_dir / "train_log.jsonl"
     eval_path = output_dir / "eval_log.jsonl"
-    window = {"loss": 0.0, "tokens": 0, "correct": 0, "samples": 0, "audio": 0.0, "steps": 0, "grad_norm": 0.0}
+    window = {
+        "loss": 0.0,
+        "tokens": 0,
+        "correct": 0,
+        "samples": 0,
+        "empty": 0,
+        "empty_loss": 0.0,
+        "empty_correct": 0,
+        "mixed": 0,
+        "audio": 0.0,
+        "steps": 0,
+        "grad_norm": 0.0,
+    }
     window_start = time.perf_counter()
     run_start = time.perf_counter()
     progress = Progress(
@@ -612,12 +722,19 @@ def main(argv = None):
             n_tokens = sum(int((batch["labels"][:, 1:] != -100).sum()) for batch in micro_batches)
             loss_total = torch.zeros(size = (), device = device)
             correct_total = torch.zeros(size = (), device = device, dtype = torch.long)
+            empty_loss_total = torch.zeros(size = (), device = device)
+            empty_correct_total = torch.zeros(size = (), device = device, dtype = torch.long)
             for batch in micro_batches:
                 inputs = move_batch(batch = batch, device = device, feature_dtype = feature_dtype)
-                loss_sum, _, n_correct = target_loss(model = model, inputs = inputs)
+                losses, correct, rows = token_losses(model = model, inputs = inputs)
+                loss_sum = losses.sum()
                 (loss_sum / n_tokens).backward()
                 loss_total += loss_sum.detach()
-                correct_total += n_correct
+                correct_total += correct.sum()
+                # 空目标样本只有一个计损失的 token（<|im_end|>），单独统计它的损失和预测正确率。
+                on_empty = batch["empty_rows"].to(device = device)[rows]
+                empty_loss_total += losses.detach()[on_empty].sum()
+                empty_correct_total += correct[on_empty].sum()
             step_loss = float(loss_total)
             step_correct = int(correct_total)
 
@@ -649,6 +766,10 @@ def main(argv = None):
             window["tokens"] += n_tokens
             window["correct"] += step_correct
             window["samples"] += sum(len(batch["sample_ids"]) for batch in micro_batches)
+            window["empty"] += sum(batch["n_empty"] for batch in micro_batches)
+            window["empty_loss"] += float(empty_loss_total)
+            window["empty_correct"] += int(empty_correct_total)
+            window["mixed"] += sum(batch["n_mixed"] for batch in micro_batches)
             window["audio"] += sum(batch["audio_seconds"] for batch in micro_batches)
             window["steps"] += 1
             window["grad_norm"] += float(grad_norm)
@@ -667,6 +788,21 @@ def main(argv = None):
                     "epoch": round(number = stream.epoch + stream.offset / batches_per_epoch, ndigits = 4),
                     "loss": round(number = last_train_loss, ndigits = 5),
                     "token_acc": round(number = window["correct"] / window["tokens"], ndigits = 4),
+                    # 这一段中空目标样本占全部样本、混音样本占语音样本的实际比例。
+                    "empty_frac": round(number = window["empty"] / window["samples"], ndigits = 4),
+                    # 空目标样本上 <|im_end|> 的平均损失，以及模型最可能输出的 token 就是 <|im_end|> 的比例。
+                    "empty_loss": (
+                        round(number = window["empty_loss"] / window["empty"], ndigits = 5)
+                        if window["empty"] else None
+                    ),
+                    "empty_acc": (
+                        round(number = window["empty_correct"] / window["empty"], ndigits = 4)
+                        if window["empty"] else None
+                    ),
+                    "mixed_frac": round(
+                        number = window["mixed"] / max(1, window["samples"] - window["empty"]),
+                        ndigits = 4,
+                    ),
                     "lr": scheduler.get_last_lr()[0],
                     "grad_norm": round(number = window["grad_norm"] / window["steps"], ndigits = 4),
                     "it_per_s": round(number = window["steps"] / train_seconds, ndigits = 3),
