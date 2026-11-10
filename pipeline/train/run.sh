@@ -5,6 +5,8 @@
 # 用法：pipeline/train/run.sh <训练清单 JSONL> <script|original> <输出目录> [其他 train.py 参数 ...]
 #   第二个参数是训练目标：script 让模型学着输出朗读稿，original 让模型学着输出原文。
 #   其他参数会追加在默认参数之后，同名参数以后面的为准，例如 --max-steps 20000 --warmup-steps 1000。
+#   实验 v2 的混音加 --noise-manifest <背景声列表 background.jsonl>；空目标样本默认占每轮样本的 3%
+#   （--empty-target-share），混音比例默认 30%（--noise-prob），见 train.py 的说明。
 # 环境变量：
 #   WORK_DIR  工作目录（含 envs/mllm-train、gpu.lock、data/T10/fleurs_dev.jsonl），默认是仓库旁边的 qwen3.5-asr-work
 set -uo pipefail

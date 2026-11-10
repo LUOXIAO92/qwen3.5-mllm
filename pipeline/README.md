@@ -87,6 +87,8 @@ pipeline/train/run.sh $DATASET/audio/qwen3.5-asr/v1/train/manifest-r1.jsonl orig
 
 第一条把 18 种语言的训练清单合成一份。合并真人语音时加 `--cap-hours 600 --uncapped zh en`，除中文、英语外每种语言最多收 600 小时；目录按命令行顺序占用上限，人工核对过的 Common Voice 写在前面，同一目录超出上限时按 `--seed` 随机取子集。第二条只训练音频 projector，训练目标为 `original`（原文）或 `script`（朗读稿）；超参数见脚本内的注释，额外参数追加在后面，例如 `--max-steps 20000 --warmup-steps 1000`。
 
+实验 v2 的训练清单还包含无人声片段（语言 `zxx`，训练目标为空），合并时用 `--uncapped zh en zxx` 整份收录。训练时无人声片段只学输出结束标记，`--empty-target-share`（默认 0.03）按抽样权重把它们控制在每轮样本的 3%；`--sample-weight 字段:取值=权重`（可重复，例如 `lang:fa=2`）让某些语言或来源多抽或少抽；加 `--noise-manifest $DATASET/audio/qwen3.5-asr/nonspeech/v2/background.jsonl` 后，30% 的语音样本（`--noise-prob`）在 0–20 dB 信噪比下实时混入背景声，`--noise-category-weight music=0.5` 这类参数调整各类背景声的比例。细节见 `pipeline/train/train.py`、`sampling.py` 和 `mixing.py` 的说明。
+
 ## 7. 评测
 
 ```bash

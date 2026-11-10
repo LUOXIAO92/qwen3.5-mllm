@@ -92,6 +92,15 @@ def main(argv = None):
     print(f"逐字一致 {exact}/{len(results)}（{exact / len(results):.1%}），"
           f"与分词后的目标一致 {exact_tokenized}/{len(results)}（{exact_tokenized / len(results):.1%}），"
           f"用时 {elapsed:.1f} 秒")
+    # 空目标样本（无人声片段）中输出了非空文字的比例，即无人声误输出率；语音样本中输出为空的比例。
+    empty = [result for result in results if result["target"] == ""]
+    speech = [result for result in results if result["target"] != ""]
+    if empty:
+        wrong = sum(result["hypothesis"] != "" for result in empty)
+        print(f"空目标 {len(empty)} 条，输出非空文字 {wrong} 条，无人声误输出率 {wrong / len(empty):.1%}")
+    if speech:
+        silent = sum(result["hypothesis"] == "" for result in speech)
+        print(f"语音 {len(speech)} 条，输出为空 {silent} 条（{silent / len(speech):.1%}）")
     if args.output:
         with open(file = args.output, mode = "w", encoding = "utf-8") as handle:
             for result in results:
