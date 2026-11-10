@@ -85,7 +85,7 @@ python -m pipeline.runner.merge_manifests $DATASET/audio/qwen3.5-asr/v1/train/ma
 pipeline/train/run.sh $DATASET/audio/qwen3.5-asr/v1/train/manifest-r1.jsonl original <工作目录>/data/T14/v1b
 ```
 
-第一条把 18 种语言的训练清单合成一份。第二条只训练音频 projector，训练目标为 `original`（原文）或 `script`（朗读稿）；超参数见脚本内的注释，额外参数追加在后面，例如 `--max-steps 20000 --warmup-steps 1000`。
+第一条把 18 种语言的训练清单合成一份。合并真人语音时加 `--cap-hours 600 --uncapped zh en`，除中文、英语外每种语言最多收 600 小时；目录按命令行顺序占用上限，人工核对过的 Common Voice 写在前面，同一目录超出上限时按 `--seed` 随机取子集。第二条只训练音频 projector，训练目标为 `original`（原文）或 `script`（朗读稿）；超参数见脚本内的注释，额外参数追加在后面，例如 `--max-steps 20000 --warmup-steps 1000`。
 
 ## 7. 评测
 

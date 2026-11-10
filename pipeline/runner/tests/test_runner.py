@@ -442,5 +442,50 @@ class RealTargetsTest(unittest.TestCase):
         )
 
 
+class MergeManifestsTest(unittest.TestCase):
+    def write(self, directory: Path, lang: str, count: int, seconds: float) -> Path:
+        directory.mkdir(parents = True)
+        rows = [
+            {"sample_id": f"{directory.name}-{index}", "audio_path": f"audio/{index}.flac", "lang": lang, "duration_s": seconds}
+            for index in range(count)
+        ]
+        (directory / "manifest.jsonl").write_text(
+            "".join(json.dumps(obj = row) + "\n" for row in rows),
+            encoding = "utf-8",
+        )
+        return directory
+
+    def test_cap_prefers_earlier_directories(self) -> None:
+        from pipeline.runner.merge_manifests import merge
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            verified = self.write(directory = root / "cv-de", lang = "de", count = 30, seconds = 60)
+            checked = self.write(directory = root / "asr-de", lang = "de", count = 30, seconds = 60)
+            english = self.write(directory = root / "asr-en", lang = "en", count = 90, seconds = 60)
+            rows, report = merge(
+                directories = [verified, checked, english],
+                cap_hours = 1.0,
+                uncapped = {"en"},
+                seed = 0,
+            )
+        # 德语上限 60 分钟：前一个目录 30 分钟全收，后一个目录只补到 30 分钟；英语不受上限
+        self.assertEqual([item["kept"] for item in report], [30, 30, 90])
+        self.assertEqual(sum(row["duration_s"] for row in rows if row["lang"] == "de"), 3600)
+        self.assertTrue(all(Path(row["audio_path"]).is_absolute() for row in rows))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            big = self.write(directory = Path(tmp) / "cv-fr", lang = "fr", count = 100, seconds = 60)
+            first, _ = merge(directories = [big], cap_hours = 0.5, seed = 0)
+            again, _ = merge(directories = [big], cap_hours = 0.5, seed = 0)
+            other, _ = merge(directories = [big], cap_hours = 0.5, seed = 1)
+        # 超出上限时随机取子集，同一个种子结果相同
+        ids = [row["sample_id"] for row in first]
+        self.assertEqual(len(ids), 30)
+        self.assertEqual(ids, [row["sample_id"] for row in again])
+        self.assertNotEqual(ids, [f"cv-fr-{index}" for index in range(30)])
+        self.assertNotEqual(set(ids), {row["sample_id"] for row in other})
+
+
 if __name__ == "__main__":
     unittest.main()
