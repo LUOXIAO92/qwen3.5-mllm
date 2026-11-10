@@ -339,9 +339,9 @@ def main(argv: list | None = None) -> int:
         data = json.dumps(obj = summary, ensure_ascii = False, indent = 2),
         encoding = "utf-8",
     )
-    table = format_markdown(summary = {k: v for k, v in summary.items() if k != "nonspeech"})
+    table = format_markdown(summary = {k: v for k, v in summary.items() if k != "nonspeech"}) if speech else ""
     if nonspeech_summary is not None:
-        table += "\n" + format_nonspeech_markdown(summary = nonspeech_summary)
+        table += ("\n" if speech else "") + format_nonspeech_markdown(summary = nonspeech_summary)
     (args.output_dir / "summary.md").write_text(data = table, encoding = "utf-8")
     (args.output_dir / "perf.json").write_text(
         data = json.dumps(obj = perf, ensure_ascii = False, indent = 2),
