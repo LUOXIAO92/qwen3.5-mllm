@@ -78,6 +78,10 @@ LANGS = ["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it", "id", "ms",
 _CER_LANGS = {"zh", "ja", "ko", "th"}
 METRIC_BY_LANG = {lang: ("cer" if lang in _CER_LANGS else "wer") for lang in LANGS}
 
+# 无人声片段（环境声、音乐等）的语言代码（ISO 639-3 的 zxx，意为「没有语言内容」）。
+# 这类样本没有参考文本，不计 WER/CER，只计「无人声误输出率」。
+NONSPEECH_LANG = "zxx"
+
 _APOSTROPHES = "'’ʼ‘`´"
 _VARIANTS = ("basic", "numeric")
 
@@ -192,6 +196,31 @@ def score_pair(reference: str, hypothesis: str, lang: str) -> dict:
             metric = metric,
         ),
     }
+
+
+def is_false_output(hypothesis: str) -> bool:
+    """无人声片段中，模型输出去掉空白后仍非空，就算误输出。"""
+    return bool("".join(hypothesis.split()))
+
+
+def false_output_summary(rows: list) -> dict:
+    """无人声误输出率：无人声片段中输出了非空文字的比例，并按 category 字段（缺失记为 unknown）给出分布。
+
+    rows 为含 hypothesis 的字典列表，可含 category。返回
+    {"n", "false_outputs", "rate", "by_category": {类别: {"n", "false_outputs", "rate"}}}，空列表的 rate 为 None。
+    """
+
+    def tally(items: list) -> dict:
+        n = len(items)
+        k = sum(1 for row in items if is_false_output(hypothesis = row["hypothesis"]))
+        return {"n": n, "false_outputs": k, "rate": (k / n) if n else None}
+
+    groups = defaultdict(list)
+    for row in rows:
+        groups[row.get("category") or "unknown"].append(row)
+    result = tally(items = rows)
+    result["by_category"] = {cat: tally(items = groups[cat]) for cat in sorted(groups)}
+    return result
 
 
 def score_corpus(rows: list) -> tuple:

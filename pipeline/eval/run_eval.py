@@ -36,6 +36,9 @@
 - `hypotheses.jsonl`：逐条结果，含 sample_id、lang、reference、hypothesis、duration_s、n_new_tokens，
   以及打分器给出的 basic、numeric 两种逐条分数。
 - `summary.json` 与 `summary.md`：按语言的结果表，基础分和数词统一分都列出。
+- 无人声评测集（语言代码 zxx，没有参考文本）不计 WER/CER：hypotheses.jsonl 保留 category 字段，
+  summary.json 的 `nonspeech` 项给出「无人声误输出率」（输出去掉空白后非空的片段比例）及按 category 的分布。
+  转换方法：`python -m pipeline.eval.synth_manifest <无人声评测集目录> <评测清单目录>`，再 `--langs zxx`。
 - `perf.json`：每个批量的生成耗时、音频总时长、实时倍率、生成 token 数和峰值显存。
 """
 
@@ -49,7 +52,7 @@ import sys
 import time
 from pathlib import Path
 
-from pipeline.eval.scoring import LANGS, METRIC_BY_LANG, score_corpus
+from pipeline.eval.scoring import LANGS, METRIC_BY_LANG, NONSPEECH_LANG, false_output_summary, score_corpus
 
 PROMPT_TEXT = "Transcribe the audio."
 PROJECTOR_PREFIX = "model.audio_projector."
@@ -226,6 +229,16 @@ def format_markdown(summary: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def format_nonspeech_markdown(summary: dict) -> str:
+    """无人声误输出率表：总体一行，再按 category 逐行。"""
+    lines = ["| 类别 | 片段数 | 误输出数 | 误输出率 % |", "| --- | ---: | ---: | ---: |"]
+    rows = [("全部", summary)] + list(summary["by_category"].items())
+    for name, v in rows:
+        rate = "n/a" if v["rate"] is None else f"{v['rate'] * 100:.1f}"
+        lines.append(f"| {name} | {v['n']} | {v['false_outputs']} | {rate} |")
+    return "\n".join(lines) + "\n"
+
+
 def parse_args(argv: list | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description = "批量转写评测清单并按语言打分")
     parser.add_argument("--model-dir", required = True, type = Path, help = "完整模型目录（remote code）")
@@ -245,7 +258,7 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
 def main(argv: list | None = None) -> int:
     args = parse_args(argv = argv)
     for lang in args.langs:
-        if lang not in METRIC_BY_LANG:
+        if lang not in METRIC_BY_LANG and lang != NONSPEECH_LANG:
             raise SystemExit(f"不支持的语言代码：{lang}")
     audio_root = args.audio_root if args.audio_root is not None else args.manifest_dir
     args.output_dir.mkdir(parents = True, exist_ok = True)
@@ -303,22 +316,32 @@ def main(argv: list | None = None) -> int:
                         "hypothesis": hyp,
                         "duration_s": row["duration_s"],
                         "n_new_tokens": n,
+                        **({"category": row["category"]} if "category" in row else {}),
                     },
                 )
             print(f"[{lang}] {start + len(batch)}/{len(rows)} 条，{elapsed:.1f}s，峰值显存 {peak / 2 ** 30:.2f} GiB", flush = True)
 
-    per_sample, summary = score_corpus(rows = results)
+    speech = [row for row in results if row["lang"] != NONSPEECH_LANG]
+    nonspeech = [row for row in results if row["lang"] == NONSPEECH_LANG]
+    per_sample, summary = score_corpus(rows = speech)
     with open(file = args.output_dir / "hypotheses.jsonl", mode = "w", encoding = "utf-8") as f:
-        for row, scored in zip(results, per_sample):
+        for row, scored in zip(speech, per_sample):
             record = dict(row)
             record["basic"] = scored["basic"]
             record["numeric"] = scored["numeric"]
             f.write(json.dumps(obj = record, ensure_ascii = False) + "\n")
+        for row in nonspeech:
+            f.write(json.dumps(obj = row, ensure_ascii = False) + "\n")
+    nonspeech_summary = false_output_summary(rows = nonspeech) if nonspeech else None
+    if nonspeech_summary is not None:
+        summary["nonspeech"] = nonspeech_summary
     (args.output_dir / "summary.json").write_text(
         data = json.dumps(obj = summary, ensure_ascii = False, indent = 2),
         encoding = "utf-8",
     )
-    table = format_markdown(summary = summary)
+    table = format_markdown(summary = {k: v for k, v in summary.items() if k != "nonspeech"})
+    if nonspeech_summary is not None:
+        table += "\n" + format_nonspeech_markdown(summary = nonspeech_summary)
     (args.output_dir / "summary.md").write_text(data = table, encoding = "utf-8")
     (args.output_dir / "perf.json").write_text(
         data = json.dumps(obj = perf, ensure_ascii = False, indent = 2),

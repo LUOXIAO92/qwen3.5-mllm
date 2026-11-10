@@ -6,6 +6,7 @@
 #   评测清单目录含 <语言>/test.jsonl：FLEURS 测试集用 pipeline.eval.fleurs_prepare 生成，
 #   合成测试集用 pipeline.eval.synth_manifest 从合成输出目录转换。
 # 环境变量：
+#   LANGS     只评测这些语言（空格分隔，默认全部 18 种）；无人声评测集用 LANGS=zxx
 #   WORK_DIR  工作目录（含 envs/mllm-eval、envs/mllm-train、gpu.lock），默认是仓库旁边的 qwen3.5-asr-work
 set -uo pipefail
 run="${1:?训练输出目录}"
@@ -21,5 +22,6 @@ flock "$work/gpu.lock" "$work/envs/mllm-eval/bin/python" -m pipeline.eval.run_ev
   --model-dir "$repo/qwen3.5-0.8b-mllm" \
   --projector "$best/projector.safetensors" \
   --manifest-dir "$manifest" \
-  --batch-size 48 \
+  ${LANGS:+--langs $LANGS} \
+  --batch-size "${BATCH_SIZE:-48}" \
   --output-dir "$out"

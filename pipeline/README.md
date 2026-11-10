@@ -98,4 +98,14 @@ python -m pipeline.eval.report --out-dir <报告目录> \
     --synth v1b:holdout=<工作目录>/data/T16/v1b-holdout@<工作目录>/data/T16/holdout-manifest
 ```
 
+无人声误输出率（无人声片段中输出了非空文字的比例，按声音类别给出分布）用无人声评测集（语言 zxx，无参考文本）：
+
+```bash
+python -m pipeline.eval.synth_manifest $DATASET/audio/qwen3.5-asr/nonspeech/v2/eval <工作目录>/data/E1/manifest
+LANGS=zxx pipeline/eval/run.sh <工作目录>/data/T14/v1b-20k <工作目录>/data/E1/manifest <工作目录>/data/E1/v1b-20k
+python -m pipeline.eval.report --out-dir <报告目录> --nonspeech v1b-20k=<工作目录>/data/E1/v1b-20k
+```
+
+结果目录的 summary.json 中 `nonspeech` 项即该指标；`report --nonspeech` 把多个模型并列成表。
+
 `run.sh` 取该次训练中 dev 损失最低的检查点，转写评测集并按语言打分；`report` 把多次评测汇总成表格。

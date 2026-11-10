@@ -17,6 +17,9 @@
         --fleurs v1a=<结果目录> v1b=<结果目录> \\
         --synth v1a:holdout=<结果目录>@<评测清单目录> v1a:trainvoice=<结果目录>@<评测清单目录> ...
 
+无人声评测集（语言 zxx）：`--nonspeech 名称=结果目录`，给出「无人声误输出率」（无人声片段中输出了非空文字的
+比例，去掉空白后为空才算没有输出）及按声音类别的分布。结果目录的 hypotheses.jsonl 中 lang 为 zxx 的行参与统计。
+
 写出 <报告目录>/tables.md 与 tables.json。
 """
 
@@ -25,7 +28,7 @@ import json
 import re
 from pathlib import Path
 
-from pipeline.eval.scoring import LANGS, METRIC_BY_LANG, score_pair
+from pipeline.eval.scoring import LANGS, METRIC_BY_LANG, NONSPEECH_LANG, false_output_summary, score_pair
 
 NON_LATIN = {"zh", "ja", "ko", "th", "ar", "fa", "ru"}
 GLOSS = re.compile(r"\s*[（(][A-Za-z][^()（）]*[)）]")
@@ -204,13 +207,38 @@ def synth_tables(runs: dict, out: dict) -> list:
     return lines
 
 
+def nonspeech_tables(runs: dict, out: dict) -> list:
+    """runs 为 {名称: 结果目录}，每格为「误输出数 / 片段数（误输出率 %）」。"""
+    names = list(runs)
+    summaries = {
+        name: false_output_summary(rows = [row for row in load_hypotheses(result_dir = path) if row["lang"] == NONSPEECH_LANG])
+        for name, path in runs.items()
+    }
+    out["nonspeech"] = summaries
+    lines = ["## 无人声误输出率", ""]
+    lines.append("无人声片段中模型输出了非空文字（去掉空白后不为空）的比例，越低越好。每格为「误输出数 / 片段数（误输出率 %）」。")
+    lines.append("")
+    lines.append("| 声音类别 | " + " | ".join(names) + " |")
+    lines.append("| --- | " + " | ".join("---:" for _ in names) + " |")
+    categories = sorted({cat for s in summaries.values() for cat in s["by_category"]})
+    for label, getter in [("全部", lambda s: s)] + [(cat, lambda s, c = cat: s["by_category"].get(c)) for cat in categories]:
+        cells = []
+        for name in names:
+            item = getter(summaries[name])
+            cells.append("" if not item or not item["n"] else f"{item['false_outputs']} / {item['n']}（{pct(item['rate'])}）")
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    return lines + [""]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description = "汇总评测结果")
     parser.add_argument("--out-dir", required = True, type = Path)
     parser.add_argument("--fleurs", nargs = "*", default = [], help = "名称=结果目录")
+    parser.add_argument("--nonspeech", nargs = "*", default = [], help = "名称=结果目录（无人声评测集的评测结果）")
     parser.add_argument("--synth", nargs = "*", default = [], help = "名称:测试集=结果目录@评测清单目录")
     args = parser.parse_args()
     fleurs = dict(item.split("=", 1) for item in args.fleurs)
+    nonspeech = dict(item.split("=", 1) for item in args.nonspeech)
     synth = {}
     for item in args.synth:
         key, value = item.split("=", 1)
@@ -221,6 +249,8 @@ def main() -> None:
     lines = ["# 评测汇总", ""]
     if fleurs:
         lines += fleurs_tables(runs = fleurs, out = out)
+    if nonspeech:
+        lines += nonspeech_tables(runs = nonspeech, out = out)
     if synth:
         lines += synth_tables(runs = synth, out = out)
     args.out_dir.mkdir(parents = True, exist_ok = True)

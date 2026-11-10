@@ -5,7 +5,18 @@ import os
 import tempfile
 import unittest
 
-from pipeline.eval.scoring import LANGS, METRIC_BY_LANG, align, main, normalize_basic, score_corpus, score_pair
+from pipeline.eval.scoring import (
+    LANGS,
+    METRIC_BY_LANG,
+    NONSPEECH_LANG,
+    align,
+    false_output_summary,
+    is_false_output,
+    main,
+    normalize_basic,
+    score_corpus,
+    score_pair,
+)
 
 
 def counts(res: dict, variant: str = "basic") -> tuple:
@@ -161,6 +172,60 @@ class TestCorpus(unittest.TestCase):
         for lang in LANGS:
             res = score_pair(reference = "test 1 2", hypothesis = "test", lang = lang)
             self.assertIn("numeric", res)
+
+
+class TestFalseOutput(unittest.TestCase):
+    def test_is_false_output(self):
+        self.assertFalse(is_false_output(hypothesis = ""))
+        self.assertFalse(is_false_output(hypothesis = " \n\t\u3000 "))
+        self.assertTrue(is_false_output(hypothesis = "Hello."))
+        self.assertTrue(is_false_output(hypothesis = "。"))
+
+    def test_summary_by_category(self):
+        rows = [
+            {"hypothesis": "", "category": "music"},
+            {"hypothesis": "la la", "category": "music"},
+            {"hypothesis": "  ", "category": "animal"},
+            {"hypothesis": "woof", "category": "animal"},
+            {"hypothesis": "hi", "category": "animal"},
+            {"hypothesis": "x"},
+        ]
+        res = false_output_summary(rows = rows)
+        self.assertEqual((res["n"], res["false_outputs"]), (6, 4))
+        self.assertAlmostEqual(res["rate"], 4 / 6)
+        self.assertEqual(res["by_category"]["music"], {"n": 2, "false_outputs": 1, "rate": 0.5})
+        self.assertEqual(res["by_category"]["animal"]["false_outputs"], 2)
+        self.assertEqual(res["by_category"]["unknown"]["n"], 1)
+        self.assertEqual(list(res["by_category"]), ["animal", "music", "unknown"])
+
+    def test_empty(self):
+        res = false_output_summary(rows = [])
+        self.assertEqual((res["n"], res["rate"], res["by_category"]), (0, None, {}))
+
+    def test_zxx_not_scored_as_wer(self):
+        self.assertEqual(NONSPEECH_LANG, "zxx")
+        self.assertNotIn(NONSPEECH_LANG, METRIC_BY_LANG)
+
+
+class TestNonspeechReport(unittest.TestCase):
+    def test_table(self):
+        from pipeline.eval.report import nonspeech_tables
+
+        with tempfile.TemporaryDirectory() as d:
+            rows = [
+                {"sample_id": "a", "lang": "zxx", "hypothesis": "", "category": "music"},
+                {"sample_id": "b", "lang": "zxx", "hypothesis": "hello", "category": "music"},
+                {"sample_id": "c", "lang": "en", "hypothesis": "ignored", "category": "music"},
+            ]
+            with open(os.path.join(d, "hypotheses.jsonl"), "w", encoding = "utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            out = {}
+            lines = nonspeech_tables(runs = {"m": d}, out = out)
+        self.assertEqual(out["nonspeech"]["m"]["n"], 2)
+        text = "\n".join(lines)
+        self.assertIn("| 全部 | 1 / 2（50.0） |", text)
+        self.assertIn("| music | 1 / 2（50.0） |", text)
 
 
 if __name__ == "__main__":
