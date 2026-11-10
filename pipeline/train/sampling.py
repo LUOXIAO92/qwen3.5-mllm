@@ -116,10 +116,13 @@ class EpochPlan:
             return np.arange(len(self.durations))
         return epoch_occurrences(weights = self.weights, seed = self.seed, epoch = epoch)
 
-    def batches(self, epoch):
-        """这一轮的批次列表，每个批次是 SampleKey 的列表。"""
+    def position_batches(self, epoch):
+        """返回 (本轮样本序列, 批次列表)，批次中是样本在序列中的位置。
+
+        训练时按批次逐个换成 SampleKey（keys），不一次性为整轮几百万条样本建对象。
+        """
         occurrences = self.occurrences(epoch = epoch)
-        position_batches = length_grouped_batches(
+        batches = length_grouped_batches(
             durations = self.durations[occurrences].tolist(),
             batch_size = self.batch_size,
             seed = self.seed,
@@ -127,10 +130,16 @@ class EpochPlan:
             group_batches = self.group_batches,
             max_batch_seconds = self.max_batch_seconds,
         )
-        return [
-            [SampleKey(index = int(occurrences[position]), epoch = epoch, position = position) for position in batch]
-            for batch in position_batches
-        ]
+        return occurrences, batches
+
+    @staticmethod
+    def keys(occurrences, epoch, batch):
+        return [SampleKey(index = int(occurrences[position]), epoch = epoch, position = position) for position in batch]
+
+    def batches(self, epoch):
+        """这一轮的批次列表，每个批次是 SampleKey 的列表。"""
+        occurrences, batches = self.position_batches(epoch = epoch)
+        return [self.keys(occurrences = occurrences, epoch = epoch, batch = batch) for batch in batches]
 
 
 def expected_composition(rows, weights, empty):

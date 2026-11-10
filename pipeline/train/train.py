@@ -294,8 +294,11 @@ class EpochBatchSampler:
 
     def __iter__(self):
         epoch, offset = self.epoch, self.offset
+        plan = self.stream.plan
         while True:
-            yield from self.stream.epoch_batches(epoch = epoch)[offset:]
+            occurrences, batches = plan.position_batches(epoch = epoch)
+            for batch in batches[offset:]:
+                yield plan.keys(occurrences = occurrences, epoch = epoch, batch = batch)
             epoch += 1
             offset = 0
 
@@ -336,12 +339,9 @@ class BatchStream:
         self.batches_per_epoch = self.epoch_length(epoch = 0)
         self._iterator = None
 
-    def epoch_batches(self, epoch):
-        return self.plan.batches(epoch = epoch)
-
     def epoch_length(self, epoch):
         if epoch not in self._epoch_lengths:
-            self._epoch_lengths[epoch] = len(self.epoch_batches(epoch = epoch))
+            self._epoch_lengths[epoch] = len(self.plan.position_batches(epoch = epoch)[1])
         return self._epoch_lengths[epoch]
 
     def _batches(self):
