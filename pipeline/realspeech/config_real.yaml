@@ -33,4 +33,6 @@ langs:
   fil: {sec_per_char: null}
   ar: {sec_per_char: null}
   tr: {sec_per_char: null}
-  fa: {sec_per_char: null}
+  # 波斯语只用 nemotron-farsi 重新识别，不做交叉核对（用户 2026-11-10 决定）：omniASR 在波斯语上与主 ASR 整句一致的
+  # 只有 19%，核对会丢掉 ParsVoice 约 84% 的时长；ParsVoice 作者人工转写 500 条对照，原转写词错误率 4.9%
+  fa: {sec_per_char: null, cross_asr: null}
