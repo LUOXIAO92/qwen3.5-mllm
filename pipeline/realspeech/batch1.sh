@@ -29,7 +29,8 @@ batch() {
 }
 
 if [ "$part" = asr ]; then
-  # GigaSpeech 2、ParsVoice、PhoAudiobook 的转写是伪标注或句首不大写：重新识别模式，主 ASR 的结果作训练目标，交叉 ASR 核对
+  # GigaSpeech 2（Whisper 加迭代重标）、ParsVoice（Google Web Speech）、PhoAudiobook（Whisper large-v3）的转写由早期 ASR
+  # 生成：重新识别模式，主 ASR 的结果作训练目标，交叉 ASR 核对
   G="$A/speechcolab/gigaspeech2/data"
   for lang in th vi; do
     batch "gigaspeech2-$lang" env RETRANSCRIBE=1 "$run" "gigaspeech2-$lang" "$real" "$B/gigaspeech2-$lang" \
@@ -39,12 +40,14 @@ if [ "$part" = asr ]; then
     --source phoaudiobook --lang vi --input "$A"/thivux/phoaudiobook/data/*.parquet
   batch parsvoice-fa env RETRANSCRIBE=1 "$run" parsvoice-fa "$real" "$B/parsvoice-fa" \
     --source parsvoice --lang fa --input "$A"/MohammadJRanjbar/ParsVoice/data/*.parquet
-  # MGB-2、ReazonSpeech、WenetSpeech4TTS 的转写是人工字幕或带标点的精选转写：两个 ASR 都要与转写一致，转写作训练目标
-  batch mgb2-ar "$run" mgb2-ar "$real" "$B/mgb2-ar" \
+  # MGB-2（半岛电视台网站的人工转写）和 ReazonSpeech（电视台字幕）是人工转写：按人工核验处理，不做 ASR 核对，
+  # 转写作训练目标。MGB-2 只保留 WMER 不超过 10 的片段（数据集自带的对齐质量，排除转写与音频对不上的分段）
+  batch mgb2-ar env HUMAN_VERIFIED=1 "$run" mgb2-ar "$real" "$B/mgb2-ar" \
     --source mgb2 --lang ar --input "$A"/QCRI/mgb2/train/wav/*.wav --max-wmer 10
-  batch reazonspeech-ja "$run" reazonspeech-ja "$real" "$B/reazonspeech-ja" \
+  batch reazonspeech-ja env HUMAN_VERIFIED=1 "$run" reazonspeech-ja "$real" "$B/reazonspeech-ja" \
     --source reazonspeech --lang ja --input "$A"/reazon-research/reazonspeech-v2/data/*.tar
-  batch wenetspeech4tts-zh "$run" wenetspeech4tts-zh "$real" "$B/wenetspeech4tts-zh" \
+  # WenetSpeech4TTS 的转写由 Paraformer-large 生成：重新识别模式，与 GigaSpeech 2 相同
+  batch wenetspeech4tts-zh env RETRANSCRIBE=1 "$run" wenetspeech4tts-zh "$real" "$B/wenetspeech4tts-zh" \
     --source wenetspeech4tts --lang zh --input "$A"/Wenetspeech4TTS/WenetSpeech4TTS/Premium/*.tar.gz
   batch gigaspeech2-id env RETRANSCRIBE=1 "$run" gigaspeech2-id "$real" "$B/gigaspeech2-id" \
     --source gigaspeech2 --lang id --input "$G"/id/train/*.tar.gz
