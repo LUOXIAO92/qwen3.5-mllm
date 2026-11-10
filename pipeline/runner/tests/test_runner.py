@@ -426,6 +426,26 @@ class RealTargetsTest(unittest.TestCase):
         self.assertEqual(original, "这个软体很好用。")
         self.assertEqual(script, original)
 
+    def test_halfwidth_punctuation_next_to_han_becomes_fullwidth(self):
+        from pipeline.runner.report import real_targets, zh_fullwidth_punctuation
+
+        cases = {
+            "不肯活下来啊,那个血,扣太多了,我不肯活下来。": "不肯活下来啊，那个血，扣太多了，我不肯活下来。",
+            "真的吗?太好了!": "真的吗？太好了！",
+            "原因有三: 第一; 第二.": "原因有三：第一；第二。",
+            "加拿大的移民法,IRPA,从第33条一直到第43条": "加拿大的移民法，IRPA，从第33条一直到第43条",
+            "约3.5亿人, 增长了2.1%": "约3.5亿人，增长了2.1%",
+            "我想想...好吧": "我想想……好吧",
+            "Python 3.12 和 e.g. 这类写法": "Python 3.12 和 e.g. 这类写法",
+        }
+        for text, expected in cases.items():
+            self.assertEqual(zh_fullwidth_punctuation(text = text), expected)
+        task = {"lang": "zh", "original": "這個,很好用.", "text": "這個,很好用.", "target_from": "transcript"}
+        self.assertEqual(real_targets(task = task, primary_hypothesis = ""), ("这个，很好用。", "这个，很好用。"))
+        # 其他语言不处理
+        task = {"lang": "ja", "original": "はい,そうです.", "text": "はい,そうです.", "target_from": "transcript"}
+        self.assertEqual(real_targets(task = task, primary_hypothesis = ""), ("はい,そうです.", "はい,そうです."))
+
     def test_asr_target_is_simplified(self):
         from pipeline.runner.report import real_targets
 

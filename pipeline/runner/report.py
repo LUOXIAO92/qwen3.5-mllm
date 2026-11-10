@@ -3,11 +3,28 @@
 输出只由 tasks.jsonl 和各阶段块文件决定，按 sample_id 排序，和运行方式（一次跑完、分片、续跑）无关。
 """
 
+import re
 from pathlib import Path
 
 from .io_utils import read_jsonl, write_json_atomic, write_jsonl_atomic
 from .stages import Layout
 from .validate import load_checked
+
+_HAN = r"[㐀-䶿一-鿿]"
+_FULLWIDTH = {",": "，", ".": "。", "?": "？", "!": "！", ":": "：", ";": "；"}
+_ELLIPSIS = re.compile(pattern = rf"(?<={_HAN})(?:\.{{2,}}|…+)\s*|\s*(?:\.{{2,}}|…+)(?={_HAN})")
+# 句点只在前面紧挨汉字时换成「。」：前面是字母的句点多是英文缩写（e.g.、Dr.），后面即使接汉字也不动
+_HALFWIDTH = re.compile(pattern = rf"(?<={_HAN})\s*([,.?!:;])\s*|\s*([,?!:;])\s*(?={_HAN})")
+
+
+def zh_fullwidth_punctuation(text: str) -> str:
+    """把中文里紧挨着汉字的半角标点换成全角，并去掉标点两侧多余的空格。
+
+    只看标点两侧是否有汉字：「3.14」这类两侧都不是汉字的写法不动，句点还要求前面是汉字（「e.g.」后接汉字也不动）；英文词与汉字之间的逗号（如「IRPA,从」）
+    按中文排版换成全角。两个以上的点或「…」换成中文省略号「……」。括号要成对处理、ASR 输出里又很少，不在此列。
+    """
+    text = _ELLIPSIS.sub(repl = "……", string = text)
+    return _HALFWIDTH.sub(repl = lambda match: _FULLWIDTH[match.group(1) or match.group(2)], string = text)
 
 
 def real_targets(task: dict, primary_hypothesis: str) -> tuple:
@@ -15,7 +32,8 @@ def real_targets(task: dict, primary_hypothesis: str) -> tuple:
 
     转写没有标点或大小写（target_from 为 asr）时用已与转写比对一致的主 ASR 结果。中文一律转为简体
     （与朗读稿相同的 OpenCC 词组级转换，见 pipeline.tn.core.to_simplified）：台湾普通话等繁体转写的录音也按
-    简体训练，避免模型在普通话上输出繁体字。合成样本的朗读稿生成时已经转过，不再转换。
+    简体训练，避免模型在普通话上输出繁体字。中文里紧挨着汉字的半角标点统一成全角（zh_fullwidth_punctuation），
+    避免同一语言的训练目标混用两套标点。合成样本的朗读稿生成时已经转过，不再转换。
     """
     original, script = task["original"], task["text"]
     if task.get("target_from") == "asr":
@@ -23,7 +41,8 @@ def real_targets(task: dict, primary_hypothesis: str) -> tuple:
     if task["lang"] == "zh":
         from pipeline.tn.core import to_simplified
 
-        original, script = to_simplified(text = original), to_simplified(text = script)
+        original = zh_fullwidth_punctuation(text = to_simplified(text = original))
+        script = zh_fullwidth_punctuation(text = to_simplified(text = script))
     return original, script
 
 
