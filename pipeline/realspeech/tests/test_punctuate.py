@@ -52,6 +52,28 @@ class TransferTest(unittest.TestCase):
                    output = "در زمین های «لاس کانیتاس».")
 
 
+class RecaseTest(unittest.TestCase):
+    def test_case_and_marks_restored(self):
+        result = transfer(source = "hôm nay ở hà nội trời mưa", llm_output = "Hôm nay, ở Hà Nội trời mưa.", lang = "vi")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["output"], "Hôm nay, ở Hà Nội trời mưa.")
+
+    def test_diacritic_change_keeps_source(self):
+        # LLM 改了声调（mưa → múa）：只采用大小写和标点，字母仍取原文本
+        result = transfer(source = "hôm nay ở hà nội trời mưa", llm_output = "Hôm nay ở Hà Nội trời múa.", lang = "vi")
+        self.assertEqual(result["status"], "aligned")
+        self.assertEqual(result["output"], "Hôm nay ở Hà Nội trời mưa.")
+
+    def test_lowercase_text_needs_restoring(self):
+        self.assertTrue(needs_punctuation(text = "hôm nay, trời mưa.", lang = "vi"))
+        self.assertFalse(needs_punctuation(text = "Hôm nay, trời mưa.", lang = "vi"))
+
+    def test_score_capitalized_words(self):
+        result = score(references = ["Hôm nay ở Hà Nội."], predictions = ["Hôm nay ở hà Nội."], lang = "vi")
+        self.assertEqual(result["capitalized_words"]["recall"], round(2 / 3, 4))
+        self.assertEqual(result["capitalized_words"]["precision"], 1.0)
+
+
 class HelpersTest(unittest.TestCase):
     def test_needs_punctuation(self):
         self.assertTrue(needs_punctuation(text = "سلام دنیا", lang = "fa"))

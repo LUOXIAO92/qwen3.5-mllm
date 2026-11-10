@@ -12,6 +12,9 @@
 
 词的写法、空白和 ZWNJ 都取自原文本，所以采用的结果去掉标点后与原文本完全相同。
 
+RECASE 中的语言（越南语：主 ASR 和交叉 ASR 都几乎只输出小写）同时还原大小写：比对字母时不分大小写，对齐上的字母
+若只差大小写就取 LLM 的写法，其余（声调符号、拼写）仍取原文本，所以采用的结果转成小写、去掉标点后与原文本相同。
+
 结果逐行追加到输出目录的 punctuation.jsonl（sample_id、lang、input、output、status、reason、llm_output），
 可以中断后续跑：已有结果且输入相同的样本不再请求。manifest 步骤（pipeline/runner/report.py）生成清单时套用
 状态为 ok 或 aligned 的结果，原文本存到 unpunctuated_target 字段。
@@ -44,7 +47,15 @@ LANG_MARKS = {
         "opening": set("«("),
         "normalize": {",": "،", ";": "؛", "?": "؟", "٬": "،"},
     },
+    "vi": {
+        "closing": set(".,;:?!…)”"),
+        "opening": set("(“"),
+        "normalize": {},
+    },
 }
+
+# 同时还原大小写的语言
+RECASE = {"vi"}
 
 SYSTEM_PROMPTS = {
     "fa": (
@@ -54,6 +65,16 @@ SYSTEM_PROMPTS = {
         "spelling even if a word looks wrong, do not convert digits, and keep every space and zero-width non-joiner "
         "as it is. The transcript is one segment of a longer recording and may start or stop in the middle of a "
         "sentence; end it with a period only when the segment ends a sentence. Output only the punctuated text."
+    ),
+    "vi": (
+        "You restore punctuation and capitalization in Vietnamese speech transcripts produced by a speech recognizer, "
+        "which writes everything in lower case. Capitalize the first word of each sentence and proper names (people, "
+        "places, organizations, titles) following standard Vietnamese orthography, and insert punctuation marks "
+        "(. , ? ! ; : …) where a careful Vietnamese editor would put them. Copy every word exactly as given: do not "
+        "change, add, remove, reorder, split or join words, keep every diacritic and spelling even if a word looks "
+        "wrong, and do not convert numbers. The transcript is one segment of a longer recording and may start or "
+        "stop in the middle of a sentence; end it with a period only when the segment ends a sentence. Output only "
+        "the corrected text."
     ),
 }
 
@@ -89,8 +110,15 @@ def parse(text: str, lang: str) -> tuple:
     return "".join(letters), marks
 
 
+def fold(text: str) -> str:
+    """逐字转小写；转换后长度会变的字符（如 İ）保持原样，保证字母位置一一对应。"""
+    return "".join(char.lower() if len(char.lower()) == 1 else char for char in text)
+
+
 def needs_punctuation(text: str, lang: str) -> bool:
-    """文本的词尾没有任何闭合类标点时需要还原（数字里的小数点等词内标点不算）。"""
+    """文本的词尾没有任何闭合类标点时需要还原（数字里的小数点等词内标点不算）；RECASE 的语言没有任何大写字母时也需要。"""
+    if lang in RECASE and not any(char.isupper() for char in text):
+        return True
     closing = LANG_MARKS[lang]["closing"]
     ends = {end for _, end, _ in word_spans(text = text, lang = lang)}
     return not any(mark in closing and offset in ends for offset, mark in parse(text = text, lang = lang)[1])
@@ -108,12 +136,13 @@ def word_spans(text: str, lang: str) -> list:
 
 
 def offset_map(source: str, output: str) -> tuple:
-    """返回把 LLM 输出的字母位置映射到原文本字母位置的函数和改动的字母数。
+    """返回 (位置映射函数, 改动的字母数, 一致片段)：映射函数把 LLM 输出的字母位置换成原文本的字母位置。
 
     位置 k 指「第 k 个字母之前」。只有落在两边一致片段内部或边界上的位置能映射，其余返回 None。
+    一致片段是 [(原文本起点, 输出起点, 长度)]。
     """
     if source == output:
-        return (lambda k: k), 0
+        return (lambda k: k), 0, [(0, 0, len(source))]
     matcher = difflib.SequenceMatcher(a = source, b = output, autojunk = False)
     blocks = [block for block in matcher.get_matching_blocks() if block.size > 0]
     changed = len(source) + len(output) - 2 * sum(block.size for block in blocks)
@@ -124,7 +153,7 @@ def offset_map(source: str, output: str) -> tuple:
                 return block.a + (k - block.b)
         return None
 
-    return mapped, changed
+    return mapped, changed, [(block.a, block.b, block.size) for block in blocks]
 
 
 def transfer(source: str, llm_output: str, lang: str) -> dict:
@@ -134,9 +163,17 @@ def transfer(source: str, llm_output: str, lang: str) -> dict:
     output_letters, output_marks = parse(text = llm_output.strip(), lang = lang)
     if not source_letters:
         return {"status": "failed", "output": None, "reason": "empty_input"}
-    mapped, changed = offset_map(source = source_letters, output = output_letters)
+    recase = lang in RECASE
+    key = fold if recase else (lambda text: text)
+    mapped, changed, blocks = offset_map(source = key(source_letters), output = key(output_letters))
     if changed > max(MAX_CHANGED_LETTERS, int(len(source_letters) * MAX_CHANGED_RATIO)):
         return {"status": "failed", "output": None, "reason": "words_changed"}
+    letters = list(source_letters)
+    if recase:
+        # 对齐上的字母只差大小写时取 LLM 的写法
+        for a, b, size in blocks:
+            for i in range(size):
+                letters[a + i] = output_letters[b + i]
     spans = word_spans(text = source, lang = lang)
     ends = {end for _, end, _ in spans}
     starts = {start for start, _, _ in spans}
@@ -163,9 +200,18 @@ def transfer(source: str, llm_output: str, lang: str) -> dict:
             before.setdefault(target, []).append(mark)
     words = []
     for start, end, word in spans:
+        if recase:
+            chars, index = [], start
+            for char in word:
+                if char.isspace() or char == ZWNJ or is_mark(char = char) or char in spec["normalize"]:
+                    chars.append(char)
+                else:
+                    chars.append(letters[index])
+                    index += 1
+            word = "".join(chars)
         words.append("".join(before.get(start, [])) + word + "".join(after.get(end, [])))
     result = " ".join(words)
-    if parse(text = result, lang = lang)[0] != source_letters:
+    if key(parse(text = result, lang = lang)[0]) != key(source_letters):
         return {"status": "failed", "output": None, "reason": "rebuild_mismatch"}
     return {"status": "aligned" if changed else "ok", "output": result, "reason": None}
 
@@ -342,8 +388,8 @@ def run(args: argparse.Namespace) -> None:
     print(f"[punctuate] 完成 {total} 条，用时 {elapsed:.0f} 秒（{total / max(elapsed, 1e-9):.2f} 句/秒），{counts}", flush = True)
 
 
-MARK_CLASSES = {".": "period", "،": "comma", "؟": "question", "!": "exclamation", "؛": "semicolon", ":": "colon",
-                "«": "quote", "»": "quote"}
+MARK_CLASSES = {".": "period", "،": "comma", ",": "comma", "؟": "question", "?": "question", "!": "exclamation",
+                "؛": "semicolon", ";": "semicolon", ":": "colon", "«": "quote", "»": "quote", "“": "quote", "”": "quote"}
 
 
 def slot_marks(text: str, lang: str) -> dict:
@@ -408,7 +454,24 @@ def score(references: list, predictions: list, lang: str) -> dict:
     table["all"] = {"reference": t + n, "predicted": t + p,
                     "precision": round(t / (t + p), 4) if t + p else None,
                     "recall": round(t / (t + n), 4) if t + n else None}
-    return {"marks": table, "final_accuracy": round(final_correct / max(len(references), 1), 4), "sentences": len(references)}
+    result = {"marks": table, "final_accuracy": round(final_correct / max(len(references), 1), 4), "sentences": len(references)}
+    if lang in RECASE:
+        # 首字母大写的词：预测与参考逐词对应（预测由去掉标点、转小写的参考还原而来，词数相同）
+        t = p = n = 0
+        for reference, prediction in zip(references, predictions):
+            ref_words = strip_marks(text = reference, lang = lang).split()
+            pred_words = strip_marks(text = prediction, lang = lang).split()
+            if len(ref_words) != len(pred_words):
+                continue
+            for a, b in zip(ref_words, pred_words):
+                upper_ref, upper_pred = a[:1].isupper(), b[:1].isupper()
+                t += upper_ref and upper_pred
+                p += upper_pred and not upper_ref
+                n += upper_ref and not upper_pred
+        result["capitalized_words"] = {"reference": t + n, "predicted": t + p,
+                                       "precision": round(t / (t + p), 4) if t + p else None,
+                                       "recall": round(t / (t + n), 4) if t + n else None}
+    return result
 
 
 def evaluate(args: argparse.Namespace) -> None:
@@ -420,7 +483,8 @@ def evaluate(args: argparse.Namespace) -> None:
                 references[row["sample_id"]] = row["original"]
     if args.limit:
         references = dict(list(references.items())[:args.limit])
-    items = [(key, strip_marks(text = text, lang = args.lang)) for key, text in references.items()]
+    plain = fold if args.lang in RECASE else (lambda text: text)
+    items = [(key, plain(strip_marks(text = text, lang = args.lang))) for key, text in references.items()]
     results = {}
     started = time.time()
     punctuate_all(
@@ -441,7 +505,9 @@ def evaluate(args: argparse.Namespace) -> None:
         statuses[status] = statuses.get(status, 0) + 1
     # 不采用的句子按「不加标点」计入，反映真正用于训练的结果
     predictions = [results[key][2]["output"] or results[key][0] for key in keys]
-    period_only = [results[key][0] + "." for key in keys]
+    # 简单做法：句末加句号；还原大小写的语言再把句首字母大写
+    period_only = [(results[key][0][:1].upper() if args.lang in RECASE else results[key][0][:1]) + results[key][0][1:] + "."
+                   for key in keys]
     report = {
         "lang": args.lang,
         "model": args.model_name,
