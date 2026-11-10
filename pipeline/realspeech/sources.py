@@ -379,6 +379,63 @@ def mgb2(paths: list, lang: str, max_wmer: float = 100.0):
             }
 
 
+def _librispeech_ids(subset_dir: Path) -> set:
+    """LibriSpeech 子集目录（<说话人>/<章节>/<说话人>-<章节>.trans.txt）里所有语句编号。"""
+    ids = set()
+    for trans in subset_dir.glob(pattern = "*/*/*.trans.txt"):
+        with open(file = trans, mode = "r", encoding = "utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    ids.add(line.split(maxsplit = 1)[0])
+    return ids
+
+
+def _librispeech_pc_rows(subset_dir: Path) -> list:
+    """读取 <LibriSpeech 根>/pc/<子集>.json（LibriSpeech-PC 的 manifest，每行一个 json）。"""
+    manifest = subset_dir.parent.parent / "pc" / f"{subset_dir.name}.json"
+    with open(file = manifest, mode = "r", encoding = "utf-8") as handle:
+        return [json.loads(s = line) for line in handle if line.strip()]
+
+
+def librispeech_coverage(paths: list) -> dict:
+    """各子集中：LibriSpeech 原有的语句数、有 LibriSpeech-PC 转写的语句数、没有 PC 转写（会被跳过）的语句数。"""
+    result = {}
+    for path in map(Path, paths):
+        original = _librispeech_ids(subset_dir = path)
+        covered = {Path(row["audio_filepath"]).stem for row in _librispeech_pc_rows(subset_dir = path)}
+        result[path.name] = {"original": len(original), "with_pc": len(original & covered), "without_pc": len(original - covered)}
+    return result
+
+
+def librispeech(paths: list, lang: str):
+    """LibriSpeech 训练集（OpenSLR SLR12，CC BY 4.0）配 LibriSpeech-PC（SLR145，CC BY 4.0）的带大小写、标点的转写。
+
+    paths 中每一项是一个解压后的子集目录 <根>/LibriSpeech/train-clean-100（或 train-clean-360、train-other-500）；
+    LibriSpeech-PC 的 manifests 解压到 <根>/pc/<子集>.json。按语句编号（audio_filepath 的文件名）把 PC 的 text
+    （NVIDIA 说明为「可直接用于 ASR 训练」的版本，无引号、分号等符号）对上音频，text_raw 记在 extra 中。
+    PC 没有收录的语句（约 9%）和找不到音频的语句跳过，数量见 librispeech_coverage。转写来自有声书原文，按人工转写处理。
+    """
+    for path in map(Path, paths):
+        for row in _librispeech_pc_rows(subset_dir = path):
+            relative = Path(row["audio_filepath"])
+            audio = path.parent / relative
+            if not audio.exists():
+                continue
+            speaker = relative.stem.split("-")[0]
+            yield {
+                "uid": relative.stem,
+                "lang": lang,
+                "transcript": row["text"],
+                "source": f"LibriSpeech + LibriSpeech-PC ({path.name})",
+                "source_license": "CC-BY-4.0",
+                "source_ref": row["audio_filepath"],
+                "speaker": speaker,
+                "duration_s": row.get("duration"),
+                "audio": {"kind": "file", "path": str(audio.resolve())},
+                "extra": {"text_raw": row.get("text_raw")},
+            }
+
+
 SOURCES = {
     "emilia": emilia_tar,
     "makesense_emilia": makesense_emilia,
@@ -390,4 +447,5 @@ SOURCES = {
     "wenetspeech4tts": wenetspeech4tts,
     "reazonspeech": reazonspeech,
     "mgb2": mgb2,
+    "librispeech": librispeech,
 }
