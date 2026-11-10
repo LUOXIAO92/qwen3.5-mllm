@@ -292,6 +292,40 @@ class RunTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(outputs(full), outputs(part))
 
+    def test_resume_after_asr_chunk_size_change(self):
+        full = self.full_run("full")
+        part = self.tmp / "part"
+        shutil.copytree(src = full, dst = part)
+        # 块大小改了：旧块文件名对不上，但样本都已识别过，不应再调用 ASR 封装（FAKE_TEXTS 指向不存在的文件，一调用就失败）
+        for backend in self.ws.config["asr_models"].values():
+            backend["chunk_size"] = 3
+            backend["env_vars"] = {"FAKE_TEXTS": str(self.tmp / "missing.json")}
+        self.ws.config_file.write_text(json.dumps(self.ws.config), encoding = "utf-8")
+        for role in ("primary", "cross"):
+            proc = self.ws.run(part, "--role", role, command = "asr")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            progress = json.loads((part / "progress.json").read_text(encoding = "utf-8"))
+            for key, info in progress["stages"].items():
+                if key.startswith(f"asr_{role}:"):
+                    self.assertEqual(info["done"], info["total"], key)
+        self.assertEqual(self.ws.run(part, command = "compare").returncode, 0)
+        self.assertEqual(self.ws.run(part, command = "manifest").returncode, 0)
+        self.assertEqual(outputs(full), outputs(part))
+        # 删掉一个旧块：只补识别缺的样本，结果仍与一次跑完相同
+        for backend in self.ws.config["asr_models"].values():
+            backend["env_vars"] = {"FAKE_TEXTS": str(self.ws.texts_file)}
+        self.ws.config_file.write_text(json.dumps(self.ws.config), encoding = "utf-8")
+        again = self.tmp / "again"
+        shutil.copytree(src = full, dst = again)
+        old = sorted((again / "state" / "asr_primary" / "asr_p").glob("chunk-*.jsonl"))
+        old[0].unlink()
+        for role in ("primary", "cross"):
+            proc = self.ws.run(again, "--role", role, command = "asr")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.ws.run(again, command = "compare").returncode, 0)
+        self.assertEqual(self.ws.run(again, command = "manifest").returncode, 0)
+        self.assertEqual(outputs(full), outputs(again))
+
     def test_shards_combine_to_full_run(self):
         full = self.full_run("full")
         shards = self.tmp / "shards"

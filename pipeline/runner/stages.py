@@ -449,20 +449,12 @@ def asr_stage(
         backend = cfg["asr_models"][name]
         chunk_size = backend.get("chunk_size", cfg.get("asr_chunk_size", 256))
         chunks = split_chunks(items = sorted(group, key = lambda row: row["sample_id"]), size = chunk_size)
-        targets = [
-            layout.asr_dir(role = role, model = name) / chunk_name(sample_ids = [row["sample_id"] for row in chunk])
-            for chunk in chunks
-        ]
+        directory = layout.asr_dir(role = role, model = name)
+        targets = [directory / chunk_name(sample_ids = [row["sample_id"] for row in chunk]) for chunk in chunks]
+        # 块大小改过之后，旧块文件的名字与新的分块对不上：按样本复用目录里已有的识别结果，块内只把缺的样本送去识别
+        existing = load_chunk_dir(directory = directory)
         resumed = sum(len(chunk) for chunk, target in zip(chunks, targets) if target.exists())
-        key = f"asr_{role}:{name}"
-        if progress is not None:
-            progress.start(
-                key = key,
-                stage = f"asr_{role}",
-                total = len(group),
-                done = resumed,
-                counters = _asr_counters(targets = targets),
-            )
+        reused_records = []
         pending = []
         for chunk, target in zip(chunks, targets):
             if target.exists():
@@ -480,13 +472,24 @@ def asr_stage(
                     if not primary_match[sample_id]:
                         continue
                 rows.append((task, synth[sample_id]))
-            pending.append((chunk, target, rows))
+            reused = [existing[task["sample_id"]] for task, _ in rows if task["sample_id"] in existing]
+            rows = [(task, record) for task, record in rows if task["sample_id"] not in existing]
+            resumed += len(reused)
+            reused_records.extend(reused)
+            pending.append((chunk, target, rows, reused))
+        key = f"asr_{role}:{name}"
+        if progress is not None:
+            counters = _asr_counters(targets = targets)
+            failed = sum(bool(record["error"]) for record in reused_records)
+            counters["asr_ok"] += len(reused_records) - failed
+            counters["asr_failed"] += failed
+            progress.start(key = key, stage = f"asr_{role}", total = len(group), done = resumed, counters = counters)
         # 配置里 processes 大于 1 的模型同时开多个封装子进程，各处理一块，整个模型阶段只持一次 gpu.lock
         processes = int(backend.get("processes", 1))
         shared_lock = processes > 1 and backend.get("gpu", True)
 
         def work(item: tuple, name = name, backend = backend, key = key, shared_lock = shared_lock) -> None:
-            chunk, target, rows = item
+            chunk, target, rows, reused = item
             records = _asr_chunk(
                 name = name,
                 backend = backend,
@@ -497,13 +500,14 @@ def asr_stage(
                 work_dir = work_dir,
                 progress = progress,
                 lock = not shared_lock,
+                reused = reused,
             )
             if progress is not None:
                 failed = sum(bool(rec["error"]) for rec in records)
                 progress.advance(
                     key = key,
                     n = len(rows),
-                    skipped = len(chunk) - len(rows),
+                    skipped = len(chunk) - len(rows) - len(reused),
                     audio_s = sum(record["duration_s"] or 0 for _, record in rows),
                     counters = {"asr_ok": len(records) - failed, "asr_failed": failed},
                 )
@@ -540,7 +544,9 @@ def _asr_chunk(
     work_dir: Path,
     progress = None,
     lock: bool = True,
+    reused: list | None = None,
 ) -> list:
+    """识别 rows 中的样本，与 reused（目录里已有的记录）一起写入块文件 target，返回新识别的记录。"""
     results = {}
     if rows:
         job_dir = layout.work / f"asr-{role}-{name}-{target.stem}"
@@ -593,7 +599,7 @@ def _asr_chunk(
                 "error": error,
             }
         )
-    write_jsonl_atomic(path = target, rows = records)
+    write_jsonl_atomic(path = target, rows = [*(reused or []), *records])
     return records
 
 
