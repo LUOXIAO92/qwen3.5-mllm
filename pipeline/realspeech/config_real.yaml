@@ -14,6 +14,12 @@ asr_models:
   qwen3_asr:
     batch_size: 256
     args: ["--max-batch-seconds", "960"]
+  # omniASR-LLM-7B 光权重约 15 GB，每多一条都要占解码缓存，显存主要受条数限制。土耳其语 WorldSpeech 2,000 段实测：
+  # 每批 16 条 41.8 音频秒/墙钟秒（峰值 20.4 GB），最多 32 条、补零后不超过 400 秒 65.7（23.2 GB），
+  # 48 条 69.0（27.5 GB，离上限太近），128 条显存不足、退回逐条识别后只有 13.4
+  omni_asr:
+    batch_size: 32
+    args: ["--max-batch-seconds", "400"]
 default_sec_per_char: [0.02, 1.0]
 langs:
   zh: {sec_per_char: null}

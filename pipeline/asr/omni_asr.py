@@ -146,11 +146,28 @@ def build_pipeline(checkpoint: Path, tokenizer_path: Path, card_name: str):
     )
 
 
+def duration_batches(order: list, seconds: dict, max_items: int, max_seconds: float) -> list:
+    """把按时长升序排好的下标切成批：每批不超过 max_items 条；max_seconds 大于 0 时，「条数 × 批内最长时长」
+    （补零后的总时长）也不超过它。真人语音切分后的片段多在 15 秒以内，固定 16 条一批用不满显存（16 条是按 FLEURS
+    最长 40 秒的句子定的），按时长组批时短片段一批能放更多条，显存峰值相近。与 qwen3_asr.py、typhoon.py 中的同名函数相同。"""
+    batches, current = [], []
+    for i in order:
+        if current and (len(current) >= max_items or (max_seconds > 0 and (len(current) + 1) * seconds[i] > max_seconds)):
+            batches.append(current)
+            current = []
+        current.append(i)
+    if current:
+        batches.append(current)
+    return batches
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description = "omniASR-LLM 批量转写")
     parser.add_argument("--input", required = True, help = "含 sample_id、audio_path、lang 的 JSONL")
     parser.add_argument("--output", required = True, help = "识别结果 JSONL")
     parser.add_argument("--batch-size", type = int, default = 16)
+    parser.add_argument("--max-batch-seconds", type = float, default = 0.0,
+                        help = "大于 0 时按补零后的总时长组批，--batch-size 为每批条数上限")
     parser.add_argument("--model", default = DEFAULT_MODEL, help = "HF 仓库 ID 或本地目录（含 .pt 与 .model）")
     parser.add_argument("--card", default = None, help = "fairseq2 资产卡名，默认由权重文件名推出")
     parser.add_argument("--audio-root", default = None, help = "相对 audio_path 的根目录，默认为输入文件所在目录")
@@ -202,10 +219,10 @@ def main() -> None:
     audio_seconds = 0.0
     torch.cuda.synchronize()
     t0 = time.time()
+    seconds = {i: len(audios[i]) / SAMPLE_RATE for i in audios}
     for lang in sorted({rows[i]["lang"] for i in order}):
         idx = [i for i in order if rows[i]["lang"] == lang]
-        for start in range(0, len(idx), args.batch_size):
-            chunk = idx[start : start + args.batch_size]
+        for chunk in duration_batches(order = idx, seconds = seconds, max_items = args.batch_size, max_seconds = args.max_batch_seconds):
             try:
                 texts = transcribe(chunk = chunk)
                 for i, text in zip(chunk, texts):
