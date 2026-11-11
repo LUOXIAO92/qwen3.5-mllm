@@ -52,11 +52,20 @@ if [ "$part" = asr ]; then
   batch gigaspeech2-id env RETRANSCRIBE=1 "$run" gigaspeech2-id "$real" "$B/gigaspeech2-id" \
     --source gigaspeech2 --lang id --input "$G"/id/train/*.tar.gz
 elif [ "$part" = cv ]; then
-  # Common Voice 的已验证录音视为人工核验：只做语言识别、FLEURS 去重和时长检查，不跑 ASR
+  # Common Voice 的已验证录音视为人工核验：只做语言识别、FLEURS 去重和时长检查，不跑 ASR。
+  # 语言识别只用来挡住语言写错的句子。抽查（#42）发现短句误判很多：中文书面语被判成吴语、粤语、文言，
+  # 只有汉字或假名的日语短句被判成汉语或未知假名，古典与标准阿拉伯语被判成各地方言，识别结果正确但置信度低于
+  # 0.5 的句子也被丢掉。因此识别结果是目标语言时不看置信度，并接受下面这些同语言的标签；判成别的语言的仍然丢掉。
+  declare -A LID_EXTRA=(
+    [zh]="wuu_Hani yue_Hani lzh_Hani"
+    [ja]="cmn_Hani lzh_Hani yue_Hani wuu_Hani und_Hira und_Kana"
+    [ar]="arz_Arab apc_Arab ajp_Arab arq_Arab ary_Arab aeb_Arab acm_Arab acq_Arab afb_Arab ayl_Arab ayp_Arab ayh_Arab apd_Arab shu_Arab"
+  )
+  lid() { echo --min-lid-prob 0 ${LID_EXTRA[$1]:+--extra-labels ${LID_EXTRA[$1]}}; }
   C="$A/fsicoli/common_voice_22_0/audio"
   for lang in de fr es; do
     batch "cv22-$lang" env HUMAN_VERIFIED=1 "$run" "cv22-$lang" "$real" "$B/cv22-$lang" \
-      --source common_voice --lang "$lang" --input "$C/$lang"/*/*.tar
+      --source common_voice --lang "$lang" --input "$C/$lang"/*/*.tar $(lid "$lang")
   done
   # Common Voice 27.0：下载完成（有 .done 标记）的语言才处理；同一句话最多取 3 条录音
   declare -A LANG_OF=([zh-CN]=zh [zh-TW]=zh [ja]=ja [fa]=fa [it]=it [ru]=ru [th]=th [pt]=pt [ar]=ar [tr]=tr [id]=id
@@ -65,7 +74,7 @@ elif [ "$part" = cv ]; then
     dir="$A/mozilla/common-voice-27/$locale"
     [ -f "$dir/.done" ] || continue
     batch "cv27-$locale" env HUMAN_VERIFIED=1 "$run" "cv27-$locale" "$real" "$B/cv27-$locale" \
-      --source common_voice --lang "${LANG_OF[$locale]}" --input "$dir" --max-per-transcript 3
+      --source common_voice --lang "${LANG_OF[$locale]}" --input "$dir" --max-per-transcript 3 $(lid "${LANG_OF[$locale]}")
   done
 fi
 echo "batch1 $part finished $(date '+%F %T')"
