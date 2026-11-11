@@ -52,10 +52,20 @@ LANG_MARKS = {
         "opening": set("(“"),
         "normalize": {},
     },
+    "ms": {
+        "closing": set(".,;:?!…)”"),
+        "opening": set("(“"),
+        "normalize": {},
+    },
+    "fil": {
+        "closing": set(".,;:?!…)”"),
+        "opening": set("(“"),
+        "normalize": {},
+    },
 }
 
-# 同时还原大小写的语言
-RECASE = {"vi"}
+# 同时还原大小写的语言（越南语的 ASR 几乎只输出小写；马来语、菲律宾语的 omniASR 只输出小写）
+RECASE = {"vi", "ms", "fil"}
 
 SYSTEM_PROMPTS = {
     "fa": (
@@ -75,6 +85,27 @@ SYSTEM_PROMPTS = {
         "wrong, and do not convert numbers. The transcript is one segment of a longer recording and may start or "
         "stop in the middle of a sentence; end it with a period only when the segment ends a sentence. Output only "
         "the corrected text."
+    ),
+    "ms": (
+        "You restore punctuation and capitalization in Malay speech transcripts produced by a speech recognizer, "
+        "which writes everything in lower case without punctuation. Capitalize the first word of each sentence and "
+        "proper names (people, places, organizations, titles such as Yang Berhormat or Dewan Rakyat) following "
+        "standard Malay orthography, and insert punctuation marks (. , ? ! ; :) where a careful Malay editor would put "
+        "them. Copy every word exactly as given: do not change, add, remove, reorder, split or join words (do not add "
+        "hyphens to reduplicated words), keep every spelling even if a word looks wrong, and do not convert numbers. "
+        "The transcript is one segment of a longer recording and may start or stop in the middle of a sentence; end "
+        "it with a period only when the segment ends a sentence. Output only the corrected text."
+    ),
+    "fil": (
+        "You restore punctuation and capitalization in Filipino (Tagalog) speech transcripts produced by a speech "
+        "recognizer, which writes everything in lower case without punctuation. The speech often mixes Tagalog and "
+        "English; keep English words as they are and capitalize English proper names by English rules. Capitalize "
+        "the first word of each sentence and proper names (people, places, organizations, titles) following standard "
+        "Filipino orthography, and insert punctuation marks (. , ? ! ; :) where a careful Filipino editor would put "
+        "them. Copy every word exactly as given: do not change, add, remove, reorder, split or join words, keep every "
+        "spelling even if a word looks wrong, and do not convert numbers. The transcript is one segment of a longer "
+        "recording and may start or stop in the middle of a sentence; end it with a period only when the segment ends "
+        "a sentence. Output only the corrected text."
     ),
 }
 

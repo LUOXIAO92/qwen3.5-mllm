@@ -68,6 +68,20 @@ class RecaseTest(unittest.TestCase):
         self.assertTrue(needs_punctuation(text = "hôm nay, trời mưa.", lang = "vi"))
         self.assertFalse(needs_punctuation(text = "Hôm nay, trời mưa.", lang = "vi"))
 
+    def test_malay_and_filipino_restore_case(self):
+        result = transfer(
+            source = "untuk makluman yang berhormat dewan rakyat",
+            llm_output = "Untuk makluman Yang Berhormat, Dewan Rakyat.",
+            lang = "ms",
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["output"], "Untuk makluman Yang Berhormat, Dewan Rakyat.")
+        # 叠词加连字符等于把两个词连成一个：连字符不是可放回的标点，词和空格都取原文本
+        result = transfer(source = "rumah rumah lama", llm_output = "Rumah-rumah lama.", lang = "ms")
+        self.assertEqual(result["output"], "Rumah rumah lama.")
+        result = transfer(source = "ang ating mga farmers sa batangas", llm_output = "Ang ating mga farmers sa Batangas.", lang = "fil")
+        self.assertEqual(result["output"], "Ang ating mga farmers sa Batangas.")
+
     def test_score_capitalized_words(self):
         result = score(references = ["Hôm nay ở Hà Nội."], predictions = ["Hôm nay ở hà Nội."], lang = "vi")
         self.assertEqual(result["capitalized_words"]["recall"], round(2 / 3, 4))

@@ -27,10 +27,13 @@ langs:
   es: {sec_per_char: null}
   it: {sec_per_char: null}
   id: {sec_per_char: null}
-  ms: {sec_per_char: null}
+  # 马来语、菲律宾语只用 omniASR 重新识别，不做交叉核对（用户 2026-11-11 决定，与波斯语相同）：FLEURS dev 上 omniASR 的
+  # 词错误率 ms 8.7%、fil 7.0%，Qwen3-ASR 为 11.0%、23.1%，两者整句一致只有 14%、8%；WorldSpeech 上双重核对丢掉约九成。
+  # omniASR 不输出大小写和标点，由 pipeline/realspeech/punctuate.py 还原
+  ms: {sec_per_char: null, asr: omni_asr, cross_asr: null}
   th: {sec_per_char: null}
   vi: {sec_per_char: null}
-  fil: {sec_per_char: null}
+  fil: {sec_per_char: null, asr: omni_asr, cross_asr: null}
   ar: {sec_per_char: null}
   tr: {sec_per_char: null}
   # 波斯语只用 nemotron-farsi 重新识别，不做交叉核对（用户 2026-11-10 决定）：omniASR 在波斯语上与主 ASR 整句一致的
