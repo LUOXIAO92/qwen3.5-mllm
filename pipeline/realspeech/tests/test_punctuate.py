@@ -106,3 +106,15 @@ class HelpersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TaggerLabelsTest(unittest.TestCase):
+    def test_apply_labels(self):
+        from pipeline.realspeech.punctuate_tagger import apply_labels
+
+        words = ["walang", "kagubatan", "sa", "canaan", "kaya", "un", "ito"]
+        labels = ["0|Cap", "0|lower", "0|lower", ",|Cap", "0|lower", "-|UPPER", ".|lower"]
+        # 连字符不放回；大小写按标签改写
+        self.assertEqual(apply_labels(words = words, labels = labels), "Walang kagubatan sa Canaan, kaya UN ito.")
+        result = transfer(source = "walang kagubatan sa canaan kaya un ito", llm_output = apply_labels(words = words, labels = labels), lang = "fil")
+        self.assertEqual(result["output"], "Walang kagubatan sa Canaan, kaya UN ito.")
