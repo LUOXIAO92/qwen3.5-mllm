@@ -16,6 +16,7 @@ transformers 的 return_assistant_tokens_mask 按展开音频标记之前的字�
 
 import json
 import random
+import sys
 from collections import namedtuple
 from pathlib import Path
 
@@ -176,7 +177,13 @@ class TranscriptionDataset(torch.utils.data.Dataset):
         keyed = isinstance(key, SampleKey)
         index = key.index if keyed else int(key)
         row = self.rows[index]
-        waveform = load_audio(path = row["audio_path"])
+        try:
+            waveform = load_audio(path = row["audio_path"])
+        except Exception as error:
+            # 几百万个文件里个别损坏（例如转换时机器意外关机）：记下路径，这条样本交给 TrainCollator 丢掉。
+            # 同一个文件每次都读不出，续训与不中断的运行仍然一致。
+            print(f"[bad-audio] {row['audio_path']}: {type(error).__name__}: {str(error)[:200]}", file = sys.stderr, flush = True)
+            return None
         mix = None
         if self.mixer is not None and keyed and not self.empty[index]:
             rng = np.random.default_rng(seed = [self.seed, key.epoch, STREAM_MIXING, key.position])
@@ -205,6 +212,10 @@ class TrainCollator:
         self.tokenizer = processor.tokenizer
 
     def __call__(self, items):
+        # 读不出音频的样本（TranscriptionDataset 返回 None）不进批次，这一批少几条照常训练
+        items = [item for item in items if item is not None]
+        if not items:
+            raise RuntimeError("这一批的音频全部读不出，检查日志中的 [bad-audio] 路径")
         texts = [
             build_training_text(
                 processor = self.processor,

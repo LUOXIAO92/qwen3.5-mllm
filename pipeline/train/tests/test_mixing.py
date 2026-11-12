@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -150,3 +151,23 @@ class DatasetMixingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CorruptAudioTest(unittest.TestCase):
+    """损坏的音频文件：语音样本返回 None 交给批次构造丢掉，背景声读不出时这条样本不混音。"""
+
+    def test_corrupt_files_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = speech_rows(directory = tmp, durations = [2.0, 2.0], empty = ())
+            Path(rows[1]["audio_path"]).write_bytes(b"fLaC" + bytes(range(256)) * 4)
+            dataset = TranscriptionDataset(rows = rows, target = "original")
+            self.assertIsNotNone(dataset[0])
+            self.assertIsNone(dataset[1])
+            manifest = write_background(directory = tmp, clips = [("noise", 3.0)])
+            for clip in Path(tmp, "audio").glob("bg-*.flac"):
+                clip.write_bytes(b"fLaC" + bytes(range(256)) * 4)
+            mixer = BackgroundMixer(manifest = manifest, prob = 1.0)
+            waveform = tone(seconds = 2.0)
+            mixed, info = mixer(waveform = waveform, rng = np.random.default_rng(seed = 0))
+            self.assertIsNone(info)
+            self.assertTrue(np.array_equal(mixed, waveform))

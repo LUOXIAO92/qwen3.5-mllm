@@ -14,6 +14,7 @@
 """
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -152,18 +153,23 @@ class BackgroundMixer:
             return waveform, None
         speech_seconds = len(waveform) / SAMPLING_RATE
         clip_seconds = self.durations[clip]
-        if clip_seconds > speech_seconds:
-            # 背景声比语音长：只解码需要的一段。
-            start_s = start_fraction * (clip_seconds - speech_seconds)
-            noise = load_audio(
-                path = self.paths[clip],
-                start_s = start_s,
-                stop_s = start_s + speech_seconds,
-            )
-            start = 0
-        else:
-            noise = load_audio(path = self.paths[clip])
-            start = int(start_fraction * len(noise))
+        try:
+            if clip_seconds > speech_seconds:
+                # 背景声比语音长：只解码需要的一段。
+                start_s = start_fraction * (clip_seconds - speech_seconds)
+                noise = load_audio(
+                    path = self.paths[clip],
+                    start_s = start_s,
+                    stop_s = start_s + speech_seconds,
+                )
+                start = 0
+            else:
+                noise = load_audio(path = self.paths[clip])
+                start = int(start_fraction * len(noise))
+        except Exception as error:
+            # 背景声文件读不出时这条样本不混音，记下路径
+            print(f"[bad-audio] {self.paths[clip]}: {type(error).__name__}: {str(error)[:200]}", file = sys.stderr, flush = True)
+            return waveform, None
         if len(noise) == 0:
             return waveform, None
         noise = fit_length(noise = noise, length = len(waveform), start = start)
