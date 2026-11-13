@@ -20,7 +20,8 @@ th→tha_Thai vi→vie_Latn fil→fil_Latn ar→arb_Arab tr→tur_Latn fa→fas_
 omniASR_LLM_7B），也可以用 --card 指定。权重和分词器都从这个目录读取，fairseq2 不再另外下载。
 
 输入每行至少有 sample_id、audio_path、lang。audio_path 是相对路径时，相对 --audio-root 解析；
-没有给 --audio-root 时，相对输入文件所在目录。
+没有给 --audio-root 时，相对输入文件所在目录。有 offset_s 的行只识别从 offset_s 秒开始、长 duration_s 秒的一段
+（pipeline/realspeech/materialize.py 的虚拟切分：片段不另存文件，读取时在内存中截取）。
 输出每行：sample_id、lang、asr_model、hypothesis（只保留转写文本）。转写失败的样本
 hypothesis 为空字符串，并多一个 error 字段。
 
@@ -71,9 +72,19 @@ LANG_CODES = {
 }
 
 
-def load_audio(path: Path) -> np.ndarray:
-    """读取音频，转为 16 kHz 单声道 float32。"""
-    data, sr = sf.read(file = str(path), dtype = "float32", always_2d = True)
+def load_audio(path: Path, offset_s: float | None = None, duration_s: float | None = None) -> np.ndarray:
+    """读取音频，转为 16 kHz 单声道 float32。给出 offset_s 时只读从这里开始、长 duration_s 秒的一段（虚拟切分的片段）。"""
+    if offset_s is None:
+        data, sr = sf.read(file = str(path), dtype = "float32", always_2d = True)
+    else:
+        sr = sf.info(file = str(path)).samplerate
+        data, sr = sf.read(
+            file = str(path),
+            start = round(offset_s * sr),
+            frames = round(duration_s * sr),
+            dtype = "float32",
+            always_2d = True,
+        )
     data = data.mean(axis = 1)
     if sr != SAMPLE_RATE:
         wave = torch.from_numpy(data).unsqueeze(0)
@@ -197,7 +208,11 @@ def main() -> None:
             errors[i] = f"unsupported_lang: {row['lang']}"
             continue
         try:
-            audio = load_audio(path = resolve_audio_path(audio_path = row["audio_path"], audio_root = audio_root))
+            audio = load_audio(
+                path = resolve_audio_path(audio_path = row["audio_path"], audio_root = audio_root),
+                offset_s = row.get("offset_s"),
+                duration_s = row.get("duration_s"),
+            )
         except Exception as e:  # 读取失败只标记该条
             errors[i] = f"load_failed: {e}"
             continue

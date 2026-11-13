@@ -560,6 +560,8 @@ def _asr_chunk(
                     "sample_id": task["sample_id"],
                     "audio_path": str((layout.out / record["audio_path"]).resolve()),
                     "lang": task["lang"],
+                    # 虚拟切分的片段：整段文件中的起点和片段时长，ASR 读取时截取
+                    **({"offset_s": record["offset_s"], "duration_s": record["duration_s"]} if record.get("offset_s") is not None else {}),
                 }
                 for task, record in rows
             ],

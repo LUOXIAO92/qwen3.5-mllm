@@ -54,7 +54,7 @@ flock <工作目录>/gpu.lock python -m pipeline.tts.omnivoice ...
 
 **识别结果**：`sample_id`、`asr_model`、`hypothesis`、`match`、`compare_detail`。
 
-**核对通过的训练清单**（T13 产出）：合并上述字段，每行一个通过核对的样本，至少包含 `sample_id`、`audio_path`、`duration_s`、`lang`、`original`、`script`、`source`、`source_license`、`tts_model`、`voice_id`、`holdout`、`cross_lingual`、`asr_model`。
+**核对通过的训练清单**（T13 产出）：合并上述字段，每行一个通过核对的样本，至少包含 `sample_id`、`audio_path`、`duration_s`、`lang`、`original`、`script`、`source`、`source_license`、`tts_model`、`voice_id`、`holdout`、`cross_lingual`、`asr_model`。可选字段 `offset_s`：虚拟切分的片段（`pipeline/realspeech/materialize.py`），`audio_path` 指向整段文件，样本是从 `offset_s` 秒开始、长 `duration_s` 秒的一段，读取时在内存中截取；切点记录在该输出目录的 `virtual_split.jsonl`。
 
 ## 训练与评测的对话格式
 

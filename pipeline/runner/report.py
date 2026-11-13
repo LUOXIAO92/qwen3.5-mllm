@@ -233,6 +233,9 @@ def write_report(cfg: dict, layout: Layout) -> dict:
                 "mode": task["mode"],
                 "seed": task["seed"],
             }
+            if record.get("offset_s") is not None:
+                # 虚拟切分的片段：audio_path 是整段文件，训练读取时从 offset_s 秒起截取 duration_s 秒
+                item["offset_s"] = record["offset_s"]
             if task.get("target_from") == "asr":
                 item["source_transcript"] = task["original"]
             if unpunctuated is not None:

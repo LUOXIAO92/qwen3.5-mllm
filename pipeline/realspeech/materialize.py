@@ -15,6 +15,12 @@
 重新识别模式（RETRANSCRIBE=1，先由主 ASR 识别出文字，再由交叉 ASR 核对）；时长检查跳过这些样本。
 片段越长，两个 ASR 逐字一致的可能越小（WorldSpeech 的片段中位数近 30 秒），切短后核对才有意义。
 
+给出 --virtual-split-share 时做虚拟切分：音频仍是整段文件，不另存片段。长于 --virtual-split-max-seconds 的条目中，
+按固定种子随机抽出这个比例，在停顿处求切点，写入 virtual_split.jsonl（每行一个整段文件：audio_path 和切点 cuts_s，
+单位秒）；其余条目保持整段。切开的条目每段一个样本，编号 <sample_id>-p<序号>，synth_results 中 audio_path 指向
+整段文件，另有 offset_s（片段起点）和 duration_s（片段时长），ASR 和训练读取时在内存中截取。虚拟切分只在停顿处切，
+某处找不到停顿的条目保持整段（cuts_s 为空）。virtual_split.jsonl 已存在时直接复用，重跑得到相同的样本编号。
+
 之后用 pipeline.runner 的 length、asr、compare、manifest 子命令完成核对（见 run.sh）。
 """
 
@@ -61,8 +67,11 @@ def pause_centers(wave: np.ndarray) -> list:
     return centers
 
 
-def split_points(wave: np.ndarray, max_seconds: float) -> list:
-    """把音频切成不超过 max_seconds 的段，返回 [(起点, 终点)]（采样点）。优先在停顿处切，没有合适的停顿时在上限处切断。"""
+def split_points(wave: np.ndarray, max_seconds: float, allow_hard_cut: bool = True) -> list:
+    """把音频切成不超过 max_seconds 的段，返回 [(起点, 终点)]（采样点）。优先在停顿处切，没有合适的停顿时在上限处切断。
+
+    allow_hard_cut 为 False 时不在上限处硬切：某处找不到停顿就整段不切，返回 [(0, 总长)]。
+    """
     total = len(wave)
     limit = int(max_seconds * SAMPLING_RATE)
     if total <= limit:
@@ -72,6 +81,8 @@ def split_points(wave: np.ndarray, max_seconds: float) -> list:
     pieces, start = [], 0
     while total - start > limit:
         candidates = [c for c in centers if start + minimum <= c <= start + limit]
+        if not candidates and not allow_hard_cut:
+            return [(0, total)]
         cut = candidates[-1] if candidates else start + limit
         pieces.append((start, cut))
         start = cut
@@ -174,6 +185,62 @@ def write_group(job: tuple) -> list:
     return results
 
 
+def virtual_cuts(job: tuple) -> tuple:
+    """读一个整段文件，返回 (audio_path, 切点秒数列表, 错误)；只在停顿处切。"""
+    import soundfile as sf
+
+    relative, path, max_seconds = job
+    try:
+        wave, rate = sf.read(file = path, dtype = "float32")
+        if rate != SAMPLING_RATE:
+            raise ValueError(f"采样率 {rate}，应为 {SAMPLING_RATE}")
+        spans = split_points(wave = wave, max_seconds = max_seconds, allow_hard_cut = False)
+        return relative, [round(end / SAMPLING_RATE, 4) for _, end in spans[:-1]], None
+    except Exception as error:
+        return relative, [], f"{type(error).__name__}: {error}"[:200]
+
+
+def plan_virtual_split(
+    out_dir: Path,
+    durations: dict,
+    share: float,
+    max_seconds: float,
+    seed: int,
+    workers: int,
+) -> dict:
+    """返回 {整段文件的相对路径: 切点秒数列表}，并写入 virtual_split.jsonl；文件已存在时直接读取。
+
+    durations 是 {相对路径: 整段时长}。长于 max_seconds 的文件按路径排序后用固定种子随机抽出 share 的比例。
+    """
+    mapping_path = out_dir / "virtual_split.jsonl"
+    if mapping_path.exists():
+        with open(file = mapping_path, mode = "r", encoding = "utf-8") as handle:
+            rows = [json.loads(s = line) for line in handle if line.strip()]
+        return {row["audio_path"]: row["cuts_s"] for row in rows}
+    long = sorted(path for path, duration in durations.items() if duration > max_seconds)
+    rng = np.random.default_rng(seed = seed)
+    chosen = sorted(rng.choice(a = len(long), size = round(share * len(long)), replace = False).tolist())
+    jobs = [(long[index], str(out_dir / long[index]), max_seconds) for index in chosen]
+    mapping, errors = {}, {}
+    with ProcessPoolExecutor(max_workers = workers) as pool:
+        for done, (relative, cuts, error) in enumerate(pool.map(virtual_cuts, jobs, chunksize = 64), start = 1):
+            if error:
+                errors[relative] = error
+            mapping[relative] = cuts
+            if done % 20000 == 0:
+                print(f"[virtual-split] {done}/{len(jobs)}", flush = True)
+    with open(file = mapping_path.with_suffix(".tmp"), mode = "w", encoding = "utf-8") as handle:
+        for relative in sorted(mapping):
+            handle.write(json.dumps(obj = {"audio_path": relative, "cuts_s": mapping[relative]}, ensure_ascii = False) + "\n")
+    mapping_path.with_suffix(".tmp").replace(mapping_path)
+    if errors:
+        (out_dir / "virtual_split_errors.json").write_text(json.dumps(obj = errors, ensure_ascii = False, indent = 1), encoding = "utf-8")
+    kept = sum(1 for cuts in mapping.values() if not cuts)
+    print(json.dumps(obj = {"long_files": len(long), "chosen": len(jobs), "split": len(jobs) - kept,
+                            "no_pause_kept_whole": kept, "errors": len(errors)}, ensure_ascii = False), flush = True)
+    return mapping
+
+
 def to_task(item: dict, sample_id: str, split: bool) -> dict:
     task = {
         "sample_id": sample_id,
@@ -209,7 +276,13 @@ def main() -> None:
     parser.add_argument("--out-dir", required = True, type = Path)
     parser.add_argument("--workers", type = int, default = 16)
     parser.add_argument("--split-max-seconds", type = float, default = 0.0, help = "大于 0 时把长音频在停顿处切成不超过这么长的段")
+    parser.add_argument("--virtual-split-share", type = float, default = 0.0,
+                        help = "大于 0 时做虚拟切分：长音频中随机抽出这个比例，只记录切点，不另存片段")
+    parser.add_argument("--virtual-split-max-seconds", type = float, default = 15.0, help = "虚拟切分的片段上限（秒）")
+    parser.add_argument("--virtual-split-seed", type = int, default = 0)
     args = parser.parse_args()
+    if args.virtual_split_share and args.split_max_seconds:
+        raise SystemExit("--virtual-split-share 与 --split-max-seconds 不能同时使用")
 
     with open(file = args.out_dir / "selected.jsonl", mode = "r", encoding = "utf-8") as handle:
         items = [json.loads(s = line) for line in handle if line.strip()]
@@ -238,16 +311,45 @@ def main() -> None:
                 print(f"[materialize] {done}/{len(jobs)} 组，成功 {len(pieces)}，失败 {len(errors)}", flush = True)
 
     split = args.split_max_seconds > 0
+    mapping = {}
+    if args.virtual_split_share > 0:
+        mapping = plan_virtual_split(
+            out_dir = args.out_dir,
+            durations = {f"audio/{name}.flac": duration for item_pieces in pieces.values() for name, duration in item_pieces},
+            share = args.virtual_split_share,
+            max_seconds = args.virtual_split_max_seconds,
+            seed = args.virtual_split_seed,
+            workers = args.workers,
+        )
     tasks, synth = [], []
     for item in sorted(items, key = lambda row: row["sample_id"]):
         for name, duration in pieces.get(item["sample_id"], []):
+            relative = f"audio/{name}.flac"
+            cuts = mapping.get(relative)
+            if cuts:
+                # 虚拟切分：每段一个样本，指向同一个整段文件，读取时按 offset_s、duration_s 截取
+                bounds = [0.0, *cuts, duration]
+                for index in range(len(bounds) - 1):
+                    task = to_task(item = item, sample_id = f"{name}-p{index:02d}", split = True)
+                    tasks.append(task)
+                    synth.append({
+                        "sample_id": task["sample_id"],
+                        "tts_model": task["tts_model"],
+                        "mode": "real",
+                        "audio_path": relative,
+                        "offset_s": bounds[index],
+                        "duration_s": round(bounds[index + 1] - bounds[index], 4),
+                        "status": "ok",
+                        "error": None,
+                    })
+                continue
             task = to_task(item = item, sample_id = name, split = split)
             tasks.append(task)
             synth.append({
                 "sample_id": name,
                 "tts_model": task["tts_model"],
                 "mode": "real",
-                "audio_path": f"audio/{name}.flac",
+                "audio_path": relative,
                 "duration_s": duration,
                 "status": "ok",
                 "error": None,
@@ -259,7 +361,9 @@ def main() -> None:
     if errors:
         (args.out_dir / "materialize_errors.json").write_text(json.dumps(obj = errors, ensure_ascii = False, indent = 1), encoding = "utf-8")
     hours = sum(duration for item_pieces in pieces.values() for _, duration in item_pieces) / 3600
-    print(json.dumps(obj = {"entries": len(pieces), "samples": len(tasks), "audio_hours": round(hours, 2), "errors": len(errors)}, ensure_ascii = False))
+    virtual = sum(1 for row in synth if row.get("offset_s") is not None)
+    print(json.dumps(obj = {"entries": len(pieces), "samples": len(tasks), "virtual_pieces": virtual, "audio_hours": round(hours, 2),
+                            "errors": len(errors)}, ensure_ascii = False))
 
 
 if __name__ == "__main__":

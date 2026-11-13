@@ -178,7 +178,15 @@ class TranscriptionDataset(torch.utils.data.Dataset):
         index = key.index if keyed else int(key)
         row = self.rows[index]
         try:
-            waveform = load_audio(path = row["audio_path"])
+            if row.get("offset_s") is not None:
+                # 虚拟切分的片段：只解码整段文件中的这一段
+                waveform = load_audio(
+                    path = row["audio_path"],
+                    start_s = row["offset_s"],
+                    stop_s = row["offset_s"] + row["duration_s"],
+                )
+            else:
+                waveform = load_audio(path = row["audio_path"])
         except Exception as error:
             # 几百万个文件里个别损坏（例如转换时机器意外关机）：记下路径，这条样本交给 TrainCollator 丢掉。
             # 同一个文件每次都读不出，续训与不中断的运行仍然一致。

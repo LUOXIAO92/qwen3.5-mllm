@@ -33,6 +33,7 @@
 
 每行至少包含 sample_id、audio_path、duration_s、lang、script、original（CONVENTIONS 中「核对通过的
 训练清单」）。相对的 audio_path 以 --audio-root 为基准，未给出时以清单所在目录为基准。
+有 offset_s 的行是虚拟切分的片段：只解码 audio_path 中从 offset_s 秒开始、长 duration_s 秒的一段。
 
 检查点
 ======

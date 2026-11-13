@@ -13,6 +13,8 @@
 #   RETRANSCRIBE  设为 1 时，主 ASR 之后用它的识别结果替换数据集的转写（adopt_asr.py），由交叉 ASR 核对；
 #                 用于转写本身由模型生成、质量不可靠的数据集（如 Emilia 原始转写）
 #   SPLIT_MAX_SECONDS  大于 0 时把长音频在停顿处切成不超过这么长的段（只能与 RETRANSCRIBE=1 一起用）
+#   VIRTUAL_SPLIT_SHARE  大于 0 时做虚拟切分：长于 15 秒的音频中随机抽出这个比例，在停顿处求切点写入
+#                        virtual_split.jsonl，不另存片段，读取时在内存中截取（只能与 RETRANSCRIBE=1 一起用）
 #   HUMAN_VERIFIED  设为 1 时转写视为已人工核验（如 Common Voice 的已验证录音）：select 加 --human-verified，
 #                   跳过主 ASR、交叉 ASR 和比对，时长检查通过即进入清单
 #   PUNCTUATE_LANGS  逗号分隔的语言（如 fa）：manifest 之后用 LLM 给这些语言没有标点的训练目标还原标点
@@ -47,7 +49,8 @@ if [ ! -f "$out/selected.jsonl" ]; then
   step select "$work/envs/t03/bin/python" -m pipeline.realspeech.select --out-dir "$out" \
     --glotlid "$glotlid" --exclusion "$work/data/T02/exclusion.jsonl" "${verified[@]}" "$@"
 fi
-step materialize "$work/envs/mllm-eval/bin/python" -m pipeline.realspeech.materialize --out-dir "$out" --split-max-seconds "${SPLIT_MAX_SECONDS:-0}"
+step materialize "$work/envs/mllm-eval/bin/python" -m pipeline.realspeech.materialize --out-dir "$out" --split-max-seconds "${SPLIT_MAX_SECONDS:-0}" \
+  --virtual-split-share "${VIRTUAL_SPLIT_SHARE:-0}"
 if [ ! -s "$out/tasks.jsonl" ]; then
   echo "=== materialize 没有转出任何音频，见 $out/materialize_errors.json" | tee -a "$log"
   exit 1
