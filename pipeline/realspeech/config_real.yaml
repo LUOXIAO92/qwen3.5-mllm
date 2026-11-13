@@ -20,6 +20,11 @@ asr_models:
   omni_asr:
     batch_size: 32
     args: ["--max-batch-seconds", "400"]
+  # GigaAM 的 RNNT 版逐帧解码，GPU 利用率约 21%，批大小 32/64/128 同速，多进程反而更慢（GPU 在进程间切换）；
+  # CTC 版整批一次解码。俄语 WorldSpeech 2,000 段实测：RNNT 110、CTC 4,258 音频秒/墙钟秒，按现有规则核对通过
+  # 696 对 693 段；FLEURS ru 词错误率 RNNT 7.56%、CTC 7.76%（#16）。真人语音的交叉核对改用 CTC 版
+  gigaam:
+    args: ["--variant", "ctc"]
 default_sec_per_char: [0.02, 1.0]
 langs:
   zh: {sec_per_char: null}
