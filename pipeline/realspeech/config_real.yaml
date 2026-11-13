@@ -30,11 +30,14 @@ langs:
   zh: {sec_per_char: null}
   en: {sec_per_char: null}
   ja: {sec_per_char: null}
-  ko: {sec_per_char: null}
+  # 韩语、俄语、葡萄牙语、土耳其语的 WorldSpeech 改为整段（不切分）、只用主 ASR（Qwen3-ASR）重新识别，不做交叉核对
+  # （用户 2026-11-14 决定）：两个 ASR 整句一致的要求偏向短片段，切分又拆散了 20–30 秒的长音频。这几种语言的其他真人语音
+  # 来源（Common Voice、MakeSense）不跑 ASR，不受影响
+  ko: {sec_per_char: null, cross_asr: null}
   de: {sec_per_char: null}
   fr: {sec_per_char: null}
-  ru: {sec_per_char: null}
-  pt: {sec_per_char: null}
+  ru: {sec_per_char: null, cross_asr: null}
+  pt: {sec_per_char: null, cross_asr: null}
   es: {sec_per_char: null}
   it: {sec_per_char: null}
   id: {sec_per_char: null}
@@ -46,7 +49,7 @@ langs:
   vi: {sec_per_char: null}
   fil: {sec_per_char: null, asr: omni_asr, cross_asr: null}
   ar: {sec_per_char: null}
-  tr: {sec_per_char: null}
+  tr: {sec_per_char: null, cross_asr: null}
   # 波斯语只用 nemotron-farsi 重新识别，不做交叉核对（用户 2026-11-10 决定）：omniASR 在波斯语上与主 ASR 整句一致的
   # 只有 19%，核对会丢掉 ParsVoice 约 84% 的时长；ParsVoice 作者人工转写 500 条对照，原转写词错误率 4.9%
   fa: {sec_per_char: null, cross_asr: null}
