@@ -40,6 +40,25 @@ class JoinPiecesTest(unittest.TestCase):
             # 重跑时没有片段可拼
             self.assertEqual(plan(audio_dir = audio_dir, sample_ids = {"s1"}), [])
 
+    def test_rerun_after_interrupted_delete(self):
+        """整段已就位、片段只删了一部分、还留着临时文件时，重跑只删除残留文件，整段不变。"""
+        rng = np.random.default_rng(seed = 1)
+        wave = (0.3 * rng.standard_normal(size = 5 * SAMPLING_RATE)).astype(np.float32)
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_dir = Path(tmp)
+            sf.write(file = str(audio_dir / "s2.flac"), data = wave, samplerate = SAMPLING_RATE, format = "FLAC")
+            sf.write(file = str(audio_dir / "s2-p01.flac"), data = wave[:SAMPLING_RATE], samplerate = SAMPLING_RATE, format = "FLAC")
+            sf.write(file = str(audio_dir / "s3.tmp.flac"), data = wave[:SAMPLING_RATE], samplerate = SAMPLING_RATE, format = "FLAC")
+            before, _ = sf.read(file = str(audio_dir / "s2.flac"), dtype = "int16")
+            jobs = plan(audio_dir = audio_dir, sample_ids = {"s2", "s3"})
+            self.assertEqual(len(jobs), 1)
+            sample_id, frames, error = join_one(job = jobs[0])
+            self.assertIsNone(error)
+            self.assertEqual(frames, len(wave))
+            after, _ = sf.read(file = str(audio_dir / "s2.flac"), dtype = "int16")
+            self.assertTrue(np.array_equal(before, after))
+            self.assertEqual(sorted(path.name for path in audio_dir.iterdir()), ["s2.flac"])
+
 
 if __name__ == "__main__":
     unittest.main()

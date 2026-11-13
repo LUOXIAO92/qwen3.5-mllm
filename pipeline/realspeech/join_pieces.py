@@ -5,6 +5,7 @@
 之后不加 --split-max-seconds 重新运行 materialize，它会直接复用这些整段文件，不再读取原始数据。
 
 每条音频写出整段文件并核对采样点数等于各段之和后，才删除它的片段文件；中断后重跑会跳过已经拼好的条目。
+整段文件只在核对通过后才改名就位，所以整段已存在时剩下的片段是删除到一半被中断留下的，重跑时直接删除。
 用户 2026-11-14 决定：切分会把 20–30 秒的长音频拆开，并拆散「说话、停顿、接着说话」的结构，WorldSpeech 改回整段。
 
 用法::
@@ -30,6 +31,10 @@ def join_one(job: tuple) -> tuple:
     sample_id, pieces, audio_dir = job
     target = Path(audio_dir) / f"{sample_id}.flac"
     try:
+        if target.exists():
+            for path in pieces:
+                Path(path).unlink()
+            return sample_id, sf.info(file = str(target)).frames, None
         waves = []
         rate = None
         for path in pieces:
@@ -54,16 +59,25 @@ def join_one(job: tuple) -> tuple:
 
 
 def plan(audio_dir: Path, sample_ids: set) -> list:
-    """列一次目录，按 sample_id 收集片段并按编号排序；整段文件已存在且没有片段的条目视为已完成。"""
+    """列一次目录，按 sample_id 收集片段并按编号排序；整段文件已存在且没有片段的条目视为已完成。
+
+    中断时写到一半的临时文件直接删除；整段已存在时只删除剩下的片段，不检查编号是否连续。
+    """
     groups = defaultdict(list)
+    whole = set()
     for path in audio_dir.iterdir():
+        if path.name.endswith(".tmp.flac"):
+            path.unlink()
+            continue
         match = PIECE.match(path.name)
         if match and match["base"] in sample_ids:
             groups[match["base"]].append((int(match["index"]), str(path)))
+        elif path.suffix == ".flac":
+            whole.add(path.stem)
     jobs = []
     for sample_id, items in sorted(groups.items()):
         indices = [index for index, _ in sorted(items)]
-        if indices != list(range(len(indices))):
+        if sample_id not in whole and indices != list(range(len(indices))):
             raise SystemExit(f"{sample_id} 的片段编号不连续：{indices}")
         jobs.append((sample_id, [path for _, path in sorted(items)], str(audio_dir)))
     return jobs
