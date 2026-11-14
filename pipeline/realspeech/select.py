@@ -16,6 +16,8 @@
 --human-verified 标记转写已经过人工核验（如 Common Voice 的已验证录音）：之后跳过 ASR 核对，只做时长检查。
 --max-hours 按数据集给出的时长累计，选够这么多小时就停（没有时长的条目不计入）；--max-per-transcript 限制同一句话
 最多选几条录音（Common Voice 中同一句常由许多人朗读）。
+--no-lid 跳过按转写文本的语言识别：用于语言已知的单语人工转写数据集（如 MAGICDATA 普通话朗读）。GlotLID 对短句不可靠，
+MAGICDATA 的普通话短句约 20% 被判成 yue_Hani、lzh_Hani、und_* 或低置信度的 cmn_Hani，被丢的句子比留下的更短。
 写出 <输出目录>/selected.jsonl 和 select_stats.json（各丢弃原因的条数）。
 """
 
@@ -69,6 +71,7 @@ def main() -> None:
     parser.add_argument("--max-hours", type = float, default = None, help = "按数据集给出的时长累计，选够这么多小时就停")
     parser.add_argument("--max-per-transcript", type = int, default = 0, help = "同一句转写最多选几条录音，0 为不限")
     parser.add_argument("--human-verified", action = "store_true", help = "转写已经人工核验，之后跳过 ASR 核对")
+    parser.add_argument("--no-lid", action = "store_true", help = "跳过语言识别（语言已知的单语人工转写数据集）")
     args = parser.parse_args()
 
     reader = SOURCES[args.source]
@@ -99,7 +102,7 @@ def main() -> None:
                 reasons["duration"] += 1
                 continue
             label, probability = identifier.predict(text = text)
-            if label not in labels or probability < args.min_lid_prob:
+            if not args.no_lid and (label not in labels or probability < args.min_lid_prob):
                 reasons[f"lid:{label or 'none'}"] += 1
                 continue
             if is_excluded(text = text, lang = args.lang, exclusion = exclusion):
