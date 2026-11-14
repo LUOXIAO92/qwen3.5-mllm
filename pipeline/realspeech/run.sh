@@ -55,6 +55,10 @@ if [ ! -s "$out/tasks.jsonl" ]; then
   echo "=== materialize 没有转出任何音频，见 $out/materialize_errors.json" | tee -a "$log"
   exit 1
 fi
+if [ "${RETRANSCRIBE:-0}" = 1 ]; then
+  # 原转写不作依据：时长检查只看时长不为零，全部音频交给主 ASR
+  step mark-retranscribe "$work/envs/runner/bin/python" -m pipeline.realspeech.adopt_asr --out-dir "$out" --mark
+fi
 step length "${runner[@]}" length "${C[@]}"
 if [ "${HUMAN_VERIFIED:-0}" != 1 ]; then
   step asr-primary "${runner[@]}" asr --role primary "${C[@]}"
