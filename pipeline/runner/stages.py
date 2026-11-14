@@ -348,8 +348,10 @@ def length_verdict(cfg: dict, task: dict, record: dict) -> str:
     人工转写的真人语音（human_verified）也只检查时长不为零（用户 2026-11-14 决定）：比例检查是为发现转写与音频
     错位而设的，对两三个字、两三秒的短句不适用（前后留白占了大半时长），MAGICDATA 因此丢掉 16,995 条短命令、
     ReazonSpeech 3,314 条短字幕。超过 30 秒的音频在训练时去掉（pipeline/train/run.sh 的 --max-duration-s 30）。
+    重新识别模式的任务（retranscribe，见 pipeline/realspeech/adopt_asr.py --mark）同样只检查时长不为零：训练目标是
+    主 ASR 的识别结果，数据集的原转写不作依据。
     """
-    if task.get("text_unknown") or task.get("human_verified"):
+    if task.get("text_unknown") or task.get("human_verified") or task.get("retranscribe"):
         return "" if record.get("duration_s") else "length_zero_duration"
     low, high = sec_per_char(cfg = cfg, lang = task["lang"])
     chars = max(1, count_chars(text = task["text"]))

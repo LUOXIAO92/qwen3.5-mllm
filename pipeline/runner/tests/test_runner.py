@@ -480,6 +480,9 @@ class RealTargetsTest(unittest.TestCase):
         self.assertEqual(length_verdict(cfg = cfg, task = verified, record = {"duration_s": 4.0}), "")
         self.assertEqual(length_verdict(cfg = cfg, task = plain, record = {"duration_s": 4.0}), "length_too_long")
         self.assertEqual(length_verdict(cfg = cfg, task = verified, record = {"duration_s": 0}), "length_zero_duration")
+        # 重新识别模式：原转写不作依据，同样只检查时长不为零
+        retranscribe = {"lang": "zh", "text": "打开", "retranscribe": True}
+        self.assertEqual(length_verdict(cfg = cfg, task = retranscribe, record = {"duration_s": 28.0}), "")
 
     def test_punctuation_applied_only_to_same_input(self):
         from pipeline.runner.report import apply_punctuation, load_punctuation
