@@ -34,7 +34,7 @@ cd "$repo"
 # （varlen），位置编号、音频分块和计损失的位置在数据读取进程中预先算好，不改变批次与损失，0.8B 上比原实现快约 25%，
 # 2B 快约 28%。PyTorch 最多使用 94% 的显存：超出时训练程序逐步增加做梯度检查点的层（再不够时改为流式加载冻结权重），
 # 重试同一批，训练结果不变。4B 在这个批次上需要梯度检查点，建议另加 --checkpoint-layers 24（实测最快），免得每段
-# 续训都先超出一次显存。torch.compile（--compile all）在 0.8B 上再快约 12%，但 4B 上编译后的梯度不对，默认不用。
+# 续训都先超出一次显存。torch.compile（--compile all）在 0.8B 上再快约 12%，但 4B 上编译后的梯度不对，不要使用。
 flock "$work/gpu.lock" "$work/envs/mllm-train/bin/python" -m pipeline.train.train \
   --model-dir "$repo/qwen3.5-0.8b-mllm" \
   --train-manifest "$manifest" \
