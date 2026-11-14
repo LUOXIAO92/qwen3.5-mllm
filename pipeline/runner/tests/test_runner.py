@@ -552,6 +552,28 @@ class MergeManifestsTest(unittest.TestCase):
         )
         return directory
 
+    def test_language_cap_and_duplicates(self) -> None:
+        from pipeline.runner.merge_manifests import merge
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chinese = self.write(directory = root / "zh", lang = "zh", count = 120, seconds = 60)
+            german = self.write(directory = root / "de", lang = "de", count = 120, seconds = 60)
+            # 同一批样本的第二份清单：sample_id 相同，只收第一次出现的
+            again = root / "zh-again"
+            again.mkdir()
+            (again / "manifest.jsonl").write_text((chinese / "manifest.jsonl").read_text(encoding = "utf-8"), encoding = "utf-8")
+            rows, report = merge(
+                directories = [chinese, german, again],
+                cap_hours = 1.0,
+                seed = 0,
+                lang_caps = {"zh": 1.5},
+            )
+        # 中文按单独上限 90 分钟，德语按统一上限 60 分钟；第二份中文清单全部是重复
+        self.assertEqual([item["kept"] for item in report], [90, 60, 0])
+        self.assertEqual(report[2]["duplicates"], 90)
+        self.assertEqual(len({row["sample_id"] for row in rows}), len(rows))
+
     def test_cap_prefers_earlier_directories(self) -> None:
         from pipeline.runner.merge_manifests import merge
 
