@@ -1,7 +1,0 @@
-# WorldSpeech 的核对配置：整段拼回、60% 虚拟切分后只用主 ASR 重新识别，不做交叉核对（用户 2026-11-14 决定）。
-# 韩语、俄语、葡萄牙语、土耳其语、马来语、菲律宾语的单一 ASR 设置已写在 config_real.yaml（这几种语言的其他真人语音不跑 ASR）。
-# 印尼语的 GigaSpeech 2 按 config_real.yaml 做过交叉核对，所以印尼语 WorldSpeech 的设置单独放在这里，
-# 用这个配置重跑 GigaSpeech 2 会改变它的结果。印尼语按总时长计不足 200 小时（130.5 h），用户 2026-11-14 确认补 WorldSpeech。
-extends: config_real.yaml
-langs:
-  id: {cross_asr: null}
