@@ -470,6 +470,17 @@ class RealTargetsTest(unittest.TestCase):
         self.assertEqual(judge(cfg = cfg, task = verified, synth = synth, length = length, asr = {}), ("pass", ""))
         self.assertEqual(judge(cfg = cfg, task = plain, synth = synth, length = length, asr = {}), ("pending", "primary_pending"))
 
+    def test_human_verified_short_sentence_passes_length(self):
+        from pipeline.runner.stages import length_verdict
+
+        cfg = {"default_sec_per_char": [0.02, 1.0], "langs": {"zh": {"sec_per_char": None}}}
+        # 「打开」两个字配 4 秒录音（前后留白）：人工转写只检查时长不为零，其他来源仍按比例判为过长
+        verified = {"lang": "zh", "text": "打开", "human_verified": True}
+        plain = {"lang": "zh", "text": "打开"}
+        self.assertEqual(length_verdict(cfg = cfg, task = verified, record = {"duration_s": 4.0}), "")
+        self.assertEqual(length_verdict(cfg = cfg, task = plain, record = {"duration_s": 4.0}), "length_too_long")
+        self.assertEqual(length_verdict(cfg = cfg, task = verified, record = {"duration_s": 0}), "length_zero_duration")
+
     def test_punctuation_applied_only_to_same_input(self):
         from pipeline.runner.report import apply_punctuation, load_punctuation
 
