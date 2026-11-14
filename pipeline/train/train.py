@@ -57,6 +57,9 @@ from pipeline.train.data import (
     summarize_rows,
 )
 from pipeline.train.mixing import BackgroundMixer, parse_category_weights
+from pipeline.train.optimize import add_arguments as add_optimize_arguments
+from pipeline.train.optimize import apply as apply_optimizations
+from pipeline.train.optimize import options_from_args
 from pipeline.train.progress import Progress
 from pipeline.train.sampling import (
     EpochPlan,
@@ -247,6 +250,7 @@ def parse_args(argv = None):
     )
     parser.add_argument("--no-frozen-check", action = "store_true", help = "跳过冻结参数前后一致的检查")
     parser.add_argument("--deterministic", action = "store_true", help = "使用确定性算法，同样的配置逐位复现")
+    add_optimize_arguments(parser = parser)
     return parser.parse_args(args = argv)
 
 
@@ -479,6 +483,7 @@ def main(argv = None):
 
     model, processor = load_model(model_dir = args.model_dir, device = device)
     feature_dtype = model.model.audio_tower.dtype
+    optimized = apply_optimizations(model = model, options = options_from_args(args = args), device = device)
     params = projector_parameters(model = model)
     trainable = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
     if not trainable or any(not name.startswith(PROJECTOR_PREFIX) for name in trainable):
@@ -508,7 +513,11 @@ def main(argv = None):
     )
     if weights.sum() == 0:
         raise SystemExit("全部样本的抽样权重都是 0。")
-    collator = TrainCollator(processor = processor)
+    audio_config = model.config.audio_config
+    collator = TrainCollator(
+        processor = processor,
+        audio_windows = (audio_config.n_window, audio_config.n_window_infer) if args.precompute_metadata else None,
+    )
     stream = BatchStream(
         dataset = dataset,
         collator = collator,
@@ -599,6 +608,7 @@ def main(argv = None):
         "steps_per_epoch": round(number = steps_per_epoch, ndigits = 1),
         "total_steps": total_steps,
         "start_step": step,
+        "optimize": optimized.describe(),
     }, ensure_ascii = False))
 
     before = None
@@ -715,28 +725,49 @@ def main(argv = None):
             },
         )
 
+    def forward_backward(micro_batches, n_tokens):
+        """一步内各微批的前向与反传，梯度累积在 projector 上；返回这一步的损失与正确数统计。"""
+        loss_total = torch.zeros(size = (), device = device)
+        correct_total = torch.zeros(size = (), device = device, dtype = torch.long)
+        empty_loss_total = torch.zeros(size = (), device = device)
+        empty_correct_total = torch.zeros(size = (), device = device, dtype = torch.long)
+        for batch in micro_batches:
+            inputs = move_batch(batch = batch, device = device, feature_dtype = feature_dtype)
+            with optimized.forward_context():
+                losses, correct, rows = token_losses(model = model, inputs = inputs)
+            loss_sum = losses.sum()
+            (loss_sum / n_tokens).backward()
+            loss_total += loss_sum.detach()
+            correct_total += correct.sum()
+            # 空目标样本只有一个计损失的 token（<|im_end|>），单独统计它的损失和预测正确率。
+            # 用乘法和逻辑与代替按布尔掩码取元素，不让 CPU 等 GPU 算出元素个数。
+            on_empty = batch["empty_rows"].to(device = device)[rows]
+            empty_loss_total += (losses.detach() * on_empty).sum()
+            empty_correct_total += (correct & on_empty).sum()
+        return float(loss_total), int(correct_total), empty_loss_total, empty_correct_total
+
     try:
         last_saved = step
         while step < total_steps:
             micro_batches = [stream.next() for _ in range(args.grad_accum)]
             n_tokens = sum(int((batch["labels"][:, 1:] != -100).sum()) for batch in micro_batches)
-            loss_total = torch.zeros(size = (), device = device)
-            correct_total = torch.zeros(size = (), device = device, dtype = torch.long)
-            empty_loss_total = torch.zeros(size = (), device = device)
-            empty_correct_total = torch.zeros(size = (), device = device, dtype = torch.long)
-            for batch in micro_batches:
-                inputs = move_batch(batch = batch, device = device, feature_dtype = feature_dtype)
-                losses, correct, rows = token_losses(model = model, inputs = inputs)
-                loss_sum = losses.sum()
-                (loss_sum / n_tokens).backward()
-                loss_total += loss_sum.detach()
-                correct_total += correct.sum()
-                # 空目标样本只有一个计损失的 token（<|im_end|>），单独统计它的损失和预测正确率。
-                on_empty = batch["empty_rows"].to(device = device)[rows]
-                empty_loss_total += losses.detach()[on_empty].sum()
-                empty_correct_total += correct[on_empty].sum()
-            step_loss = float(loss_total)
-            step_correct = int(correct_total)
+            while True:
+                try:
+                    totals = forward_backward(micro_batches = micro_batches, n_tokens = n_tokens)
+                except torch.OutOfMemoryError:
+                    totals = None
+                if totals is not None:
+                    break
+                # 显存不足：丢掉这一步已累积的梯度，加大梯度检查点或流式加载后重试同一批，训练结果不变。
+                # 在 except 之外处理，这时异常连同失败那一步的中间结果已经释放。
+                optimizer.zero_grad(set_to_none = True)
+                torch.cuda.empty_cache()
+                change = optimized.degrade()
+                if change is None:
+                    raise RuntimeError("显存不足：梯度检查点和全部层的流式加载都已打开")
+                config["optimize_degraded"] = optimized.describe()
+                print(f"第 {step + 1} 步显存不足，改为 {change}，重试同一批。", flush = True)
+            step_loss, step_correct, empty_loss_total, empty_correct_total = totals
 
             if not checked_grads:
                 leaked = [
@@ -779,6 +810,7 @@ def main(argv = None):
                 train_seconds = time.perf_counter() - window_start
                 last_train_loss = window["loss"] / window["tokens"]
                 mem_gb = torch.cuda.max_memory_allocated() / 2 ** 30
+                reserved_gb = torch.cuda.max_memory_reserved() / 2 ** 30
                 max_mem_gb = max(max_mem_gb, mem_gb)
                 progress.mark(step = step)
                 eta = progress.eta_seconds(step = step)
@@ -810,6 +842,8 @@ def main(argv = None):
                     # 每秒处理的音频秒数，也就是每墙钟小时处理的音频小时数。
                     "audio_h_per_h": round(number = window["audio"] / train_seconds, ndigits = 1),
                     "mem_gb": round(number = mem_gb, ndigits = 2),
+                    # PyTorch 缓存分配器向驱动申请并保留的显存峰值（含已释放、留作复用的部分），更接近显卡上的实际占用。
+                    "reserved_gb": round(number = reserved_gb, ndigits = 2),
                     "elapsed_s": round(number = progress.elapsed()),
                     "eta_s": round(number = eta) if eta is not None else None,
                 }

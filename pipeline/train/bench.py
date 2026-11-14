@@ -12,6 +12,10 @@
 
 WSL 下显存用满后会悄悄借用内存、速度骤降而不报错，所以这里把 PyTorch 可用的显存限制在
 --memory-fraction（默认 0.95）以内，超出时记为 out of memory。
+
+显存与速度选项（梯度检查点、块流式加载、torch.compile 等，见 optimize.py）与 train.py 相同。
+这里只测模型本身，批次固定、不混音；与真实训练一致的端到端比较（加权抽样、混音、读取进程）直接用 train.py
+跑若干步，见 pipeline/train/__init__.py「显存与吞吐」。
 """
 
 import argparse
@@ -24,12 +28,17 @@ import torch
 
 from pipeline.train.data import TrainCollator, TranscriptionDataset, length_grouped_batches, read_manifest
 from pipeline.train.model import load_model, move_batch, projector_parameters, target_loss
+from pipeline.train.optimize import add_arguments, apply, options_from_args
+
+# 由 main 设置：apply 的结果，前向时提供激活值卸载的上下文。
+OPTIMIZED = None
 
 
 def train_step(model, optimizer, batch, feature_dtype):
     """训练一步，返回计入序列的 token 数（含音频标记）。"""
     inputs = move_batch(batch = batch, device = "cuda", feature_dtype = feature_dtype)
-    loss_sum, n_tokens, _ = target_loss(model = model, inputs = inputs)
+    with OPTIMIZED.forward_context():
+        loss_sum, n_tokens, _ = target_loss(model = model, inputs = inputs)
     (loss_sum / n_tokens).backward()
     optimizer.step()
     optimizer.zero_grad(set_to_none = True)
@@ -83,20 +92,27 @@ def main(argv = None):
     parser.add_argument("--num-workers", type = int, default = 8)
     parser.add_argument("--output", default = None)
     parser.add_argument("--deterministic", action = "store_true", help = "使用确定性算法，测量其开销")
-    parser.add_argument("--memory-fraction", type = float, default = 0.95)
+    add_arguments(parser = parser)
     args = parser.parse_args(args = argv)
+    if args.memory_fraction is None:
+        args.memory_fraction = 0.95
     os.environ.setdefault(key = "TOKENIZERS_PARALLELISM", value = "false")
     if args.deterministic:
         os.environ.setdefault(key = "CUBLAS_WORKSPACE_CONFIG", value = ":4096:8")
         torch.use_deterministic_algorithms(mode = True)
-    torch.cuda.set_per_process_memory_fraction(fraction = args.memory_fraction)
+    global OPTIMIZED
 
     rows = read_manifest(path = args.manifest, audio_root = args.audio_root, max_duration_s = args.max_duration_s)
     model, processor = load_model(model_dir = args.model_dir)
+    OPTIMIZED = apply(model = model, options = options_from_args(args = args))
     feature_dtype = model.model.audio_tower.dtype
     optimizer = torch.optim.AdamW(params = projector_parameters(model = model), lr = 1e-5)
     dataset = TranscriptionDataset(rows = rows, target = args.target)
-    collator = TrainCollator(processor = processor)
+    audio_config = model.config.audio_config
+    collator = TrainCollator(
+        processor = processor,
+        audio_windows = (audio_config.n_window, audio_config.n_window_infer) if args.precompute_metadata else None,
+    )
     durations = [row["duration_s"] for row in rows]
     longest = sorted(range(len(rows)), key = lambda index: durations[index], reverse = True)
 
@@ -126,6 +142,7 @@ def main(argv = None):
                 warmup = args.warmup,
             )
             typical_peak = torch.cuda.max_memory_allocated()
+            typical_reserved = torch.cuda.max_memory_reserved()
             torch.cuda.reset_peak_memory_stats()
             worst = collator(items = [dataset[index] for index in longest[:batch_size]])
             try:
@@ -149,6 +166,7 @@ def main(argv = None):
                 "tokens_per_s": round(number = tokens / elapsed),
                 "step_s": round(number = elapsed / steps, ndigits = 3),
                 "peak_mem_gb": round(number = typical_peak / 2 ** 30, ndigits = 2),
+                "peak_reserved_gb": round(number = typical_reserved / 2 ** 30, ndigits = 2),
                 "longest_audio_s": durations[longest[batch_size - 1]],
                 "longest_batch_tokens": int(worst["input_ids"].numel()),
                 "longest_batch_peak_mem_gb": worst_peak,
