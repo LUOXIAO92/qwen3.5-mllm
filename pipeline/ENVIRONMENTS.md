@@ -22,7 +22,7 @@
 
 | 类别 | 说明 | 包含的环境 |
 | --- | --- | --- |
-| 独立环境 | 自带 Python，不继承任何包 | runner、tn、全部 `tts-*`、asr-gigaam、asr-nemo |
+| 独立环境 | 自带 Python，不继承任何包 | runner、tn、plot、全部 `tts-*`、asr-gigaam、asr-nemo |
 | 叠加在 conda 环境上 | 用 `--system-site-packages` 继承项目 conda 环境 `py3.14`（Python 3.14.7、torch 2.13.0+cu130、torchaudio 2.11.0、transformers 5.16.1、numpy 2.4.6），只在上面补装少量包 | asr-qwen3、asr-nemo-fa、asr-hf、asr-funasr-mlt、mllm-train、mllm-eval |
 
 conda 环境 `py3.14` 本身不安装、不升级任何包。叠加类环境的创建命令是：
@@ -49,6 +49,7 @@ asr-hf 和 asr-gigaam 里的 torch 2.15.0 是 `+cu132` 构建，asr-nemo 里的 
 | --- | --- | --- | --- |
 | `envs/runner` | 3.12.13 | `pipeline.runner`、`pipeline.compare`（调度与比对） | 独立 |
 | `envs/tn` | 3.14.7 | `pipeline.tn`（文本规范化） | 独立 |
+| `envs/plot` | 3.12 | `pipeline.train.plot_curves`（训练与验证损失曲线，只装 matplotlib） | 独立 |
 | `envs/tts-omnivoice` | 3.11.15 | `pipeline.tts.omnivoice` | 独立 |
 | `envs/tts-voxcpm2` | 3.12.13 | `pipeline.tts.voxcpm2` | 独立 |
 | `envs/tts-qwen3` | 3.12.13 | `pipeline.tts.qwen3_tts` | 独立 |
