@@ -1,4 +1,7 @@
 /weights/
+# 由 pipeline/build_mllm.py 从 weights/ 构建的融合模型（代码文件复制自 qwen3.5-0.8b-mllm）
+/qwen3.5-2b-mllm/
+/qwen3.5-4b-mllm/
 /audio_tower_code/
 /examples/
 /.vscode/
