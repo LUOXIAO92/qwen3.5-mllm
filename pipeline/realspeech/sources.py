@@ -310,6 +310,54 @@ def wenetspeech4tts(paths: list, lang: str):
             }
 
 
+# MAGICDATA 转写里的非语音标记：[FIL] 填充音（嗯、啊），[SPK] 说话人发出的杂音
+_MAGICDATA_MARK = re.compile(pattern = r"\s*\[(?:FIL|SPK)\]\s*")
+
+
+def _magicdata_gap(match) -> str:
+    """去掉标记后，两侧都是拉丁字母或数字时留一个空格（英文词之间），否则直接相连（汉字之间不加空格）。"""
+    text = match.string
+    before = text[match.start() - 1] if match.start() > 0 else ""
+    after = text[match.end()] if match.end() < len(text) else ""
+    return " " if before.isascii() and before.isalnum() and after.isascii() and after.isalnum() else ""
+
+
+def magicdata(paths: list, lang: str):
+    """MAGICDATA Mandarin Chinese Read Speech（OpenSLR 68）的训练集 train_set.tar.gz（内含 train/<说话人>/<编号>.wav）。
+
+    转写取 TRANS.txt（制表符分隔：UtteranceID、SpeakerID、Transcription，第一行是表头），可以放在 paths 中，
+    否则在压缩包同级的 train/TRANS.txt 查找（它在压缩包末尾，要先单独解出）。转写由人工完成，没有标点，
+    数字写成汉字；[FIL]、[SPK] 两种非语音标记从文本中去掉，去掉后为空的条目跳过。TRANS.txt 中有、压缩包里
+    没有音频的条目在转出音频时记为失败。
+    """
+    paths = [Path(path) for path in paths]
+    archives = [path for path in paths if path.name.endswith(".tar.gz")]
+    trans = next((path for path in paths if path.name == "TRANS.txt"), None)
+    if trans is None:
+        trans = archives[0].parent / "train" / "TRANS.txt"
+    archive = archives[0].resolve()
+    with open(file = trans, mode = "r", encoding = "utf-8") as handle:
+        next(handle)
+        for line in handle:
+            utterance, speaker, text = line.rstrip("\n").split("\t")
+            text = _MAGICDATA_MARK.sub(_magicdata_gap, text).strip()
+            if not text:
+                continue
+            member = f"train/{speaker}/{utterance}"
+            yield {
+                "uid": Path(utterance).stem,
+                "lang": lang,
+                "transcript": text,
+                "source": "MAGICDATA Mandarin Chinese Read Speech",
+                "source_license": "CC-BY-NC-ND-4.0",
+                "source_ref": f"{archive.name}:{member}",
+                "speaker": speaker,
+                "duration_s": None,
+                "audio": {"kind": "tar", "path": str(archive), "member": member},
+                "extra": {},
+            }
+
+
 # ReazonSpeech 的电视字幕里，［拍手］（笑）之类说明声音的注记不是说出的话
 _REAZON_NOTE = re.compile(pattern = r"[［\[（(【♪]")
 
@@ -446,6 +494,7 @@ SOURCES = {
     "phoaudiobook": phoaudiobook,
     "wenetspeech4tts": wenetspeech4tts,
     "reazonspeech": reazonspeech,
+    "magicdata": magicdata,
     "mgb2": mgb2,
     "librispeech": librispeech,
 }

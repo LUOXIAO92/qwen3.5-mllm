@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pipeline.realspeech.sources import SOURCES, librispeech, librispeech_coverage
+from pipeline.realspeech.sources import SOURCES, librispeech, librispeech_coverage, magicdata
 
 PC_ROWS = [
     {"duration": 3.5, "audio_filepath": "train-clean-100/19/198/19-198-0000.flac", "text": "Hello, world.", "text_raw": "\"Hello, world.\""},
@@ -53,6 +53,31 @@ class LibriSpeechTest(unittest.TestCase):
             subset = build_tree(root = Path(tmp))
             coverage = librispeech_coverage(paths = [str(subset)])
             self.assertEqual(coverage, {"train-clean-100": {"original": 4, "with_pc": 3, "without_pc": 1}})
+
+
+
+class MagicdataTest(unittest.TestCase):
+    def test_reads_trans_and_strips_marks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "train").mkdir()
+            (root / "train" / "TRANS.txt").write_text(
+                "UtteranceID\tSpeakerID\tTranscription\n"
+                "5_1_a.wav\t5_1\t请搜索我附近的超市\n"
+                "5_1_b.wav\t5_1\t[FIL] 我想听歌\n"
+                "5_1_c.wav\t5_1\t[SPK]\n"
+                "5_1_d.wav\t5_1\t播放 hello [FIL] world 吧\n",
+                encoding = "utf-8",
+            )
+            archive = root / "train_set.tar.gz"
+            archive.write_bytes(b"")
+            rows = list(magicdata(paths = [str(archive)], lang = "zh"))
+        # 只有标记的条目跳过；汉字之间去掉标记后直接相连，英文词之间留一个空格
+        self.assertEqual([row["transcript"] for row in rows], ["请搜索我附近的超市", "我想听歌", "播放 hello world 吧"])
+        self.assertEqual(rows[0]["uid"], "5_1_a")
+        self.assertEqual(rows[0]["audio"]["member"], "train/5_1/5_1_a.wav")
+        self.assertEqual(rows[0]["speaker"], "5_1")
+        self.assertIn("magicdata", SOURCES)
 
 
 if __name__ == "__main__":
