@@ -104,17 +104,39 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(result["final_accuracy"], 1.0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TaggerLabelsTest(unittest.TestCase):
-    def test_apply_labels(self):
+    def test_apply_labels_uses_word_end_token(self):
         from pipeline.realspeech.punctuate_tagger import apply_labels
 
-        words = ["walang", "kagubatan", "sa", "canaan", "kaya", "un", "ito"]
-        labels = ["0|Cap", "0|lower", "0|lower", ",|Cap", "0|lower", "-|UPPER", ".|lower"]
-        # 连字符不放回；大小写按标签改写
-        self.assertEqual(apply_labels(words = words, labels = labels), "Walang kagubatan sa Canaan, kaya UN ito.")
-        result = transfer(source = "walang kagubatan sa canaan kaya un ito", llm_output = apply_labels(words = words, labels = labels), lang = "fil")
+        text = "walang kagubatan sa canaan kaya un ito"
+        # 子词结束位置上的标签；「kagubatan」切成两个子词，只有词尾那个（位置 16）算数
+        labels = {6: "0|Cap", 10: ".|UPPER", 16: "0|lower", 19: "0|lower", 26: ",|Cap", 31: "0|lower", 34: "-|UPPER", 38: ".|lower"}
+        self.assertEqual(apply_labels(text = text, labels = labels), "Walang kagubatan sa Canaan, kaya UN ito.")
+        result = transfer(source = text, llm_output = apply_labels(text = text, labels = labels), lang = "fil")
         self.assertEqual(result["output"], "Walang kagubatan sa Canaan, kaya UN ito.")
+
+    def test_chinese_marks_after_any_character(self):
+        from pipeline.realspeech.punctuate_tagger import apply_labels
+
+        text = "今天天气很好我们去公园吧"
+        labels = {2: "0|lower", 6: ",|lower", 12: ".|lower"}
+        self.assertEqual(apply_labels(text = text, labels = labels), "今天天气很好，我们去公园吧。")
+
+
+class ChineseTransferTest(unittest.TestCase):
+    def test_marks_placed_between_characters(self):
+        result = transfer(source = "今天天气很好我们去公园吧", llm_output = "今天天气很好，我们去公园吧。", lang = "zh")
+        self.assertEqual(result["output"], "今天天气很好，我们去公园吧。")
+
+    def test_latin_words_keep_source_case_and_spaces(self):
+        # 模型输出转成了小写：对齐不分大小写，字母取原文本的写法，英文词之间的空格保留
+        result = transfer(source = "我在用 iPhone Pro 听歌", llm_output = "我在用 iphone pro 听歌。", lang = "zh")
+        self.assertEqual(result["output"], "我在用 iPhone Pro 听歌。")
+
+    def test_needs_punctuation(self):
+        self.assertTrue(needs_punctuation(text = "请搜索我附近的超市", lang = "zh"))
+        self.assertFalse(needs_punctuation(text = "好的，谢谢", lang = "zh"))
+
+
+if __name__ == "__main__":
+    unittest.main()

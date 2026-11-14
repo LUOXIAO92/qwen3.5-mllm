@@ -64,6 +64,16 @@ LANG_MARKS = {
     },
 }
 
+LANG_MARKS["zh"] = {
+    "closing": set("，。？！；：、…）”》"),
+    "opening": set("（“《"),
+    "normalize": {",": "，", ".": "。", "?": "？", "!": "！", ";": "；", ":": "："},
+}
+
+# 不以空格分词的语言：每个汉字（及假名）都是一个可以在前后放标点的位置，其余字母按空白连成词
+SCAN = {"zh"}
+CJK = re.compile(pattern = r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]")
+
 # 同时还原大小写的语言（越南语的 ASR 几乎只输出小写；马来语、菲律宾语的 omniASR 只输出小写）
 RECASE = {"vi", "ms", "fil"}
 
@@ -156,13 +166,32 @@ def needs_punctuation(text: str, lang: str) -> bool:
 
 
 def word_spans(text: str, lang: str) -> list:
-    """按空白切词，返回每个词的 (起始字母数, 结束字母数, 词)。ZWNJ 和词内的标点不切分。"""
+    """按空白切词，返回每个词的 (起始字母数, 结束字母数, 词)。ZWNJ 和词内的标点不切分。
+
+    SCAN 中的语言再把词拆开：每个汉字单独成一项，相连的其他字母成一项（词的部分只给出字母）。
+    """
     spans = []
     count = 0
     for word in text.split():
-        start = count
-        count += len(parse(text = word, lang = lang)[0])
-        spans.append((start, count, word))
+        letters = parse(text = word, lang = lang)[0]
+        if lang not in SCAN:
+            spans.append((count, count + len(letters), word))
+            count += len(letters)
+            continue
+        run = ""
+        for char in letters:
+            if CJK.match(char):
+                if run:
+                    spans.append((count, count + len(run), run))
+                    count += len(run)
+                    run = ""
+                spans.append((count, count + 1, char))
+                count += 1
+            else:
+                run += char
+        if run:
+            spans.append((count, count + len(run), run))
+            count += len(run)
     return spans
 
 
@@ -195,7 +224,8 @@ def transfer(source: str, llm_output: str, lang: str) -> dict:
     if not source_letters:
         return {"status": "failed", "output": None, "reason": "empty_input"}
     recase = lang in RECASE
-    key = fold if recase else (lambda text: text)
+    # 逐词分类模型先把输入转成小写：对齐一律不分大小写，不还原大小写的语言仍取原文本的写法
+    key = fold
     mapped, changed, blocks = offset_map(source = key(source_letters), output = key(output_letters))
     if changed > max(MAX_CHANGED_LETTERS, int(len(source_letters) * MAX_CHANGED_RATIO)):
         return {"status": "failed", "output": None, "reason": "words_changed"}
@@ -229,6 +259,22 @@ def transfer(source: str, llm_output: str, lang: str) -> dict:
             if target not in starts or target == len(source_letters):
                 return {"status": "failed", "output": None, "reason": "mark_inside_word"}
             before.setdefault(target, []).append(mark)
+    if lang in SCAN:
+        # 按原文本逐字重建，空格原样保留：标点紧贴在对应的字前后
+        pieces = []
+        count = 0
+        for char in source:
+            if char.isspace() or char == ZWNJ or is_mark(char = char) or char in spec["normalize"]:
+                pieces.append(char)
+                continue
+            pieces.extend(before.get(count, []))
+            pieces.append(letters[count] if recase else char)
+            count += 1
+            pieces.extend(after.get(count, []))
+        result = "".join(pieces)
+        if key(parse(text = result, lang = lang)[0]) != key(source_letters):
+            return {"status": "failed", "output": None, "reason": "rebuild_mismatch"}
+        return {"status": "aligned" if changed else "ok", "output": result, "reason": None}
     words = []
     for start, end, word in spans:
         if recase:

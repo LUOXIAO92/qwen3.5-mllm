@@ -5,6 +5,10 @@
 FLEURS dev 上与 LLM（pipeline/realspeech/punctuate.py）相比，加的标点精确率相当或略高、召回率低，大小写还原相当，
 速度快两个数量级，所以波斯语、马来语、菲律宾语改用它（用户 2026-11-11 决定）。
 
+每个词的标签取它最后一个子词的标签（与模型自带的 truecase.py 相同；中文在每个汉字之后都取）。2026-11-14 之前取的是
+第一个子词，FLEURS dev 上句末标点正确率 fa 0.74、ms 0.52、fil 0.28，改正后为 0.98、0.94、0.91，标点召回率
+0.47/0.34/0.18 → 0.68/0.64/0.62，精确率不变；缓存记 method，旧方法的结果会重新处理。中文：精确率 0.93、召回率 0.73。
+
 模型的输出与 LLM 输出一样交给 punctuate.transfer：只取标点和大小写，词的写法取自原文本；结果写入同一个
 punctuation.jsonl（model 字段记模型名），manifest 步骤套用状态为 ok 或 aligned 的结果。连字符不放回（相当于连词）。
 只认同一模型的缓存：其他方法（如 LLM）处理过的样本会重新处理，manifest 取最后一行，保证同一目录只用一种方法。
@@ -17,6 +21,7 @@ punctuation.jsonl（model 字段记模型名），manifest 步骤套用状态为
 
 import argparse
 import json
+import re
 import time
 from pathlib import Path
 
@@ -35,17 +40,44 @@ DEFAULT_MODEL = "Horizon-Labs/multilingual-punctuation-truecase-base"
 SKIPPED_MARKS = {"0", "-"}
 
 
-def apply_labels(words: list, labels: list) -> str:
-    """把每个词的「标点|大小写」标签作用到词上，返回带标点的文本；连字符和「不加」都不放标点。"""
-    pieces = []
-    for word, label in zip(words, labels):
-        mark, case = label.split("|")
-        if case == "Cap":
-            word = word[:1].upper() + word[1:]
-        elif case == "UPPER":
-            word = word.upper()
-        pieces.append(word + ("" if mark in SKIPPED_MARKS else mark))
-    return " ".join(pieces)
+# 与模型自带的 truecase.py 相同：汉字、假名之后的标点写成全角
+CJK = re.compile(pattern = r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]")
+FULLWIDTH = {".": "。", ",": "，", "?": "？", ":": "："}
+# 标签取法的版本，记入缓存：版本不同的缓存结果重新处理
+METHOD = "word-end-token"
+
+
+def lower_keep_len(text: str) -> str:
+    """逐字转小写；转换后长度会变的字符保持原样，保证位置一一对应。"""
+    return "".join(char.lower() if len(char.lower()) == 1 else char for char in text)
+
+
+def apply_case(word: str, case: str) -> str:
+    if case == "UPPER":
+        return word.upper() if len(word.upper()) == len(word) else word
+    if case == "Cap":
+        for index, char in enumerate(word):
+            if char.lower() != char.upper():
+                return word[:index] + char.upper() + word[index + 1:] if len(char.upper()) == 1 else word
+    return word
+
+
+def apply_labels(text: str, labels: dict) -> str:
+    """labels 为 {子词结束位置: 「标点|大小写」}。与模型自带的 truecase.py 相同：词尾（下一个字符是空格或文本结束）的
+    子词标签作用于整个词，汉字、假名之后的每个位置都可以放标点；连字符和「不加」都不放标点。"""
+    pieces, previous = [], 0
+    for end in sorted(labels):
+        if not (end == len(text) or text[end] == " " or CJK.match(text[end - 1])):
+            continue
+        mark, case = labels[end].split("|")
+        start = max(previous, text.rfind(" ", 0, end) + 1)
+        if mark in SKIPPED_MARKS:
+            mark = ""
+        elif CJK.match(text[end - 1]):
+            mark = FULLWIDTH.get(mark, mark)
+        pieces.append(text[previous:start] + apply_case(word = text[start:end], case = case) + mark)
+        previous = end
+    return "".join(pieces) + text[previous:]
 
 
 class Tagger:
@@ -62,29 +94,30 @@ class Tagger:
         self.id2label = self.model.config.id2label
 
     def restore(self, texts: list) -> list:
-        """模型按小写训练：先转小写、按空白分词，每个词取第一个子词的标签。按长度排序组批，结果按原顺序返回。"""
+        """模型按小写训练：空白合并、逐字转小写后整句分词，记下每个子词结束位置的标签，再按词尾取标签
+        （模型说明：每个词的标签是它最后一个子词的标签）。按长度排序组批，结果按原顺序返回。"""
         order = sorted(range(len(texts)), key = lambda index: len(texts[index]))
         outputs = [""] * len(texts)
         for start in range(0, len(order), self.batch_size):
             indices = order[start:start + self.batch_size]
-            batch = [texts[index].lower().split() for index in indices]
+            batch = [lower_keep_len(text = " ".join(texts[index].split())) for index in indices]
             encoded = self.tokenizer(
                 batch,
-                is_split_into_words = True,
+                return_offsets_mapping = True,
                 return_tensors = "pt",
                 padding = True,
                 truncation = True,
                 max_length = 512,
             )
+            offsets = encoded.pop("offset_mapping")
             with self.torch.no_grad():
                 predicted = self.model(**{key: value.to(device = self.device) for key, value in encoded.items()}).logits.argmax(dim = -1).cpu()
-            for row, (index, words) in enumerate(zip(indices, batch)):
-                first = {}
-                for position, word in enumerate(encoded.word_ids(batch_index = row)):
-                    if word is not None and word not in first:
-                        first[word] = int(predicted[row, position])
-                labels = [self.id2label[first.get(word, 0)] for word in range(len(words))]
-                outputs[index] = apply_labels(words = words, labels = labels)
+            for row, (index, text) in enumerate(zip(indices, batch)):
+                labels = {}
+                for position, (begin, end) in enumerate(offsets[row].tolist()):
+                    if end > begin:
+                        labels[end] = self.id2label[int(predicted[row, position])]
+                outputs[index] = apply_labels(text = text, labels = labels)
         return outputs
 
 
@@ -105,7 +138,7 @@ def run(args: argparse.Namespace) -> None:
             if not needs_punctuation(text = text, lang = row["lang"]):
                 continue
             cached = cache.get(row["sample_id"])
-            if cached and cached["input"] == text and cached.get("model") == args.model:
+            if cached and cached["input"] == text and cached.get("model") == args.model and cached.get("method") == METHOD:
                 continue
             todo.append((row["sample_id"], row["lang"], text))
     print(f"[punctuate_tagger] {len(todo)} 条待处理", flush = True)
@@ -119,7 +152,8 @@ def run(args: argparse.Namespace) -> None:
             for (key, lang, text), tagged in zip(chunk, outputs):
                 result = transfer(source = text, llm_output = tagged, lang = lang)
                 row = {"sample_id": key, "lang": lang, "input": text, "output": result["output"], "status": result["status"],
-                       "reason": result["reason"], "llm_output": tagged, "request": "tagger", "model": args.model}
+                       "reason": result["reason"], "llm_output": tagged, "request": "tagger", "model": args.model,
+                       "method": METHOD}
                 out.write(json.dumps(obj = row, ensure_ascii = False) + "\n")
                 counts[result["status"]] = counts.get(result["status"], 0) + 1
             out.flush()
