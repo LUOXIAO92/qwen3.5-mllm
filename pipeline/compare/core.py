@@ -555,6 +555,22 @@ def compare(script: str, hypothesis: str, lang: str, original: str | None = None
     return CompareResult(match = not problems, detail = "；".join(problems))
 
 
+def char_error_rate(script: str, hypothesis: str, lang: str) -> float:
+    """朗读稿与识别结果的字符错误率：两者先按 normalize_for_scoring 规范化（数词统一），去掉空格，
+    再按字符计算编辑距离除以朗读稿的字符数。空格不计，词的切分不同（pampang 与 pang pang）不算错误。"""
+    ref = normalize_for_scoring(text = script, lang = lang).replace(" ", "")
+    hyp = normalize_for_scoring(text = hypothesis, lang = lang).replace(" ", "")
+    if not ref:
+        return 0.0 if not hyp else 1.0
+    previous = list(range(len(hyp) + 1))
+    for i, ref_char in enumerate(ref, start = 1):
+        current = [i] + [0] * len(hyp)
+        for j, hyp_char in enumerate(hyp, start = 1):
+            current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ref_char != hyp_char))
+        previous = current
+    return previous[-1] / len(ref)
+
+
 def normalize_for_scoring(text: str, lang: str) -> str:
     """评测打分用的规范化文本。
 

@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from pipeline.compare import compare
+from pipeline.compare import char_error_rate, compare
 
 from .config import sec_per_char
 from .validate import InputError, load_checked
@@ -608,12 +608,23 @@ def _asr_chunk(
 # ---------------------------------------------------------------- 比对
 
 
+def match_tolerance(cfg: dict, lang: str) -> float | None:
+    """该语言允许的字符错误率（配置 langs.<lang>.match_max_cer），没有配置时为 None，要求逐字一致。"""
+    return cfg.get("langs", {}).get(lang, {}).get("match_max_cer")
+
+
 def compare_stage(cfg: dict, tasks: list, layout: Layout, progress = None) -> None:
-    """把 asr_primary.jsonl、asr_cross.jsonl 中尚未比对的样本与朗读稿比对，写入 asr_results.jsonl。"""
+    """把 asr_primary.jsonl、asr_cross.jsonl 中尚未比对的样本与朗读稿比对，写入 asr_results.jsonl。
+
+    已有的比对结果记着当时的容差（max_cer），与配置不同时重新比对。
+    """
     by_id = {task["sample_id"]: task for task in tasks}
     done = {}
     if layout.asr_results.exists():
         for row in load_checked(path = layout.asr_results, kind = "asr_results"):
+            task = by_id.get(row["sample_id"])
+            if task is not None and row.get("max_cer") != match_tolerance(cfg = cfg, lang = task["lang"]):
+                continue
             done[(row["sample_id"], row["asr_role"])] = row
     todo = []
     total = 0
@@ -640,7 +651,12 @@ def compare_stage(cfg: dict, tasks: list, layout: Layout, progress = None) -> No
         began = time.monotonic()
         batch = todo[start:start + 500]
         for row in batch:
-            done[(row["sample_id"], row["asr_role"])] = _compare_row(task = by_id[row["sample_id"]], row = row)
+            task = by_id[row["sample_id"]]
+            done[(row["sample_id"], row["asr_role"])] = _compare_row(
+                task = task,
+                row = row,
+                max_cer = match_tolerance(cfg = cfg, lang = task["lang"]),
+            )
         if progress is not None:
             matched = sum(bool(done[(row["sample_id"], row["asr_role"])]["match"]) for row in batch)
             progress.advance(
@@ -652,13 +668,16 @@ def compare_stage(cfg: dict, tasks: list, layout: Layout, progress = None) -> No
     write_jsonl_atomic(path = layout.asr_results, rows = [done[key] for key in sorted(done)])
 
 
-def _compare_row(task: dict, row: dict) -> dict:
+def _compare_row(task: dict, row: dict, max_cer: float | None = None) -> dict:
+    """比对一条识别结果。给出 max_cer 时，逐字不一致但字符错误率不超过它（且没有原文之外的数字）也算一致。"""
     record = {
         "sample_id": row["sample_id"],
         "asr_model": row["asr_model"],
         "asr_role": row["asr_role"],
         "hypothesis": row["hypothesis"],
     }
+    if max_cer is not None:
+        record["max_cer"] = max_cer
     if row.get("error"):
         record.update(match = False, compare_detail = f"asr_error: {row['error']}")
     elif not str(row["hypothesis"]).strip():
@@ -672,6 +691,11 @@ def _compare_row(task: dict, row: dict) -> dict:
                 original = task["original"],
             )
             record.update(match = bool(outcome.match), compare_detail = outcome.detail)
+            if not outcome.match and max_cer is not None and "原文中没有识别结果里的数字" not in outcome.detail:
+                rate = char_error_rate(script = task["text"], hypothesis = row["hypothesis"], lang = task["lang"])
+                record["cer"] = round(rate, 4)
+                if rate <= max_cer:
+                    record.update(match = True, compare_detail = f"字符错误率 {rate:.1%}，不超过 {max_cer:.0%}：{outcome.detail}")
         except Exception as error:  # 比对本身出错时按失败记录，保留原因
             record.update(match = False, compare_detail = f"compare_error: {error}")
     return record

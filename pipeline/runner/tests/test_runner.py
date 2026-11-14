@@ -496,6 +496,35 @@ class RealTargetsTest(unittest.TestCase):
         )
 
 
+class MatchToleranceTest(unittest.TestCase):
+    """langs.<lang>.match_max_cer：逐字不一致但字符错误率不超过容差时算通过。"""
+
+    SCRIPT = "Ang Dead Balagtas ang una at pinakamalikhaing komiks tungkol sa mahaba at makulay na kasaysayan ng Filipinas."
+
+    def compare(self, hypothesis, max_cer = None):
+        from pipeline.runner.stages import _compare_row
+
+        task = {"sample_id": "s1", "lang": "fil", "text": self.SCRIPT, "original": self.SCRIPT}
+        row = {"sample_id": "s1", "asr_model": "omni", "asr_role": "primary", "hypothesis": hypothesis, "error": None}
+        return _compare_row(task = task, row = row, max_cer = max_cer)
+
+    def test_one_letter_passes_within_tolerance(self):
+        # makulay → makuly：约 93 个字符少 1 个，约 1.1%
+        hypothesis = "ang dead balagtas ang una at pinakamalikhaing komiks tungkol sa mahaba at makuly na kasaysayan ng filipinas"
+        self.assertFalse(self.compare(hypothesis = hypothesis)["match"])
+        record = self.compare(hypothesis = hypothesis, max_cer = 0.02)
+        self.assertTrue(record["match"])
+        self.assertLess(record["cer"], 0.02)
+        self.assertEqual(record["max_cer"], 0.02)
+
+    def test_larger_difference_still_fails(self):
+        # 三处不同（ded balaktas、comics、makuli），超过 2%
+        hypothesis = "ang ded balaktas ang una at pinakamalikhaing comics tungkol sa mahaba at makuli na kasaysayan ng filipinas"
+        record = self.compare(hypothesis = hypothesis, max_cer = 0.02)
+        self.assertFalse(record["match"])
+        self.assertGreater(record["cer"], 0.02)
+
+
 class MergeManifestsTest(unittest.TestCase):
     def write(self, directory: Path, lang: str, count: int, seconds: float) -> Path:
         directory.mkdir(parents = True)

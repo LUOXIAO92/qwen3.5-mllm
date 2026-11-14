@@ -153,7 +153,7 @@ ASR 写成「思年間」「死号線」这类非数词时判不一致，写成�
 各 ASR 的实际输出习惯要到 #15、#16、#17 和 #21 才知道，届时需要据实修订词表和规则。
 """
 
-from .core import CompareResult, compare, normalize_for_scoring
+from .core import CompareResult, char_error_rate, compare, normalize_for_scoring
 from .langs import LANGS
 
-__all__ = ["CompareResult", "LANGS", "compare", "normalize_for_scoring"]
+__all__ = ["CompareResult", "LANGS", "char_error_rate", "compare", "normalize_for_scoring"]

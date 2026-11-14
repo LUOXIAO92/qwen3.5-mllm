@@ -69,8 +69,10 @@ langs:
   th: {asr: typhoon, cross_asr: qwen3_asr}
   vi: {asr: qwen3_asr, cross_asr: cohere}
   # 菲律宾语的合成数据只用 omniASR 核对（用户 2026-11-14 决定，#46）：FLEURS dev 上词错误率 omniASR 7.0%、Qwen3-ASR 23.1%，
-  # 两者整句一致只有 8%。合成数据以朗读稿为训练目标，omniASR 不输出标点不影响目标
-  fil: {asr: omni_asr, cross_asr: null}
+  # 两者整句一致只有 8%。合成数据以朗读稿为训练目标，omniASR 不输出标点不影响目标。
+  # 逐字一致之外，字符错误率（数词统一、去掉空格后计算）不超过 2% 也算通过（用户 2026-11-14 决定）：v1 合成的 7,862 条
+  # 中逐字一致只有 22%（2.3 h），≤ 2% 为 34%（5.0 h）；不一致处多是词的切分、拼写变体和读音相近的词
+  fil: {asr: omni_asr, cross_asr: null, match_max_cer: 0.02}
   ar: {asr: jais_asr, cross_asr: cohere_ar}
   tr: {asr: qwen3_asr, cross_asr: omni_asr}
   fa: {asr: nemotron_farsi, cross_asr: omni_asr}
