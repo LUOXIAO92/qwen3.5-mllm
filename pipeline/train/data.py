@@ -208,16 +208,75 @@ class TranscriptionDataset(torch.utils.data.Dataset):
         }
 
 
+def batch_metadata(batch, audio_token_id, n_window, n_window_infer):
+    """在 CPU 上预先算出前向要用的位置与索引，训练时不必在 GPU 上逐条样本计算（任务 T59，--precompute-metadata）。
+
+    原实现在前向中逐条样本计算这些量，每条都要把 GPU 上的数取回 CPU，CPU 因此反复等 GPU，批越大越慢。
+    这里调用模型代码中同样的函数（音频塔的分块、窗口边界），或按同样的规则计算（位置编号、计损失的位置），
+    结果与原实现逐位相同：
+
+    - position_ids：语言模型的位置编号 (3, 批大小, 长度)。输入中只有文字和音频，三路位置相同，都是有效 token
+      在本条中的序号，填充位置为 0（与 get_rope_index 对音频、文字输入的结果相同）。
+    - audio_mask：input_ids 中音频标记的位置。
+    - audio_padded_feature、audio_chunk_lengths、audio_valid_indices、audio_cu_seqlens、audio_max_seqlen：
+      音频塔把梅尔特征切成 100 帧的块、卷积后按窗口做注意力，这些是 transformers 的 Qwen3OmniMoeAudioEncoder
+      本来在前向开头算出的分块与窗口信息；它的 forward 接受预先算好的同名参数。
+    - loss_index、loss_targets、loss_rows：计损失的位置在 (批大小 × 长度) 中的平展下标（第 t 个位置预测
+      第 t + 1 个 token）、目标 token 和所在的样本行号。
+    """
+    from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+        chunk_and_pad_features,
+        get_audio_cu_seqlens,
+        get_valid_indices,
+    )
+
+    input_ids = batch["input_ids"]
+    attention_mask = batch["attention_mask"]
+    positions = (attention_mask.long().cumsum(dim = -1) - 1).clamp(min = 0) * attention_mask.long()
+    feature_mask = batch["feature_attention_mask"].bool()
+    feature_lens = feature_mask.sum(dim = -1)
+    packed = batch["input_features"].transpose(dim0 = 1, dim1 = 2)[feature_mask].transpose(dim0 = 0, dim1 = 1)
+    padded_feature, chunk_lengths = chunk_and_pad_features(
+        input_features = packed,
+        feature_lens = feature_lens,
+        n_window = n_window,
+    )
+    cu_seqlens = get_audio_cu_seqlens(
+        chunk_lengths = chunk_lengths,
+        feature_lens = feature_lens,
+        n_window_infer = n_window_infer,
+        n_window = n_window,
+    )
+    labels = batch["labels"]
+    length = labels.shape[1]
+    shifted = labels[:, 1:]
+    rows, columns = (shifted != IGNORE_INDEX).nonzero(as_tuple = True)
+    return {
+        "position_ids": positions[None].expand(size = (3, -1, -1)).contiguous(),
+        "audio_mask": input_ids == audio_token_id,
+        "audio_padded_feature": padded_feature,
+        "audio_chunk_lengths": chunk_lengths,
+        "audio_valid_indices": get_valid_indices(chunk_lengths = chunk_lengths, n_window = n_window),
+        "audio_cu_seqlens": cu_seqlens,
+        "audio_max_seqlen": int((cu_seqlens[1:] - cu_seqlens[:-1]).max()),
+        "loss_index": rows * length + columns,
+        "loss_targets": shifted[rows, columns],
+        "loss_rows": rows,
+    }
+
+
 class TrainCollator:
     """把若干条样本拼成一个批次。
 
     每条样本渲染成带助手回答的完整对话，整批交给 processor 做特征提取、音频标记展开和分词（与评测推理
-    相同的调用），再在最终的 input_ids 上用 mm_assistant_mask 生成标签。
+    相同的调用），再在最终的 input_ids 上用 mm_assistant_mask 生成标签。给出 audio_windows（音频塔的
+    n_window、n_window_infer）时，再用 batch_metadata 预先算出前向要用的位置与索引。
     """
 
-    def __init__(self, processor):
+    def __init__(self, processor, audio_windows = None):
         self.processor = processor
         self.tokenizer = processor.tokenizer
+        self.audio_windows = audio_windows
 
     def __call__(self, items):
         # 读不出音频的样本（TranscriptionDataset 返回 None）不进批次，这一批少几条照常训练
@@ -244,7 +303,7 @@ class TrainCollator:
             tokenizer = self.tokenizer,
             spec = ASSISTANT_MASK_SPEC,
         )
-        return {
+        batch = {
             "input_ids": inputs["input_ids"],
             "attention_mask": inputs["attention_mask"],
             "mm_token_type_ids": inputs["mm_token_type_ids"],
@@ -259,6 +318,15 @@ class TrainCollator:
             "empty_rows": torch.tensor(data = [bool(item.get("empty")) for item in items], dtype = torch.bool),
             "n_mixed": sum(item.get("mix") is not None for item in items),
         }
+        if self.audio_windows is not None:
+            n_window, n_window_infer = self.audio_windows
+            batch.update(batch_metadata(
+                batch = batch,
+                audio_token_id = self.tokenizer.convert_tokens_to_ids(tokens = self.processor.audio_token),
+                n_window = n_window,
+                n_window_infer = n_window_infer,
+            ))
+        return batch
 
 
 def length_grouped_batches(
