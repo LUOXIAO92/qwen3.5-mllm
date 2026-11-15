@@ -323,12 +323,14 @@ class BatchStream:
         max_batch_seconds,
         seed,
         num_workers,
+        durations,
         weights = None,
     ):
+        """durations 为各条样本的时长（秒），与 dataset 的下标一一对应，只在主进程中用于组批。"""
         self.dataset = dataset
         self.collator = collator
         self.plan = EpochPlan(
-            durations = [float(row["duration_s"]) for row in dataset.rows],
+            durations = durations,
             weights = weights,
             batch_size = batch_size,
             group_batches = group_batches,
@@ -499,11 +501,13 @@ def main(argv = None):
             category_weights = category_weights,
             audio_root = args.noise_audio_root,
         )
+    # 清单行改存为内存映射文件，各读取进程共享一份，不再各自复制几百万个字典（v2b 时每个读取进程约 13 GB）
     dataset = TranscriptionDataset(
         rows = rows,
         target = args.target,
         mixer = mixer,
         seed = args.seed,
+        storage = output_dir / "dataset" / "rows.jsonl.bin",
     )
     weights = sample_weights(
         rows = rows,
@@ -526,6 +530,7 @@ def main(argv = None):
         max_batch_seconds = args.max_batch_seconds,
         seed = args.seed,
         num_workers = args.num_workers,
+        durations = [float(row["duration_s"]) for row in rows],
         weights = weights,
     )
     batches_per_epoch = stream.batches_per_epoch

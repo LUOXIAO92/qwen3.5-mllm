@@ -15,6 +15,7 @@ transformers 的 return_assistant_tokens_mask 按展开音频标记之前的字�
 """
 
 import json
+import mmap
 import random
 import sys
 from collections import namedtuple
@@ -149,6 +150,78 @@ def load_audio(path, start_s = None, stop_s = None):
     return samples.data.squeeze(dim = 0).numpy()
 
 
+class PackedRows:
+    """把清单行中读取样本要用的几项编码进一个文件，用内存映射读取。
+
+    DataLoader 的每个读取进程都会收到一份数据集对象。清单行原本是 Python 字典，489 万行（v2b）时每个读取进程
+    约 13 GB，6 个进程合计近 80 GB。这里把每行的样本编号、语言、音频路径、时长、起点和训练目标写成一行 JSON，
+    依次存进 path，各行的起止位置存进 path 旁的 .offsets.npy；传给读取进程的只有这两个文件的路径，各进程用
+    mmap 打开同一个文件，共享操作系统的页缓存，用到哪一行才解码哪一行。取出的行与原来的字典在这几项上相同。
+    """
+
+    FIELDS = ("sample_id", "lang", "audio_path", "duration_s", "offset_s")
+
+    def __init__(self, rows, targets, path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents = True, exist_ok = True)
+        offsets = np.zeros(shape = (len(rows) + 1,), dtype = np.int64)
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        position = 0
+        with open(file = tmp, mode = "wb") as handle:
+            for index, (row, target) in enumerate(zip(rows, targets)):
+                record = [row.get(field) for field in self.FIELDS] + [target]
+                data = json.dumps(obj = record, ensure_ascii = False).encode(encoding = "utf-8")
+                handle.write(data)
+                position += len(data)
+                offsets[index + 1] = position
+        np.save(file = self.offsets_path, arr = offsets)
+        tmp.replace(self.path)
+        self._open()
+
+    @property
+    def offsets_path(self):
+        return self.path.with_name(self.path.name + ".offsets.npy")
+
+    def _open(self):
+        self._offsets = np.load(file = self.offsets_path, mmap_mode = "r")
+        self._handle = open(file = self.path, mode = "rb")
+        size = self.path.stat().st_size
+        self._map = mmap.mmap(self._handle.fileno(), 0, access = mmap.ACCESS_READ) if size else b""
+
+    def __getstate__(self):
+        # 只传文件路径，读取进程自己打开内存映射
+        return {"path": str(self.path)}
+
+    def __setstate__(self, state):
+        self.path = Path(state["path"])
+        self._open()
+
+    def __len__(self):
+        return len(self._offsets) - 1
+
+    def record(self, index):
+        """返回 (行字典, 训练目标)。"""
+        start, end = int(self._offsets[index]), int(self._offsets[index + 1])
+        values = json.loads(s = self._map[start:end])
+        return dict(zip(self.FIELDS, values[:-1])), values[-1]
+
+    def __getitem__(self, index):
+        return self.record(index = index)[0]
+
+
+class PackedTargets:
+    """PackedRows 中训练目标的只读视图，按下标取第几条样本的目标。"""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return self.rows.record(index = index)[1]
+
+
 class TranscriptionDataset(torch.utils.data.Dataset):
     """每条样本给出波形和目标文本；特征提取和分词放在批次构造中统一完成。
 
@@ -162,11 +235,18 @@ class TranscriptionDataset(torch.utils.data.Dataset):
         target,
         mixer = None,
         seed = 0,
+        storage = None,
     ):
-        self.rows = rows
+        """storage 给出文件路径时，清单行改存为 PackedRows（大清单用，避免每个读取进程复制全部字典）。"""
         self.target = target
-        self.targets = [target_text(row = row, target = target) for row in rows]
-        self.empty = [text == "" for text in self.targets]
+        targets = [target_text(row = row, target = target) for row in rows]
+        self.empty = [text == "" for text in targets]
+        if storage is None:
+            self.rows = rows
+            self.targets = targets
+        else:
+            self.rows = PackedRows(rows = rows, targets = targets, path = storage)
+            self.targets = PackedTargets(rows = self.rows)
         self.mixer = mixer
         self.seed = seed
 
@@ -176,7 +256,10 @@ class TranscriptionDataset(torch.utils.data.Dataset):
     def __getitem__(self, key):
         keyed = isinstance(key, SampleKey)
         index = key.index if keyed else int(key)
-        row = self.rows[index]
+        if isinstance(self.rows, PackedRows):
+            row, target = self.rows.record(index = index)
+        else:
+            row, target = self.rows[index], self.targets[index]
         try:
             if row.get("offset_s") is not None:
                 # 虚拟切分的片段：只解码整段文件中的这一段
@@ -202,7 +285,7 @@ class TranscriptionDataset(torch.utils.data.Dataset):
             "audio_path": row["audio_path"],
             "duration_s": float(row["duration_s"]),
             "waveform": waveform,
-            "target": self.targets[index],
+            "target": target,
             "empty": self.empty[index],
             "mix": mix,
         }

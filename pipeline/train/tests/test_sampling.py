@@ -3,10 +3,12 @@
 import tempfile
 import unittest
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 
 from pipeline.train.data import TranscriptionDataset, length_grouped_batches
+from pipeline.train.sampling import SampleKey
 from pipeline.train.mixing import BackgroundMixer
 from pipeline.train.sampling import (
     EpochPlan,
@@ -178,12 +180,16 @@ class ResumeTest(unittest.TestCase):
         rng = np.random.default_rng(seed = 0)
         durations = [round(float(rng.uniform(low = 0.5, high = 3.0)), 3) for _ in range(40)]
         rows = speech_rows(directory = cls.tmp.name, durations = durations, empty = tuple(range(30, 40)))
-        mixer = BackgroundMixer(manifest = manifest, prob = 0.5)
+        cls.durations = durations
+        cls.rows = rows
+        cls.mixer = BackgroundMixer(manifest = manifest, prob = 0.5)
+        # 与训练相同，清单行存为内存映射文件；多进程读取时各进程按路径重新打开
         cls.dataset = TranscriptionDataset(
             rows = rows,
             target = "original",
-            mixer = mixer,
+            mixer = cls.mixer,
             seed = 11,
+            storage = Path(cls.tmp.name) / "dataset" / "rows.jsonl.bin",
         )
         cls.weights = sample_weights(
             rows = rows,
@@ -196,6 +202,25 @@ class ResumeTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
+    def test_packed_rows_match_plain_rows(self):
+        """内存映射存储取出的样本与直接用字典时逐项相同，经过 pickle（读取进程收到的对象）后也相同。"""
+        import pickle
+
+        plain = TranscriptionDataset(rows = self.rows, target = "original", mixer = self.mixer, seed = 11)
+        packed = pickle.loads(pickle.dumps(obj = self.dataset))
+        self.assertEqual(len(packed), len(plain))
+        self.assertEqual(self.dataset.empty, plain.empty)
+        for index in range(len(plain)):
+            key = SampleKey(index = index, epoch = 0, position = index)
+            a, b = plain[key], packed[key]
+            self.assertEqual(sorted(a), sorted(b))
+            for name in a:
+                if name == "waveform":
+                    self.assertTrue(np.array_equal(a[name], b[name]))
+                else:
+                    self.assertEqual(a[name], b[name], msg = name)
+            self.assertEqual(packed.targets[index], plain.targets[index])
+
     def stream(self, num_workers, epoch = 0, offset = 0):
         stream = BatchStream(
             dataset = self.dataset,
@@ -205,6 +230,7 @@ class ResumeTest(unittest.TestCase):
             max_batch_seconds = 8,
             seed = 11,
             num_workers = num_workers,
+            durations = self.durations,
             weights = self.weights,
         )
         stream.epoch, stream.offset = epoch, offset
