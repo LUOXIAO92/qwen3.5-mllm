@@ -221,6 +221,17 @@ class ResumeTest(unittest.TestCase):
                     self.assertEqual(a[name], b[name], msg = name)
             self.assertEqual(packed.targets[index], plain.targets[index])
 
+    def test_impossible_target_rate_is_skipped(self):
+        """训练目标说不完（每秒字数超过上限）的样本读取时跳过，其余样本与不设上限时相同。"""
+        rows = [dict(row) for row in self.rows[:3]]
+        rows[1]["original"] = "x" * int(100 * rows[1]["duration_s"])
+        guarded = TranscriptionDataset(rows = rows, target = "original", max_chars_per_second = 40)
+        plain = TranscriptionDataset(rows = rows, target = "original")
+        self.assertIsNone(guarded[1])
+        self.assertIsNotNone(plain[1])
+        for index in (0, 2):
+            self.assertEqual(guarded[index]["target"], plain[index]["target"])
+
     def stream(self, num_workers, epoch = 0, offset = 0):
         stream = BatchStream(
             dataset = self.dataset,

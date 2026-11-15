@@ -236,8 +236,15 @@ class TranscriptionDataset(torch.utils.data.Dataset):
         mixer = None,
         seed = 0,
         storage = None,
+        max_chars_per_second = None,
     ):
-        """storage 给出文件路径时，清单行改存为 PackedRows（大清单用，避免每个读取进程复制全部字典）。"""
+        """storage 给出文件路径时，清单行改存为 PackedRows（大清单用，避免每个读取进程复制全部字典）。
+
+        max_chars_per_second 给出时，训练目标的字数除以音频时长超过它的样本读取时跳过（与读不出的音频同样处理，
+        组批计划不变）。这样的目标说不完：对齐错位、录音被截短或 ASR 重复输出，最长的一条 6.8 秒配 5,477 字，
+        会让一批的序列长到超出显存。
+        """
+        self.max_chars_per_second = max_chars_per_second
         self.target = target
         targets = [target_text(row = row, target = target) for row in rows]
         self.empty = [text == "" for text in targets]
@@ -260,6 +267,10 @@ class TranscriptionDataset(torch.utils.data.Dataset):
             row, target = self.rows.record(index = index)
         else:
             row, target = self.rows[index], self.targets[index]
+        if self.max_chars_per_second is not None and len(target) > self.max_chars_per_second * float(row["duration_s"]):
+            rate = len(target) / max(float(row["duration_s"]), 1e-3)
+            print(f"[bad-target] {row['sample_id']}: {len(target)} 字 / {row['duration_s']} 秒 = {rate:.0f} 字每秒", file = sys.stderr, flush = True)
+            return None
         try:
             if row.get("offset_s") is not None:
                 # 虚拟切分的片段：只解码整段文件中的这一段

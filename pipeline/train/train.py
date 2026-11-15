@@ -122,6 +122,15 @@ def parse_args(argv = None):
         default = None,
         help = "丢弃更长的样本",
     )
+    # 默认 40（用户 2026-11-15 决定）：v2b 清单中超过每秒 40 字的只有 136 条（0.14 小时），抽查都是对齐错位、
+    # 录音被截短或 ASR 重复输出，最长的会让一批超出显存。读取时跳过，组批计划不变，所以不列入 RESUME_KEYS，
+    # 正在进行的训练可以带着它续训。设为 0 不跳过。
+    parser.add_argument(
+        "--max-target-chars-per-second",
+        type = float,
+        default = 40.0,
+        help = "训练目标字数除以音频时长超过它的样本读取时跳过；0 表示不跳过",
+    )
     parser.add_argument(
         "--batch-size",
         type = int,
@@ -508,6 +517,7 @@ def main(argv = None):
         mixer = mixer,
         seed = args.seed,
         storage = output_dir / "dataset" / "rows.jsonl.bin",
+        max_chars_per_second = args.max_target_chars_per_second or None,
     )
     weights = sample_weights(
         rows = rows,
