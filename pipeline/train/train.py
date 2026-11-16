@@ -21,7 +21,8 @@
 抽样和混音的随机数都只由 --seed、轮次和样本在本轮中的位置决定，断点续训与不中断的训练得到相同的批次。
 
 断点续训：加 --resume，从 <输出目录>/latest 指向的检查点继续。--stop-after-minutes 到时保存并退出，
-收到 SIGTERM 或 Ctrl-C 时也在当前一步结束后保存并退出，便于分段占用 GPU。退出码 0 表示已训练到
+--stop-at-step 训练到指定步数时保存并退出（学习率日程仍按 --epochs 或 --max-steps 的完整长度计算，
+用于只跑完整训练的前一段、以后再接着训），收到 SIGTERM 或 Ctrl-C 时也在当前一步结束后保存并退出，便于分段占用 GPU。退出码 0 表示已训练到
 最后一步，退出码 75 表示中途停止、可以用 --resume 继续。
 
 进度：每 --log-every 步打印一行并追加到 <输出目录>/train_log.jsonl，<输出目录>/progress.json 随时反映
@@ -257,6 +258,12 @@ def parse_args(argv = None):
         default = None,
         help = "训练这么多分钟后保存并退出",
     )
+    parser.add_argument(
+        "--stop-at-step",
+        type = int,
+        default = None,
+        help = "训练到这一步时保存并退出；学习率日程不变，之后可以用 --resume 接着训",
+    )
     parser.add_argument("--no-frozen-check", action = "store_true", help = "跳过冻结参数前后一致的检查")
     parser.add_argument("--deterministic", action = "store_true", help = "使用确定性算法，同样的配置逐位复现")
     add_optimize_arguments(parser = parser)
@@ -460,7 +467,7 @@ def main(argv = None):
     output_dir.mkdir(parents = True, exist_ok = True)
     config = {
         key: value for key, value in vars(args).items()
-        if key not in ("resume", "stop_after_minutes")
+        if key not in ("resume", "stop_after_minutes", "stop_at_step")
     }
     weight_rules = parse_weight_rules(specs = args.sample_weight)
     category_weights = parse_category_weights(specs = args.noise_category_weight)
@@ -890,11 +897,14 @@ def main(argv = None):
                 args.stop_after_minutes is not None
                 and time.perf_counter() - run_start > args.stop_after_minutes * 60
             )
-            if (stop["reason"] or timed_out) and step < total_steps:
+            reached = args.stop_at_step is not None and step >= args.stop_at_step
+            if (stop["reason"] or timed_out or reached) and step < total_steps:
                 if last_saved != step:
                     save(step = step)
-                print(f"在第 {step} 步停止（{stop['reason'] or '达到时限'}），用 --resume 继续。", flush = True)
-                progress.write(step = step, status = "stopped", stop_reason = stop["reason"] or "time limit")
+                reason = stop["reason"] or ("time limit" if timed_out else "stop step")
+                label = stop["reason"] or ("达到时限" if timed_out else "达到指定步数")
+                print(f"在第 {step} 步停止（{label}），用 --resume 继续。", flush = True)
+                progress.write(step = step, status = "stopped", stop_reason = reason)
                 return EXIT_STOPPED
 
         if eval_loader is not None and (last_eval is None or last_eval["step"] != step):
