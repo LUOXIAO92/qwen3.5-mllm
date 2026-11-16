@@ -70,10 +70,12 @@ def end_label(axis, points: list, text: str, color: str, offset: float = 0.0) ->
 
 
 def loss_top(series: list) -> float:
-    """损失纵轴的上限：去掉开头 2% 的训练记录（随机初始化的 projector 起步时损失很高，会把其余部分压扁）后取最大值，再留 15% 余量。"""
-    values = []
-    for points in series:
-        values += [value for _, value in points[len(points) // 50:]]
+    """损失纵轴的上限：去掉开头的训练记录（随机初始化的 projector 起步时损失很高，会把其余部分压扁）后取最大值，再留 15% 余量。
+
+    开头按步数截：所有曲线中最长一条的步数的 2%。按每条曲线自己的条数截时，还在训练中的短曲线截掉的步数太少。
+    """
+    start = max(points[-1][0] for points in series if points) * 0.02
+    values = [value for points in series for step, value in points if step >= start]
     return max(values) * 1.15
 
 
