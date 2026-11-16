@@ -11,6 +11,10 @@ eval_log.jsonl（每 --eval-every 步一行：FLEURS dev 上的总体损失与�
 
     python -m pipeline.train.plot_curves --run v2a=<输出目录> --out <图片路径> [--title 标题]
     python -m pipeline.train.plot_curves --run 0.8B=<目录> --run 2B=<目录> --run 4B=<目录> --out <图片路径>
+    python -m pipeline.train.plot_curves --run 3e-3=<目录> --run 1e-3=<目录> --max-step 32000 --ylim-from-step 4000 --out <图片路径>
+
+--max-step 只画到这一步（比较只跑了一段的运行）；--ylim-from-step 计算损失纵轴上限时忽略这一步之前的点，
+默认是最长那条曲线步数的 2%。纵轴截掉的部分在图中注明。
 """
 
 import argparse
@@ -69,24 +73,26 @@ def end_label(axis, points: list, text: str, color: str, offset: float = 0.0) ->
     )
 
 
-def loss_top(series: list) -> float:
-    """损失纵轴的上限：去掉开头的训练记录（随机初始化的 projector 起步时损失很高，会把其余部分压扁）后取最大值，再留 15% 余量。
+def loss_top(series: list, start: float = None) -> float:
+    """损失纵轴的上限：去掉开头的记录（随机初始化的 projector 起步时损失很高，会把其余部分压扁）后取最大值，再留 15% 余量。
 
-    开头按步数截：所有曲线中最长一条的步数的 2%。按每条曲线自己的条数截时，还在训练中的短曲线截掉的步数太少。
+    开头按步数截：默认是所有曲线中最长一条的步数的 2%（按每条曲线自己的条数截时，还在训练中的短曲线截掉的步数太少），
+    也可以用 start 指定。
     """
-    start = max(points[-1][0] for points in series if points) * 0.02
+    if start is None:
+        start = max(points[-1][0] for points in series if points) * 0.02
     values = [value for points in series for step, value in points if step >= start]
     return max(values) * 1.15
 
 
-def clip_note(axis, series: list, top: float) -> None:
-    """训练损失有超出纵轴的部分时，在左上角注明被截掉的步数范围和起始值。"""
+def clip_note(axis, series: list, top: float, what: str = "训练损失") -> None:
+    """损失有超出纵轴的部分时，在左上角注明被截掉的步数范围和起始值。"""
     above = [(step, value) for points in series for step, value in points if value > top]
     if above:
         axis.text(
             x = 0.01,
             y = 0.98,
-            s = f"纵轴截至 {top:.2f}：前 {max(step for step, _ in above):,} 步的训练损失（最高 {max(value for _, value in above):.2f}）超出范围",
+            s = f"纵轴截至 {top:.2f}：前 {max(step for step, _ in above):,} 步的{what}（最高 {max(value for _, value in above):.2f}）超出范围",
             transform = axis.transAxes,
             va = "top",
             fontsize = 8.5,
@@ -94,7 +100,7 @@ def clip_note(axis, series: list, top: float) -> None:
         )
 
 
-def plot(runs: dict, out: Path, title: str) -> None:
+def plot(runs: dict, out: Path, title: str, ylim_from_step: int = None) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -121,7 +127,7 @@ def plot(runs: dict, out: Path, title: str) -> None:
         end_label(axis = loss_axis, points = data["train"], text = "训练", color = SERIES[0], offset = -8)
         end_label(axis = loss_axis, points = data["dev"], text = "验证", color = SERIES[1], offset = 8)
         style(axis = loss_axis, ylabel = "每 token 交叉熵")
-        top = loss_top(series = [data["train"], data["dev"]])
+        top = loss_top(series = [data["train"], data["dev"]], start = ylim_from_step)
         loss_axis.set_ylim(bottom = min(value for _, value in data["train"] + data["dev"]) * 0.9, top = top)
         clip_note(axis = loss_axis, series = [data["train"]], top = top)
         loss_axis.legend(loc = "upper right", frameon = False, fontsize = 9, labelcolor = TEXT_PRIMARY)
@@ -142,9 +148,16 @@ def plot(runs: dict, out: Path, title: str) -> None:
         style(axis = train_axis, ylabel = "训练损失")
         trains = [data["train"] for data in runs.values() if data["train"]]
         if trains:
-            top = loss_top(series = trains)
+            top = loss_top(series = trains, start = ylim_from_step)
             train_axis.set_ylim(bottom = min(value for points in trains for _, value in points) * 0.9, top = top)
             clip_note(axis = train_axis, series = trains, top = top)
+        devs = [data["dev"] for data in runs.values() if data["dev"]]
+        if devs:
+            top = loss_top(series = devs, start = ylim_from_step)
+            # 只在有验证损失超出上限时才截纵轴，其余情况沿用自动范围
+            if max(value for points in devs for _, value in points) > top:
+                dev_axis.set_ylim(bottom = min(value for points in devs for _, value in points) * 0.95, top = top)
+                clip_note(axis = dev_axis, series = devs, top = top, what = "验证损失")
         style(axis = dev_axis, ylabel = "验证损失（FLEURS dev）")
         style(axis = lr_axis, ylabel = "学习率")
         train_axis.legend(loc = "upper right", frameon = False, fontsize = 9, labelcolor = TEXT_PRIMARY)
@@ -161,12 +174,17 @@ def main() -> None:
     parser.add_argument("--run", action = "append", required = True, help = "名称=训练输出目录，可重复")
     parser.add_argument("--out", required = True, type = Path)
     parser.add_argument("--title", default = "训练损失与验证损失")
+    parser.add_argument("--max-step", type = int, default = None, help = "只画到这一步")
+    parser.add_argument("--ylim-from-step", type = int, default = None, help = "计算损失纵轴上限时忽略这一步之前的点")
     args = parser.parse_args()
     runs = {}
     for item in args.run:
         name, _, directory = item.partition("=")
-        runs[name] = load_run(directory = Path(directory))
-    plot(runs = runs, out = args.out, title = args.title)
+        data = load_run(directory = Path(directory))
+        if args.max_step is not None:
+            data = {key: [(step, value) for step, value in points if step <= args.max_step] for key, points in data.items()}
+        runs[name] = data
+    plot(runs = runs, out = args.out, title = args.title, ylim_from_step = args.ylim_from_step)
     for name, data in runs.items():
         last_dev = data["dev"][-1] if data["dev"] else None
         print(f"{name}: 训练记录 {len(data['train'])} 行，验证 {len(data['dev'])} 次，最后的验证损失 {last_dev}")
