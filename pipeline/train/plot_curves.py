@@ -13,7 +13,7 @@ eval_log.jsonl（每 --eval-every 步一行：FLEURS dev 上的总体损失与�
     python -m pipeline.train.plot_curves --run 0.8B=<目录> --run 2B=<目录> --run 4B=<目录> --out <图片路径>
     python -m pipeline.train.plot_curves --run 3e-3=<目录> --run 1e-3=<目录> --max-step 32000 --ylim-from-step 4000 --out <图片路径>
 
---max-step 只画到这一步（比较只跑了一段的运行）；--ylim-from-step 计算损失纵轴上限时忽略这一步之前的点，
+--min-step、--max-step 只画这一段步数（如去掉起步阶段、比较只跑了一段的运行）；--ylim-from-step 计算损失纵轴上限时忽略这一步之前的点，
 默认是最长那条曲线步数的 2%。纵轴截掉的部分在图中注明。
 """
 
@@ -174,6 +174,7 @@ def main() -> None:
     parser.add_argument("--run", action = "append", required = True, help = "名称=训练输出目录，可重复")
     parser.add_argument("--out", required = True, type = Path)
     parser.add_argument("--title", default = "训练损失与验证损失")
+    parser.add_argument("--min-step", type = int, default = None, help = "从这一步开始画")
     parser.add_argument("--max-step", type = int, default = None, help = "只画到这一步")
     parser.add_argument("--ylim-from-step", type = int, default = None, help = "计算损失纵轴上限时忽略这一步之前的点")
     args = parser.parse_args()
@@ -181,8 +182,9 @@ def main() -> None:
     for item in args.run:
         name, _, directory = item.partition("=")
         data = load_run(directory = Path(directory))
-        if args.max_step is not None:
-            data = {key: [(step, value) for step, value in points if step <= args.max_step] for key, points in data.items()}
+        low = args.min_step if args.min_step is not None else float("-inf")
+        high = args.max_step if args.max_step is not None else float("inf")
+        data = {key: [(step, value) for step, value in points if low <= step <= high] for key, points in data.items()}
         runs[name] = data
     plot(runs = runs, out = args.out, title = args.title, ylim_from_step = args.ylim_from_step)
     for name, data in runs.items():
