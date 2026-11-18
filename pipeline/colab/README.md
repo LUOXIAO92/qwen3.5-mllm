@@ -351,7 +351,16 @@ nohup python3 -m pipeline.colab.monitor --output-dir "$OUT" \
     > "$WORK_DIR/monitor.log" 2>&1 &
 ```
 
-在另一个 notebook（CPU 运行时即可）里挂载 Drive 后，这个单元格每分钟刷新一次显示：
+加上 `--upload gs://<存储桶>/runs/<运行名>/monitor` 时，每次写完把这两个文件上传到存储桶，本机用 `gcloud storage cat gs://.../status.json` 随时可读，浏览器标签页关闭后也能看到训练状况。在浏览器中的 notebook 里先运行一次下面的授权单元格（弹窗中点同意），Colab 的 gcloud 才能写存储桶：
+
+```python
+from google.colab import auth
+auth.authenticate_user()
+```
+
+训练结束后释放运行时，避免空转计费：训练单元格最后先 `drive.flush_and_unmount()` 把输出目录写回 Drive，再 `google.colab.runtime.unassign()`。
+
+只在 Drive 上看时，在另一个 notebook（CPU 运行时即可）里挂载 Drive 后，这个单元格每分钟刷新一次显示：
 
 ```python
 import time

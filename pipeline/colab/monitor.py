@@ -6,6 +6,10 @@ nvidia-smi，写出 <输出目录>/monitor/dashboard.png 和 status.json。输�
 直接打开这张图，或在任意 notebook 中挂载 Drive 后显示它（见 README）。训练结束（本程序启动后 progress.json
 变为 finished、stopped 或 failed）后再写一次就退出。
 
+--upload gs://<存储桶>/<前缀> 时，每次写完再用 gcloud 把这两个文件上传到存储桶，本机可以随时用 gcloud 读取，
+浏览器标签页关闭、连接断开时也能看到训练状况。上传失败只记日志，不影响训练。浏览器中的 notebook 先运行
+google.colab.auth.authenticate_user() 授权，Colab 的 gcloud 就能写存储桶。
+
 只用 Python 标准库和 matplotlib，用 Colab 自带的 python3 运行，不需要训练环境。图中文字用英文：Colab 默认没有中文字体。
 
 用法::
@@ -210,6 +214,21 @@ def write_status(path, summary):
     os.replace(tmp, path)
 
 
+def upload(files, prefix):
+    """把几个文件上传到 gs://存储桶/前缀/；失败时打印原因后继续。"""
+    try:
+        result = subprocess.run(
+            ["gcloud", "storage", "cp", *[str(path) for path in files], prefix.rstrip("/") + "/", "--quiet"],
+            capture_output = True,
+            text = True,
+            timeout = 120,
+        )
+        if result.returncode != 0:
+            print(f"[monitor] 上传失败：{result.stderr.strip()[-300:]}", flush = True)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"[monitor] 上传失败：{error}", flush = True)
+
+
 def main():
     parser = argparse.ArgumentParser(description = "训练监控：定时写出进度图和状态摘要")
     parser.add_argument("--output-dir", required = True, type = Path, help = "训练输出目录（progress.json 等所在）")
@@ -218,6 +237,7 @@ def main():
     parser.add_argument("--dest", default = None, type = Path, help = "写出目录，默认 <输出目录>/monitor")
     parser.add_argument("--interval", type = float, default = 120.0, help = "两次刷新之间的秒数")
     parser.add_argument("--once", action = "store_true", help = "只写一次就退出")
+    parser.add_argument("--upload", default = None, help = "每次写完后上传到这里，例如 gs://<存储桶>/runs/<运行名>/monitor")
     args = parser.parse_args()
     dest = args.dest or args.output_dir / "monitor"
     dest.mkdir(parents = True, exist_ok = True)
@@ -243,6 +263,8 @@ def main():
             gpu_history = gpu_history,
         )
         write_status(path = dest / "status.json", summary = summary)
+        if args.upload:
+            upload(files = [dest / "dashboard.png", dest / "status.json"], prefix = args.upload)
         # 续训开始前 progress.json 还是上一段的 stopped，只有在本程序启动之后写入的结束状态才算训练结束
         ended = summary["status"] in ("finished", "stopped", "failed") and progress_path.exists() and progress_path.stat().st_mtime > started
         if args.once or ended:
