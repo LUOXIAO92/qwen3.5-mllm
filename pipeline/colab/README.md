@@ -1,0 +1,339 @@
+# 在 Google Colab 上训练 projector（任务 C1）
+
+本目录让 `pipeline/train/train.py` 能在 Google Colab 上训练，并且能接着本机已经开始的训练续训。难点在训练音频：v2b 的训练清单引用约 480 万个 FLAC 文件，共 614 GB。Colab 的本地磁盘只有根目录 `/` 可写（236 GB），`/kaggle/input` 是只读的；Google Drive 容量够，但几百万个小文件的上传、列目录、打开和随机读取都很慢。
+
+做法是把训练音频打包成约 1 GB 一个的 tar 文件（分片）放在 Drive 上。FLAC 文件的字节原样写进 tar，不重新编码、不截断，读出的字节与原文件逐字节相同。分片按训练计划排列：训练计划只由训练配置决定，每一步读哪些文件可以提前算出。这一轮中读取不止一次的文件（被加权多抽的无人声片段、虚拟切分后几段共用的整段录音，约 48 GB）放进常驻分片，每次开始训练前整体复制到本地；其余只读一次的文件按读取它的步数排进顺序分片。训练期间后台的窗口管理程序按训练进度，把接下来要用的顺序分片从 Drive 整个顺序复制到本地，用过的删掉，本地只保留一段滚动窗口。训练程序按索引中记录的位置一次读出一个文件的字节，再交给 torchcodec 解码，结果与直接解码原文件相同。分片格式的细节见 `pipeline/train/shards.py`。
+
+分片也可以按路径排列（`--order path`），供随机读取的存储使用，例如用 gcsfuse 挂载的 Google Cloud Storage 存储桶，见第 5 节。
+
+| 文件 | 用途 |
+| --- | --- |
+| `pack_shards.py` | 本机：按训练计划生成索引、分批打包分片、核对、列出分片文件名 |
+| `bundle.py` | 本机：把背景声列表、dev 清单连同音频打成 tar，在 Colab 上解开后路径仍然有效 |
+| `setup.sh`、`requirements-train.txt` | Colab：建立训练环境，放回训练清单、背景声、dev 清单和模型 |
+| `shard_window.py` | Colab：开始训练前复制常驻分片和起点附近的顺序分片，训练期间在后台维护窗口 |
+| `bench_storage.py` | Colab：比较 Drive、存储桶和本地磁盘的顺序复制与随机读取速度 |
+
+下文的 `<工作目录>` 是本机的工作目录（环境变量 `WORK_DIR`），`$DATASET` 是本机的数据集目录。命令都在仓库根目录运行，本机用 `<工作目录>/envs/mllm-train/bin/python`。
+
+## 1. 本机：生成索引和分片
+
+### 1.1 索引
+
+索引记录每个音频文件在哪个分片、从第几个字节开始、多长。生成索引只读清单、算训练计划、取文件大小，不写分片。训练配置直接取要续训的那次训练的 `train_config.json`，例如 4B：
+
+```bash
+python -m pipeline.colab.pack_shards index \
+    --out-dir <分片目录>/v2b-e0 \
+    --run-config <工作目录>/data/T62/v2b-4b/train_config.json
+```
+
+训练计划用训练程序自己的函数算出（读清单、选训练目标、抽样权重、按时长分批），所以与训练时一致；索引中记下这些配置和按读取顺序算出的摘要，`train.py` 开始时重新算一遍核对，不一致就不开始训练。v2b 的结果见 1.5 节。还没有开始的训练可以在 `--` 之后写出与 `run.sh` 相同的参数代替 `--run-config`。
+
+索引写出后，各分片的内容就固定了。之后改动训练清单或训练配置，需要重新生成索引和全部分片。
+
+### 1.2 速度测试用的索引
+
+速度测试从第 30,000 步的检查点续训到第 40,000 步（第 3 节）。这段步数单独生成一个索引，与完整索引放在同一个目录：
+
+```bash
+python -m pipeline.colab.pack_shards index \
+    --out-dir <分片目录>/v2b-e0 \
+    --name index-30000-40000 \
+    --steps 30000-40000 \
+    --run-config <工作目录>/data/T62/v2b-4b/train_config.json
+```
+
+它的顺序分片与完整索引的同名分片逐字节相同，测试时上传的顺序分片以后正式训练可以直接用；常驻分片只含这段步数用到的文件，文件名带步数范围（`pool-30000-40000-*.tar`），与完整的常驻分片不冲突。
+
+### 1.3 分批打包、核对、上传
+
+本机磁盘放不下全部分片时分批生成：每批按编号范围生成约 100 个（约 100 GB），核对后上传，再删除本地副本。已经完整的分片（大小与索引一致）会跳过，中断后重新运行同一条命令即可。
+
+```bash
+# 速度测试用的分片：这段步数的常驻分片和顺序分片
+python -m pipeline.colab.pack_shards pack --index <分片目录>/v2b-e0/index-30000-40000.json --pool --steps 30000-40000
+# 完整的常驻分片，再按编号分批生成顺序分片
+python -m pipeline.colab.pack_shards pack --index <分片目录>/v2b-e0/index.json --pool
+python -m pipeline.colab.pack_shards pack --index <分片目录>/v2b-e0/index.json --shards 49-148
+# 核对：tar 成员表与索引一致，随机抽查 500 个成员与原文件逐字节相同
+python -m pipeline.colab.pack_shards verify --index <分片目录>/v2b-e0/index.json --samples 500
+# 查看本机和 Drive 上各有哪些完整的分片
+python -m pipeline.colab.pack_shards status --index <分片目录>/v2b-e0/index.json --dirs <分片目录>/v2b-e0
+```
+
+本机实测（v2b 中连续 4,000 个 Common Voice 文件，8 个读取线程，训练同时在读同一块磁盘）每秒约 180 MB、2,700 个文件，按这个速度打包全部分片约需 1 小时，主要时间花在上传。每个文件在 tar 中多占约 1 KB（头和补齐到 512 字节），v2b 全部分片比原文件多 0.6%。
+
+索引文件（`index.json`、`index.tsv.gz`，速度测试的是 `index-30000-40000.*`）和全部分片上传到 Drive 上的同一个目录，下文写作 `$SHARDS_DRIVE`。分片是标准 tar，索引丢失时也能用 `tar -tvf` 列出、用 `tar -xf` 解开。
+
+### 1.4 其他要上传的文件
+
+```bash
+# 训练清单：压缩后上传，Colab 上解压回与本机相同的路径
+gzip -c $DATASET/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl > manifest-v2b.jsonl.gz
+# 背景声：列表和它引用的音频（约 9 GB），路径相对 $DATASET
+python -m pipeline.colab.bundle \
+    --manifest $DATASET/audio/qwen3.5-asr/nonspeech/v2/background.jsonl \
+    --root $DATASET \
+    --output noise-v2.tar
+# dev 清单和 FLEURS dev 音频（约 1.2 GB），路径相对工作目录；清单中的路径改写为相对清单所在目录
+python -m pipeline.colab.bundle \
+    --manifest <工作目录>/data/T10/fleurs_dev.jsonl \
+    --root <工作目录> \
+    --output fleurs-dev.tar
+```
+
+Drive 上的目录（`$DRIVE_DIR` 是 Drive 上本项目的目录）：
+
+| 位置 | 内容 |
+| --- | --- |
+| `$DRIVE_DIR/upload/manifest-v2b.jsonl.gz` | 训练清单 |
+| `$DRIVE_DIR/upload/noise-v2.tar` | 背景声 |
+| `$DRIVE_DIR/upload/fleurs-dev.tar` | dev 清单与音频 |
+| `$DRIVE_DIR/upload/qwen3.5-4b-mllm/` | 融合模型目录（仓库中没有，约 9.8 GB） |
+| `$DRIVE_DIR/shards/v2b-e0/` | 索引和全部分片（`$SHARDS_DRIVE`） |
+| `$DRIVE_DIR/runs/v2b-4b/` | 训练输出目录：本机训练的输出目录复制过来，不含 `dataset/` |
+| `$DRIVE_DIR/wheels/` | 安装包缓存，第一次运行 `setup.sh` 时生成 |
+
+要续训本机的训练，先在本机停下训练（训练程序收到 SIGTERM 时保存检查点后退出），再把它的输出目录上传到 `$DRIVE_DIR/runs/v2b-4b/`。`dataset/` 子目录是清单行的缓存（约 1.4 GB），每次开始训练时重新生成，不需要上传。
+
+### 1.5 v2b 的数字
+
+按 4B 训练的 `train_config.json`（每批 16 条、每批 360 秒、30 秒以内、种子 1234、空目标 3%）生成的索引：
+
+| 项目 | 数值 |
+| --- | --- |
+| 清单行数 / 这一轮的读取次数 | 4,886,954 / 5,001,574 |
+| 读到的文件 | 4,795,603 个，原文件共 613.64 GB，打包后 617.39 GB |
+| 步数 | 第 0–317,482 步 |
+| 常驻分片（编号 0–48） | 49 个，118,339 个文件，48.31 GB |
+| 顺序分片（编号 49–618） | 570 个，4,677,264 个文件，569.07 GB；每个分片中位数服务 558 步，每步约 1.79 MB |
+| 接下来 31,600 步的顺序分片 | 约 56.6 GB |
+| 速度测试的第 30,000–40,000 步 | 顺序分片 `stream-00053.tar`–`stream-00071.tar`（编号 102–120，19 个，19.00 GB），常驻分片 `pool-30000-40000-*.tar`（4 个，9,748 个文件，3.69 GB），共 22.69 GB |
+| 生成索引的耗时与内存 | 约 6 分钟，峰值 14 GB；索引文件 `index.tsv.gz` 约 100 MB |
+
+读取不止一次的文件中，无人声片段 35,386 个、9.59 GB（按 3% 的占比被多抽，平均每个读约 4.2 次），虚拟切分后几段共用的整段录音 82,953 个、38.63 GB（同一段录音的几段在不同的步数读取）。
+
+## 2. Colab 单元格
+
+运行时选 GPU（RTX PRO 6000 Blackwell 96 GB 或其他），依次运行下面的单元格。每个新会话都从第 1 个单元格开始：本地磁盘在会话结束时清空，环境和本地分片都要重建。
+
+**单元格 1：挂载 Google Drive。**
+
+```python
+from google.colab import drive
+drive.mount("/content/drive")
+```
+
+**单元格 2：设置路径。** `DATASET` 必须与本机的 `$DATASET` 完全相同：训练清单和背景声列表要放回与本机相同的路径，`train.py` 续训时按路径字符串核对它们。Colab 以 root 运行，可以建立任意目录。
+
+```python
+import os
+
+os.environ["DRIVE_DIR"] = "/content/drive/MyDrive/qwen3.5-asr"
+os.environ["DATASET"] = "<与本机相同的 $DATASET 路径>"
+os.environ["WORK_DIR"] = "/content/work"
+os.environ["REPO"] = "/content/qwen3.5-asr"
+os.environ["SHARDS_DRIVE"] = os.environ["DRIVE_DIR"] + "/shards/v2b-e0"
+os.environ["SHARDS_LOCAL"] = "/content/shards"
+os.environ["INDEX"] = os.environ["SHARDS_DRIVE"] + "/index.json"
+os.environ["OUT"] = os.environ["DRIVE_DIR"] + "/runs/v2b-4b"
+os.environ["PY"] = os.environ["WORK_DIR"] + "/envs/mllm-train/bin/python"
+```
+
+**单元格 3：取得代码。**
+
+```bash
+%%bash
+git clone -b exp/v2 https://github.com/LUOXIAO92/qwen3.5-mllm "$REPO"
+```
+
+**单元格 4：建立环境，放回训练要读的小文件。** `setup.sh` 用 Colab 的 Python 3.13 在 `$WORK_DIR/envs/mllm-train` 建立虚拟环境（`run.sh` 固定使用这个位置），按 `requirements-train.txt` 安装与本机相同版本的包；第一次运行时把安装包缓存到 `$DRIVE_DIR/wheels/`，以后从缓存安装。接着解压训练清单、解开背景声和 dev 清单、复制模型。每一步完成后留下标记，同一个会话中重复运行会跳过已完成的步骤。
+
+```bash
+%%bash
+bash "$REPO/pipeline/colab/setup.sh"
+```
+
+**单元格 5：复制开始训练所需的分片。** 复制全部常驻分片，以及从续训起点（输出目录中最近的检查点）开始 2,000 步的顺序分片，复制完才结束。完整的常驻分片约 48 GB，Drive 的复制速度见窗口程序打出的 MB/s。
+
+```bash
+%%bash
+cd "$REPO"
+"$PY" -m pipeline.colab.shard_window prepare \
+    --index "$INDEX" \
+    --source "$SHARDS_DRIVE" \
+    --pool-dir "$SHARDS_LOCAL/pool" \
+    --window-dir "$SHARDS_LOCAL/window" \
+    --output-dir "$OUT"
+```
+
+**单元格 6：在后台维护窗口。** 第一优先是常驻分片和接下来 `--ahead-steps` 步（默认 31,600 步，每步 16 条时约 50 万条样本、约 56 GB）的顺序分片；这些都在本地后，在 `--disk-budget-gb`（常驻与窗口合计）之内继续按步数顺序预取。第一优先还缺分片时不做第二优先的预取。顺序分片只在它的最后一步早于最近的检查点、也早于当前步数减 `--margin-steps`（默认 500）时删除，训练中途重启时从检查点续训要用的数据都还在。日志每次复制、删除各一行，每 5 分钟一行状态，其中「领先」是本地连续可用的数据比训练进度多出的步数。训练完成（`progress.json` 为 `finished`）后程序自己退出。
+
+```bash
+%%bash
+cd "$REPO"
+nohup "$PY" -m pipeline.colab.shard_window run \
+    --index "$INDEX" \
+    --source "$SHARDS_DRIVE" \
+    --pool-dir "$SHARDS_LOCAL/pool" \
+    --window-dir "$SHARDS_LOCAL/window" \
+    --output-dir "$OUT" \
+    --ahead-steps 31600 \
+    --disk-budget-gb 150 \
+    > "$WORK_DIR/shard_window.log" 2>&1 &
+```
+
+本地磁盘的分配大约是：模型 10 GB、虚拟环境约 8 GB、背景声 9 GB、训练清单 4 GB、清单行缓存 1.4 GB、dev 音频 1.2 GB，分片 150 GB（常驻 48 GB、第一优先约 56 GB、其余为预取），剩余约 50 GB。
+
+**单元格 7：训练。** 设置与本机的 v2b 训练相同（`run.sh` 的默认值加 `<工作目录>/data/T53/train_v2b.sh` 中的 `--epochs 1 --warmup-steps 12000 --eval-every 5000 --save-every 2500` 和背景声），另加从分片读取音频的几项。这几项和 `--num-workers`、`--model-dir`、`--output-dir` 都不影响批次，不在续训核对的配置中，本机开始的训练可以加上它们续训。
+
+```bash
+%%bash
+cd "$REPO"
+pipeline/train/run.sh "$DATASET/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl" original "$OUT" \
+    --model-dir "$REPO/qwen3.5-4b-mllm" \
+    --epochs 1 \
+    --warmup-steps 12000 \
+    --eval-every 5000 \
+    --save-every 2500 \
+    --noise-manifest "$DATASET/audio/qwen3.5-asr/nonspeech/v2/background.jsonl" \
+    --audio-shards "$INDEX" \
+    --audio-shard-dirs "$SHARDS_LOCAL/window:$SHARDS_LOCAL/pool" \
+    --audio-shard-fallback "$SHARDS_DRIVE" \
+    --rows-cache-dir "$WORK_DIR/rows/v2b-4b" \
+    --num-workers 16 \
+    --stop-after-minutes 1260 \
+    2>&1 | tee -a "$WORK_DIR/train.log"
+```
+
+- `--audio-shard-dirs` 是本地查找分片的目录，依次是窗口目录和常驻目录。本地没有某个分片时到 `--audio-shard-fallback`（Drive）读取，并在日志中记一行 `[shard-fallback]`；窗口程序跟得上时不应出现这样的行。
+- `--rows-cache-dir` 把清单行的缓存放在本地磁盘。输出目录在 Drive 上，缓存放在那里会让读取进程通过 Drive 访问它。
+- `--num-workers` 是数据读取进程数。机器有 48 个 vCPU，16 是起点，具体数值按速度测试中的 `audio_h_per_h` 调整。
+- `--stop-after-minutes 1260`（21 小时）让训练在 Colab 会话的 24 小时上限之前保存检查点并停下，下一个会话从单元格 1 开始，`run.sh` 默认 `--resume`，从最近的检查点续训。会话意外断开时最多损失 `--save-every` 的 2,500 步。
+- 96 GB 显存下 4B 每批 16 条、360 秒应当不需要梯度检查点，所以没有加本机用的 `--checkpoint-layers 24`。显存不够时训练程序会自己逐步打开梯度检查点并重试同一批，结果不变。
+
+**单元格 8：查看进度。**
+
+```bash
+%%bash
+tail -n 3 "$WORK_DIR/train.log"; tail -n 3 "$WORK_DIR/shard_window.log"
+grep -c shard-fallback "$WORK_DIR/train.log"; df -h / | tail -1
+```
+
+**单元格 9：结束会话前。** Drive 的写入在后台同步，结束会话前先把输出目录同步完。
+
+```python
+from google.colab import drive
+drive.flush_and_unmount()
+```
+
+## 3. 速度测试（第 30,000–40,000 步）
+
+用 1.2 节的索引从第 30,000 步的检查点续训到第 40,000 步，比较 Colab 与本机的速度，确认分片读取和窗口程序没有拖慢训练。
+
+1. 本机按 1.2、1.3 节生成并上传 `index-30000-40000.*`、`pool-30000-40000-*.tar` 和第 30,000–40,000 步的顺序分片（`pack_shards list --index ... --pool --steps 30000-40000` 列出文件名），共 23 个分片、22.69 GB。
+2. 准备一个测试用的输出目录，例如 `$DRIVE_DIR/runs/speed-30000/`：放入本机训练的 `train_config.json`、含 `trainer_state.pt` 的 `checkpoint-0030000/`，以及内容为 `checkpoint-0030000` 的 `latest` 文件。
+3. 在 Colab 上把单元格 2 的 `INDEX` 改为 `$SHARDS_DRIVE/index-30000-40000.json`、`OUT` 改为测试目录，依次运行单元格 3–6，单元格 7 再加 `--stop-at-step 40000`。
+4. 比较测试目录的 `train_log.jsonl` 与本机同一段步数的 `audio_h_per_h`（每墙钟小时处理的音频小时数）。训练日志中不应有 `[shard-fallback]` 和 `[bad-audio]`；窗口日志中的「领先」应保持为正。速度不如预期时再试不同的 `--num-workers`。
+
+`--steps` 之外的样本不在这个索引中，读到时按 `[bad-audio]` 跳过，所以测试必须停在第 40,000 步；训练开始时会打印索引覆盖的步数范围。
+
+## 4. 训练开始时的核对
+
+`train.py` 读到按训练计划排列的索引时，先核对索引记录的配置与本次训练的 `train_manifest`、`target`、`batch_size`、`max_batch_seconds`、`seed` 等决定训练计划的各项（`train.PLAN_KEYS`）相同，再按本次训练的计划重新算出读取顺序的摘要，与索引中的比较；任何一项不同都不开始训练。开始时还打印一行 `audio_shards` 概况：索引中有多少行、本地目录中常驻分片和顺序分片各有几个。
+
+## 5. 存储桶测试
+
+比较 Google Cloud Storage 存储桶（东京 `asia-northeast1` 和美国的一个区域）与 Drive 的读取速度和流量费用。按路径排列的分片（`pack_shards index --order path`）与训练计划无关，适合从挂载的存储桶随机读取；测试时直接用第 3 节的测试分片，读取方式相同。训练程序按位置读取，用 gcsfuse 挂载的存储桶就是 `--audio-shard-dirs` 中的又一个目录。项目编号和桶名都放在 Colab 的变量里，不写进仓库。
+
+1. **在 Colab 中登录，查看虚拟机所在的区域。**
+
+   ```python
+   from google.colab import auth
+   auth.authenticate_user()
+   import os
+   os.environ["GCP_PROJECT"] = "<项目 ID>"
+   os.environ["BUCKET_TOKYO"] = "<东京的桶名>"
+   os.environ["BUCKET_US"] = "<美国的桶名>"
+   ```
+
+   ```bash
+   %%bash
+   gcloud config set project "$GCP_PROJECT"
+   curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | sed 's|.*/||'
+   ```
+
+2. **先设预算提醒。** 在 Cloud 控制台的「结算 → 预算和提醒」中为这个项目建一个小额预算（例如 10 美元），阈值 50%、90%、100% 发邮件。
+
+3. **建两个存储桶**：东京一个，美国的选与虚拟机同一区域（或离它最近的区域）。加上标签，次日在结算报告中按标签区分两个桶。
+
+   ```bash
+   %%bash
+   gcloud storage buckets create "gs://$BUCKET_TOKYO" --location=asia-northeast1 --default-storage-class=STANDARD --uniform-bucket-level-access
+   gcloud storage buckets create "gs://$BUCKET_US" --location=<美国区域，例如 us-central1> --default-storage-class=STANDARD --uniform-bucket-level-access
+   gcloud storage buckets update "gs://$BUCKET_TOKYO" --update-labels=c1-test=tokyo
+   gcloud storage buckets update "gs://$BUCKET_US" --update-labels=c1-test=us
+   ```
+
+4. **在 Colab 中把同一批测试分片从 Drive 复制到两个桶。** 写入存储桶的流量不收费，在 Colab 中复制也省去从本机上传两次。只测 `bench_storage.py` 时用第 30,000–34,000 步就够（12 个分片、11.69 GB）；还要从存储桶跑第 3 节的训练速度测试时，把下面的 `30000-34000` 换成 `30000-40000`（23 个分片、22.69 GB）。
+
+   ```bash
+   %%bash
+   cd "$REPO"
+   TEST_INDEX="$SHARDS_DRIVE/index-30000-40000.json"
+   for bucket in "$BUCKET_TOKYO" "$BUCKET_US"; do
+     { ls "$SHARDS_DRIVE"/index-30000-40000.*
+       "$PY" -m pipeline.colab.pack_shards list --index "$TEST_INDEX" --pool --steps 30000-34000 --prefix "$SHARDS_DRIVE"
+     } | gcloud storage cp -I "gs://$bucket/shards/"
+   done
+   ```
+
+5. **安装 gcsfuse 并以只读方式挂载两个桶。** 不给 `--cache-dir` 时 gcsfuse 不在本地缓存整个文件，随机读取按字节范围向存储桶请求；元数据缓存不过期（`--metadata-cache-ttl-secs -1`），分片写入后不再改变。参数名以所装版本的 `gcsfuse --help` 为准。
+
+   ```bash
+   %%bash
+   echo "deb [signed-by=/usr/share/keyrings/cloud.google.asc] https://packages.cloud.google.com/apt gcsfuse-$(lsb_release -c -s) main" > /etc/apt/sources.list.d/gcsfuse.list
+   curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg > /usr/share/keyrings/cloud.google.asc
+   apt-get update -q && apt-get install -y -q gcsfuse
+   for bucket in "$BUCKET_TOKYO" "$BUCKET_US"; do
+     mkdir -p "/content/gcs/$bucket"
+     gcsfuse --implicit-dirs -o ro --metadata-cache-ttl-secs -1 --max-conns-per-host 100 "$bucket" "/content/gcs/$bucket"
+   done
+   ```
+
+6. **测速。** `bench_storage.py` 先打印虚拟机的可用区，再对每个位置测两项：顺序复制几个整分片（MB/s），以及多线程随机读取分片中的音频文件（每秒请求数、MB/s、延迟的 p50、p95、p99，加 `--decode` 时另给出解码耗时）。`--gs` 另用 `gcloud storage cp` 复制同样的分片做对照。每项结果打印一行 JSON，最后是一张表。本地的目录用单元格 5 复制下来的窗口目录。
+
+   ```bash
+   %%bash
+   cd "$REPO"
+   "$PY" -m pipeline.colab.bench_storage \
+       --index "$SHARDS_DRIVE/index-30000-40000.json" \
+       --dir drive="$SHARDS_DRIVE" \
+       --dir tokyo="/content/gcs/$BUCKET_TOKYO/shards" \
+       --dir us="/content/gcs/$BUCKET_US/shards" \
+       --dir local="$SHARDS_LOCAL/window" \
+       --gs tokyo="gs://$BUCKET_TOKYO/shards" \
+       --gs us="gs://$BUCKET_US/shards" \
+       --threads 16 \
+       --reads 2000 \
+       --decode | tee -a "$WORK_DIR/bench_storage.log"
+   ```
+
+   还可以按第 3 节的速度测试直接从存储桶训练：不运行窗口程序，`--audio-shard-dirs "/content/gcs/$BUCKET_TOKYO/shards"`，不加 `--audio-shard-fallback`，比较 `audio_h_per_h`。
+
+7. **次日查看费用。** 在「结算 → 报告」中按 SKU 分组、按标签 `c1-test` 筛选，看每个桶的网络出站（名称含 Data Transfer 或 Egress 的 SKU）和操作次数的费用。存储桶与虚拟机在同一区域时出站不收费，跨区域、跨洲按距离计费。
+
+8. **测完删除两个桶。**
+
+   ```bash
+   %%bash
+   gcloud storage rm --recursive "gs://$BUCKET_TOKYO" "gs://$BUCKET_US"
+   ```
+
+## 6. 注意事项
+
+- 一个分片目录只放一套索引生成的分片。同名的顺序分片来自不同的训练计划时内容不同，训练程序只按大小判断分片是否完整。
+- Colab 的 Python 是 3.13，本机是 3.14，包的版本相同。数据读取进程固定用 forkserver 启动（`train.WORKER_START_METHOD`，Python 3.14 的默认值），读取进程不继承主进程中几百万行清单字典。torchcodec 使用 Colab 系统的 FFmpeg，FLAC 是无损格式，解码结果与本机相同。
+- 输出目录在 Drive 上：每 2,500 步保存的检查点、`progress.json` 和日志都写到 Drive。训练程序只保留最近一个检查点的 `trainer_state.pt`，删掉的旧文件进入 Drive 的回收站并占用空间，需要时手动清空。
+- 窗口程序读 `$OUT/latest` 和 `$OUT/progress.json` 得知训练进度。换输出目录时，单元格 5、6、7 的 `$OUT` 要一致。

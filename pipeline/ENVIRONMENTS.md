@@ -367,6 +367,8 @@ uv pip install --python envs/mllm-train/bin/python --no-deps \
     "mm-assistant-mask @ git+https://github.com/LUOXIAO92/MultimodalAssistantMask@95e15d78b5e418e11164fa94a694ee850db4f9f7"
 ```
 
+在 Google Colab（Python 3.13）上训练时，用 `pipeline/colab/setup.sh` 按 `pipeline/colab/requirements-train.txt` 建立同名环境，包的版本与这里相同，见 `pipeline/colab/README.md`。
+
 ### 7.2 `envs/mllm-eval`
 
 使用者：真人语音评测（`pipeline/eval/run.sh`）。Python 3.14.7，叠加在 conda 环境上，额外安装 numpy 2.5.4、soundfile 0.14.0 和 opencc 1.4.2。opencc 让打分时的中文繁简转换与比对、朗读稿生成一致；没有安装时打分按单字表转换，并给出警告。

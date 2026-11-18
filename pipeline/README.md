@@ -111,3 +111,7 @@ python -m pipeline.eval.report --out-dir <报告目录> --nonspeech v1b-20k=<工
 结果目录的 summary.json 中 `nonspeech` 项即该指标；`report --nonspeech` 把多个模型并列成表。
 
 `run.sh` 取该次训练中 dev 损失最低的检查点，转写评测集并按语言打分；`report` 把多次评测汇总成表格。
+
+## 8. 在 Google Colab 上训练
+
+本机的训练可以在 Colab 上续训。训练音频按训练计划打包成约 1 GB 的 tar 分片上传到 Google Drive，Colab 上只在本地保留常驻分片和一段滚动窗口，训练程序按位置读出原始字节再解码（`--audio-shards`）。打包、上传、Colab 单元格和存储桶测试的步骤见 [colab/README.md](colab/README.md)。
