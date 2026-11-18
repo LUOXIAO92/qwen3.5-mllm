@@ -12,6 +12,9 @@ transformers 的 return_assistant_tokens_mask 按展开音频标记之前的字�
 
 训练时数据集按 sampling.SampleKey 取样本，给出背景声混音器时对语音样本实时混音（mixing.py），
 空目标样本不混音；按整数下标取样本时（dev 评估、标签核对）不混音。
+
+音频可以从分片读取（shards.py，Colab 训练用）：给出 ShardReader 时，数据集按清单行的 audio_shard =
+(分片编号, 数据起点, 长度) 读出这个文件的原始字节，再从字节解码，结果与直接解码 audio_path 指向的文件相同。
 """
 
 import json
@@ -100,6 +103,12 @@ def target_text(row, target):
     return text.strip()
 
 
+def training_targets(rows, target):
+    """返回 (各行的训练目标, 各行是否为空目标)。TranscriptionDataset 和分片打包（按训练计划排列音频）共用。"""
+    targets = [target_text(row = row, target = target) for row in rows]
+    return targets, [text == "" for text in targets]
+
+
 def read_manifest(
     path,
     audio_root = None,
@@ -131,12 +140,20 @@ def read_manifest(
     return rows
 
 
-def load_audio(path, start_s = None, stop_s = None):
-    """读取音频，统一为 16 kHz 单声道 float32 波形。给出 start_s、stop_s 时只解码这一段（秒）。"""
+def load_audio(
+    path,
+    start_s = None,
+    stop_s = None,
+    data = None,
+):
+    """读取音频，统一为 16 kHz 单声道 float32 波形。给出 start_s、stop_s 时只解码这一段（秒）。
+
+    data 给出时（音频文件的原始字节，例如从分片中读出）从这些字节解码，这时 path 只用来标识这段音频。
+    """
     from torchcodec.decoders import AudioDecoder
 
     decoder = AudioDecoder(
-        source = str(path),
+        source = str(path) if data is None else data,
         sample_rate = SAMPLING_RATE,
         num_channels = 1,
     )
@@ -154,12 +171,13 @@ class PackedRows:
     """把清单行中读取样本要用的几项编码进一个文件，用内存映射读取。
 
     DataLoader 的每个读取进程都会收到一份数据集对象。清单行原本是 Python 字典，489 万行（v2b）时每个读取进程
-    约 13 GB，6 个进程合计近 80 GB。这里把每行的样本编号、语言、音频路径、时长、起点和训练目标写成一行 JSON，
-    依次存进 path，各行的起止位置存进 path 旁的 .offsets.npy；传给读取进程的只有这两个文件的路径，各进程用
-    mmap 打开同一个文件，共享操作系统的页缓存，用到哪一行才解码哪一行。取出的行与原来的字典在这几项上相同。
+    约 13 GB，6 个进程合计近 80 GB。这里把每行的样本编号、语言、音频路径、时长、起点、分片位置和训练目标写成
+    一行 JSON，依次存进 path，各行的起止位置存进 path 旁的 .offsets.npy；传给读取进程的只有这两个文件的路径，
+    各进程用 mmap 打开同一个文件，共享操作系统的页缓存，用到哪一行才解码哪一行。取出的行与原来的字典在这几项上
+    相同（分片位置 audio_shard 取出时是列表 [分片编号, 起点, 长度]，不从分片读取时为 None）。
     """
 
-    FIELDS = ("sample_id", "lang", "audio_path", "duration_s", "offset_s")
+    FIELDS = ("sample_id", "lang", "audio_path", "duration_s", "offset_s", "audio_shard")
 
     def __init__(self, rows, targets, path):
         self.path = Path(path)
@@ -237,8 +255,12 @@ class TranscriptionDataset(torch.utils.data.Dataset):
         seed = 0,
         storage = None,
         max_chars_per_second = None,
+        shards = None,
     ):
         """storage 给出文件路径时，清单行改存为 PackedRows（大清单用，避免每个读取进程复制全部字典）。
+
+        shards 是 shards.ShardReader 时，按清单行的 audio_shard 从分片读出音频字节再解码（shards.attach_shards
+        已给每行加上 audio_shard）。
 
         max_chars_per_second 给出时，训练目标的字数除以音频时长超过它的样本读取时跳过（与读不出的音频同样处理，
         组批计划不变）。这样的目标说不完：对齐错位、录音被截短或 ASR 重复输出，最长的一条 6.8 秒配 5,477 字，
@@ -246,8 +268,7 @@ class TranscriptionDataset(torch.utils.data.Dataset):
         """
         self.max_chars_per_second = max_chars_per_second
         self.target = target
-        targets = [target_text(row = row, target = target) for row in rows]
-        self.empty = [text == "" for text in targets]
+        targets, self.empty = training_targets(rows = rows, target = target)
         if storage is None:
             self.rows = rows
             self.targets = targets
@@ -256,9 +277,24 @@ class TranscriptionDataset(torch.utils.data.Dataset):
             self.targets = PackedTargets(rows = self.rows)
         self.mixer = mixer
         self.seed = seed
+        self.shards = shards
 
     def __len__(self):
         return len(self.rows)
+
+    def read_waveform(self, row):
+        """读取一行清单的音频；有 offset_s 的虚拟切分片段只解码整段文件中的这一段。"""
+        data = None
+        if self.shards is not None:
+            data = self.shards.read(location = row.get("audio_shard"))
+        if row.get("offset_s") is not None:
+            return load_audio(
+                path = row["audio_path"],
+                start_s = row["offset_s"],
+                stop_s = row["offset_s"] + row["duration_s"],
+                data = data,
+            )
+        return load_audio(path = row["audio_path"], data = data)
 
     def __getitem__(self, key):
         keyed = isinstance(key, SampleKey)
@@ -272,15 +308,7 @@ class TranscriptionDataset(torch.utils.data.Dataset):
             print(f"[bad-target] {row['sample_id']}: {len(target)} 字 / {row['duration_s']} 秒 = {rate:.0f} 字每秒", file = sys.stderr, flush = True)
             return None
         try:
-            if row.get("offset_s") is not None:
-                # 虚拟切分的片段：只解码整段文件中的这一段
-                waveform = load_audio(
-                    path = row["audio_path"],
-                    start_s = row["offset_s"],
-                    stop_s = row["offset_s"] + row["duration_s"],
-                )
-            else:
-                waveform = load_audio(path = row["audio_path"])
+            waveform = self.read_waveform(row = row)
         except Exception as error:
             # 几百万个文件里个别损坏（例如转换时机器意外关机）：记下路径，这条样本交给 TrainCollator 丢掉。
             # 同一个文件每次都读不出，续训与不中断的运行仍然一致。

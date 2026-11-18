@@ -27,6 +27,17 @@
 
 进度：每 --log-every 步打印一行并追加到 <输出目录>/train_log.jsonl，<输出目录>/progress.json 随时反映
 当前状态、速度和预计剩余时间，格式见 pipeline/train/__init__.py。
+
+在 Google Colab 上训练（任务 C1，步骤见 pipeline/colab/README.md）时另有几项，它们不改变批次，不在 RESUME_KEYS 中，
+本机开始的训练可以加上它们在 Colab 上续训：
+
+- --audio-shards <索引 json>：训练音频从分片读取（pipeline/colab/pack_shards.py 按训练计划生成，读取见 shards.py）。
+  按训练计划排列的索引记录了生成它的计划（PLAN_KEYS 各项和按读取顺序算出的摘要），与本次训练不一致时不开始训练；
+  按路径排列的索引与计划无关，不做这项核对。
+  --audio-shard-dirs <目录>[:<目录>...] 是本地查找分片的目录和顺序（窗口目录、常驻目录），
+  --audio-shard-fallback <目录> 是本地没有时的备用目录（Google Drive 上的分片），用到时记 [shard-fallback]。
+- --rows-cache-dir：清单行内存映射文件（data.PackedRows，v2b 约 1.4 GB）所在目录，默认 <输出目录>/dataset。
+  输出目录放在 Google Drive 上时，用它把这个文件放到本地磁盘。
 """
 
 import argparse
@@ -58,6 +69,7 @@ from pipeline.train.data import (
     summarize_rows,
 )
 from pipeline.train.mixing import BackgroundMixer, parse_category_weights
+from pipeline.train.shards import attach_shards, parse_dirs, plan_digest, read_header
 from pipeline.train.optimize import add_arguments as add_optimize_arguments
 from pipeline.train.optimize import apply as apply_optimizations
 from pipeline.train.optimize import options_from_args
@@ -81,7 +93,9 @@ from pipeline.train.model import (
 EXIT_STOPPED = 75
 # 只为取得各选项的默认值而解析一次参数时，填入必填项的占位值。
 REQUIRED_PLACEHOLDERS = ["--model-dir", "", "--train-manifest", "", "--target", TARGETS[0], "--output-dir", ""]
-# 续训时必须与原训练一致的配置：它们决定数据顺序、批次内容和损失。
+# 续训时必须与原训练一致的配置：它们决定数据顺序、批次内容和损失。音频从哪里读（--audio-shards、
+# --audio-shard-dirs、--audio-shard-fallback）、清单行缓存放在哪里（--rows-cache-dir）、读取进程数、模型和输出目录
+# 都不改变批次，不在其中。
 RESUME_KEYS = (
     "train_manifest",
     "audio_root",
@@ -102,6 +116,27 @@ RESUME_KEYS = (
     "noise_snr_max",
     "noise_category_weight",
 )
+# 决定训练计划（每一步读哪些样本）的配置，即 RESUME_KEYS 中混音以外的各项。音频分片按这个计划排列。
+PLAN_KEYS = (
+    "train_manifest",
+    "audio_root",
+    "target",
+    "langs",
+    "max_duration_s",
+    "batch_size",
+    "grad_accum",
+    "group_batches",
+    "max_batch_seconds",
+    "seed",
+    "sample_weight",
+    "empty_target_share",
+)
+# 不写入训练配置的选项：它们只控制这一段运行何时停止。
+RUN_ONLY_KEYS = ("resume", "stop_after_minutes", "stop_at_step")
+# 数据读取进程的启动方式。Python 3.14 在 Linux 上默认 forkserver，本机的训练和测量都是这样运行的；Colab 的
+# Python 3.13 默认 fork，读取进程会继承主进程中几百万行清单字典，垃圾回收一碰就逐页复制，内存成倍增长。
+# 显式指定 forkserver，两边行为一致，读取进程只收到 PackedRows 等对象序列化后的少量状态。
+WORKER_START_METHOD = "forkserver"
 
 
 def parse_args(argv = None):
@@ -109,6 +144,26 @@ def parse_args(argv = None):
     parser.add_argument("--model-dir", required = True, help = "阶段 1 完整模型目录")
     parser.add_argument("--train-manifest", required = True, help = "训练清单 JSONL")
     parser.add_argument("--audio-root", default = None, help = "清单中相对 audio_path 的基准目录，默认是清单所在目录")
+    parser.add_argument(
+        "--audio-shards",
+        default = None,
+        help = "音频分片索引 index.json（pipeline/colab/pack_shards.py 生成）；给出时训练音频从分片读取",
+    )
+    parser.add_argument(
+        "--audio-shard-dirs",
+        default = None,
+        help = "查找分片的目录，多个用冒号分隔，按顺序查找（例如先本地副本再 Google Drive），默认是索引所在目录",
+    )
+    parser.add_argument(
+        "--audio-shard-fallback",
+        default = None,
+        help = "本地目录中没有某个分片时到这里读取（例如 Google Drive 上的分片目录），用到时记 [shard-fallback]",
+    )
+    parser.add_argument(
+        "--rows-cache-dir",
+        default = None,
+        help = "清单行内存映射文件所在目录，默认是 <输出目录>/dataset；输出目录在网络盘上时指向本地磁盘",
+    )
     parser.add_argument(
         "--target",
         required = True,
@@ -270,6 +325,99 @@ def parse_args(argv = None):
     return parser.parse_args(args = argv)
 
 
+def run_config(args):
+    """写入 train_config.json 和检查点的训练配置：全部选项，去掉只控制本段运行何时停止的几项。"""
+    return {key: value for key, value in vars(args).items() if key not in RUN_ONLY_KEYS}
+
+
+def resume_mismatches(saved, config):
+    """返回续训时与原训练不一致的 RESUME_KEYS。旧检查点的配置中没有后来新增的选项，按选项的默认值比较。"""
+    defaults = vars(parse_args(argv = REQUIRED_PLACEHOLDERS))
+    return [key for key in RESUME_KEYS if saved.get(key, defaults[key]) != config.get(key)]
+
+
+def plan_mismatches(saved, config):
+    """返回分片索引记录的训练计划配置 saved 与本次训练配置不一致的 PLAN_KEYS。"""
+    return [key for key in PLAN_KEYS if saved.get(key) != config.get(key)]
+
+
+def training_rows(args):
+    """读取并筛选训练清单。训练和分片打包共用，两边的行号一致。"""
+    return read_manifest(
+        path = args.train_manifest,
+        audio_root = args.audio_root,
+        langs = set(args.langs.split(sep = ",")) if args.langs else None,
+        max_duration_s = args.max_duration_s,
+    )
+
+
+def training_weights(args, rows, empty):
+    """每条样本的抽样权重（sampling.py）。训练和分片打包共用。"""
+    return sample_weights(
+        rows = rows,
+        empty = empty,
+        rules = parse_weight_rules(specs = args.sample_weight),
+        empty_share = args.empty_target_share,
+    )
+
+
+def make_batch_stream(
+    args,
+    rows,
+    weights,
+    dataset = None,
+    collator = None,
+):
+    """训练用的批次流；分片打包只用它的训练计划 plan，不给 dataset 和 collator。"""
+    return BatchStream(
+        dataset = dataset,
+        collator = collator,
+        batch_size = args.batch_size,
+        group_batches = args.group_batches,
+        max_batch_seconds = args.max_batch_seconds,
+        seed = args.seed,
+        num_workers = args.num_workers,
+        durations = [float(row["duration_s"]) for row in rows],
+        weights = weights,
+    )
+
+
+def check_shard_plan(
+    header,
+    stream,
+    rows,
+    args,
+    start_step,
+    total_steps,
+):
+    """核对分片按本次训练的计划排列：按读取顺序的摘要必须相同，否则停止。
+
+    索引只覆盖部分步数（速度测试用）或本次训练会超出索引的轮次时给出提示：范围外的样本读不出，按 [bad-audio] 跳过。
+    """
+    plan = header["plan"]
+    digest = plan_digest(
+        plan = stream.plan,
+        rows = rows,
+        epoch = plan["epoch"],
+        grad_accum = args.grad_accum,
+    )
+    if digest != plan["digest"]:
+        raise SystemExit(f"分片索引 {header['index_path']} 的读取顺序与本次训练不同，需要按本次训练的配置重新生成索引。")
+    first, stop = plan["steps"]
+    end = min(total_steps, args.stop_at_step) if args.stop_at_step is not None else total_steps
+    if start_step < first or end > stop:
+        print(
+            f"[分片] 索引只覆盖第 {first}–{stop - 1} 步（下标从 0 起），本次训练第 {start_step}–{end - 1} 步；"
+            "范围外的样本读不出，按 [bad-audio] 跳过。",
+            flush = True,
+        )
+
+
+def worker_context(num_workers):
+    """DataLoader 的 multiprocessing_context：有读取进程时用 WORKER_START_METHOD，没有时只能不指定。"""
+    return WORKER_START_METHOD if num_workers > 0 else None
+
+
 def lr_lambda_factory(warmup_steps, total_steps, min_lr_ratio):
     """线性预热到峰值，再余弦退火到 min_lr_ratio 倍。"""
     def lr_lambda(step):
@@ -375,6 +523,7 @@ class BatchStream:
             pin_memory = True,
             prefetch_factor = 4 if self.num_workers > 0 else None,
             worker_init_fn = WorkerInit(main_pid = os.getpid()),
+            multiprocessing_context = worker_context(num_workers = self.num_workers),
         )
         for batch in loader:
             self.offset += 1
@@ -465,31 +614,37 @@ def main(argv = None):
     device = "cuda"
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents = True, exist_ok = True)
-    config = {
-        key: value for key, value in vars(args).items()
-        if key not in ("resume", "stop_after_minutes", "stop_at_step")
-    }
-    weight_rules = parse_weight_rules(specs = args.sample_weight)
+    config = run_config(args = args)
     category_weights = parse_category_weights(specs = args.noise_category_weight)
 
-    langs = set(args.langs.split(sep = ",")) if args.langs else None
-    rows = read_manifest(
-        path = args.train_manifest,
-        audio_root = args.audio_root,
-        langs = langs,
-        max_duration_s = args.max_duration_s,
-    )
+    rows = training_rows(args = args)
     if not rows:
         raise SystemExit("训练清单中没有可用的样本。")
+    shards = None
+    shard_header = None
+    if args.audio_shards:
+        shard_header = read_header(index_path = args.audio_shards)
+        # 按训练计划排列的索引（本地滚动窗口用）必须与本次训练的计划一致；按路径排列的索引与计划无关。
+        if shard_header["order"] == "plan":
+            changed = plan_mismatches(saved = shard_header["plan"]["params"], config = config)
+            if changed:
+                raise SystemExit(f"分片索引 {args.audio_shards} 按另一套训练计划生成，不一致的配置：{changed}")
+        # 主进程读入索引，给每行加上分片位置后就丢掉索引；读取进程只收到分片名单和查找目录。
+        shards, shard_summary = attach_shards(
+            rows = rows,
+            header = shard_header,
+            dirs = parse_dirs(spec = args.audio_shard_dirs),
+            fallback = args.audio_shard_fallback,
+        )
+        print(json.dumps(obj = {"audio_shards": shard_summary}, ensure_ascii = False), flush = True)
+        if shard_header["order"] == "path" and shard_summary["rows_in_index"] < len(rows):
+            print(f"[分片] 清单中有 {len(rows) - shard_summary['rows_in_index']} 行的音频不在索引中，读到时按 [bad-audio] 跳过。", flush = True)
 
     resume_dir = latest_checkpoint(output_dir = output_dir) if args.resume else None
     trainer_state = None
     if resume_dir is not None:
         trainer_state = torch.load(f = resume_dir / STATE_FILE, weights_only = False)
-        saved = trainer_state["config"]
-        # 旧检查点的配置中没有后来新增的选项，按选项的默认值比较。
-        defaults = {key: parse_args(argv = REQUIRED_PLACEHOLDERS).__dict__[key] for key in RESUME_KEYS}
-        changed = [key for key in RESUME_KEYS if saved.get(key, defaults[key]) != config.get(key)]
+        changed = resume_mismatches(saved = trainer_state["config"], config = config)
         if changed:
             raise SystemExit(f"续训的配置与原训练不一致：{changed}")
     elif args.resume:
@@ -518,20 +673,17 @@ def main(argv = None):
             audio_root = args.noise_audio_root,
         )
     # 清单行改存为内存映射文件，各读取进程共享一份，不再各自复制几百万个字典（v2b 时每个读取进程约 13 GB）
+    rows_cache_dir = Path(args.rows_cache_dir) if args.rows_cache_dir else output_dir / "dataset"
     dataset = TranscriptionDataset(
         rows = rows,
         target = args.target,
         mixer = mixer,
         seed = args.seed,
-        storage = output_dir / "dataset" / "rows.jsonl.bin",
+        storage = rows_cache_dir / "rows.jsonl.bin",
         max_chars_per_second = args.max_target_chars_per_second or None,
+        shards = shards,
     )
-    weights = sample_weights(
-        rows = rows,
-        empty = dataset.empty,
-        rules = weight_rules,
-        empty_share = args.empty_target_share,
-    )
+    weights = training_weights(args = args, rows = rows, empty = dataset.empty)
     if weights.sum() == 0:
         raise SystemExit("全部样本的抽样权重都是 0。")
     audio_config = model.config.audio_config
@@ -539,16 +691,12 @@ def main(argv = None):
         processor = processor,
         audio_windows = (audio_config.n_window, audio_config.n_window_infer) if args.precompute_metadata else None,
     )
-    stream = BatchStream(
+    stream = make_batch_stream(
+        args = args,
+        rows = rows,
+        weights = weights,
         dataset = dataset,
         collator = collator,
-        batch_size = args.batch_size,
-        group_batches = args.group_batches,
-        max_batch_seconds = args.max_batch_seconds,
-        seed = args.seed,
-        num_workers = args.num_workers,
-        durations = [float(row["duration_s"]) for row in rows],
-        weights = weights,
     )
     batches_per_epoch = stream.batches_per_epoch
     steps_per_epoch = batches_per_epoch / args.grad_accum
@@ -591,6 +739,16 @@ def main(argv = None):
             encoding = "utf-8",
         )
 
+    if shard_header is not None and shard_header["order"] == "plan":
+        check_shard_plan(
+            header = shard_header,
+            stream = stream,
+            rows = rows,
+            args = args,
+            start_step = step,
+            total_steps = total_steps,
+        )
+
     eval_loader = None
     if args.eval_manifest:
         eval_rows = sample_eval_rows(
@@ -611,6 +769,7 @@ def main(argv = None):
             pin_memory = True,
             worker_init_fn = WorkerInit(main_pid = os.getpid()),
             persistent_workers = args.num_workers > 0,
+            multiprocessing_context = worker_context(num_workers = min(args.num_workers, 4)),
         )
 
     print(json.dumps(obj = {

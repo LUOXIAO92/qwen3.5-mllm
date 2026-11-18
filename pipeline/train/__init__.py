@@ -29,8 +29,10 @@
 - export.py：把 projector 合入阶段 1 模型，导出完整模型目录。
 - bench.py：不同批量下的显存与吞吐。
 - fleurs_dev.py：把 FLEURS dev 清单转成训练清单格式，并抽取过拟合测试子集。
-- tests/：空目标标签、混音信噪比与比例、加权抽样比例与续训一致性的单元测试，以及显存与速度选项与原实现
-  一致的测试（需要 GPU，没有时跳过），在仓库根目录运行 python -m unittest discover -s pipeline/train/tests -t .。
+- shards.py：音频分片（任务 C1，Colab 训练用）。训练音频打包成约 1 GB 的 tar，按训练计划排成常驻分片和顺序分片
+  （或按路径排列）；索引的读写、按位置读取原始字节的 ShardReader、训练计划摘要。打包与窗口管理在 pipeline/colab/。
+- tests/：空目标标签、混音信噪比与比例、加权抽样比例与续训一致性、分片读取与续训配置核对的单元测试，以及显存与
+  速度选项与原实现一致的测试（需要 GPU，没有时跳过），在仓库根目录运行 python -m unittest discover -s pipeline/train/tests -t .。
 
 训练清单
 ========
@@ -38,6 +40,7 @@
 每行至少包含 sample_id、audio_path、duration_s、lang、script、original（CONVENTIONS 中「核对通过的
 训练清单」）。相对的 audio_path 以 --audio-root 为基准，未给出时以清单所在目录为基准。
 有 offset_s 的行是虚拟切分的片段：只解码 audio_path 中从 offset_s 秒开始、长 duration_s 秒的一段。
+给出 --audio-shards 时音频从分片读取（shards.py，pipeline/colab/README.md），解码结果与读原文件相同。
 
 检查点
 ======
