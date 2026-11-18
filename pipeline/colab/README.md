@@ -207,6 +207,7 @@ pipeline/train/run.sh "$DATASET/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl" o
     2>&1 | tee -a "$WORK_DIR/train.log"
 ```
 
+- 峰值学习率用 `run.sh` 的默认值 3e-3。从 #63 的低学习率状态接着训（#64，或用它做速度测试）时要加上对应的 `--lr 1e-3` 或 `--lr 7e-4`：学习率不在续训核对的配置中，漏写时训练会按 3e-3 继续而不报错。
 - `--audio-shard-dirs` 是本地查找分片的目录，依次是窗口目录和常驻目录。本地没有某个分片时到 `--audio-shard-fallback`（Drive）读取，并在日志中记一行 `[shard-fallback]`；窗口程序跟得上时不应出现这样的行。
 - `--rows-cache-dir` 把清单行的缓存放在本地磁盘。输出目录在 Drive 上，缓存放在那里会让读取进程通过 Drive 访问它。
 - `--num-workers` 是数据读取进程数。机器有 48 个 vCPU，16 是起点，具体数值按速度测试中的 `audio_h_per_h` 调整。
@@ -234,7 +235,7 @@ drive.flush_and_unmount()
 
 1. 本机按 1.2、1.3 节生成并上传 `index-30000-40000.*`、`pool-30000-40000-*.tar` 和第 30,000–40,000 步的顺序分片（`pack_shards list --index ... --pool --steps 30000-40000` 列出文件名），共 23 个分片、22.69 GB。
 2. 准备一个测试用的输出目录，例如 `$DRIVE_DIR/runs/speed-30000/`：放入本机训练的 `train_config.json`、含 `trainer_state.pt` 的 `checkpoint-0030000/`，以及内容为 `checkpoint-0030000` 的 `latest` 文件。
-3. 在 Colab 上把单元格 2 的 `INDEX` 改为 `$SHARDS_DRIVE/index-30000-40000.json`、`OUT` 改为测试目录，依次运行单元格 3–6，单元格 7 再加 `--stop-at-step 40000`。
+3. 在 Colab 上把单元格 2 的 `INDEX` 改为 `$SHARDS_DRIVE/index-30000-40000.json`、`OUT` 改为测试目录，依次运行单元格 3–6，单元格 7 再加 `--stop-at-step 40000`；起点取自 #63 的 lr 1e-3 时再加 `--lr 1e-3`。
 4. 比较测试目录的 `train_log.jsonl` 与本机同一段步数的 `audio_h_per_h`（每墙钟小时处理的音频小时数）。训练日志中不应有 `[shard-fallback]` 和 `[bad-audio]`；窗口日志中的「领先」应保持为正。速度不如预期时再试不同的 `--num-workers`。
 
 `--steps` 之外的样本不在这个索引中，读到时按 `[bad-audio]` 跳过，所以测试必须停在第 40,000 步；训练开始时会打印索引覆盖的步数范围。
