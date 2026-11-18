@@ -338,3 +338,28 @@ drive.flush_and_unmount()
 - Colab 的 Python 是 3.13，本机是 3.14，包的版本相同。数据读取进程固定用 forkserver 启动（`train.WORKER_START_METHOD`，Python 3.14 的默认值），读取进程不继承主进程中几百万行清单字典。torchcodec 使用 Colab 系统的 FFmpeg，FLAC 是无损格式，解码结果与本机相同。
 - 输出目录在 Drive 上：每 2,500 步保存的检查点、`progress.json` 和日志都写到 Drive。训练程序只保留最近一个检查点的 `trainer_state.pt`，删掉的旧文件进入 Drive 的回收站并占用空间，需要时手动清空。
 - 窗口程序读 `$OUT/latest` 和 `$OUT/progress.json` 得知训练进度。换输出目录时，单元格 5、6、7 的 `$OUT` 要一致。
+
+## 6. 监控图
+
+训练由命令行会话在后台运行时，浏览器连不上那台虚拟机。`monitor.py` 与训练同时在后台运行，每 2 分钟把训练损失与 dev 损失、训练速度、窗口领先步数、GPU 利用率和显存画成一张图，连同状态摘要写到 `$OUT/monitor/dashboard.png` 和 `status.json`（输出目录在 Drive 上，所以在 Drive 里就能打开）。它只需要 Colab 自带的 python3 和 matplotlib，训练结束后自己退出。
+
+```bash
+%%bash
+cd "$REPO"
+nohup python3 -m pipeline.colab.monitor --output-dir "$OUT" \
+    --train-log "$WORK_DIR/train.log" --window-log "$WORK_DIR/shard_window.log" \
+    > "$WORK_DIR/monitor.log" 2>&1 &
+```
+
+在另一个 notebook（CPU 运行时即可）里挂载 Drive 后，这个单元格每分钟刷新一次显示：
+
+```python
+import time
+from IPython.display import Image, clear_output
+
+path = "/content/drive/MyDrive/qwen3.5-asr/runs/<输出目录名>/monitor/dashboard.png"
+while True:
+    clear_output(wait = True)
+    display(Image(filename = path))
+    time.sleep(60)
+```
