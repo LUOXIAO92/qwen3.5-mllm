@@ -63,6 +63,9 @@ GB = 1e9
 STAT_CHUNK = 4096
 
 
+# 写分片时的缓冲大小（字节）
+WRITE_BUFFER = 64 * 1024 * 1024
+
 def parse_ranges(spec):
     """把 "0-99"、"5"、"0-9,20-29" 解析成整数集合。"""
     numbers = set()
@@ -342,7 +345,8 @@ def pack_one(
     mtime = header["member_mtime"]
     tmp = target.with_name(name = target.name + ".tmp")
     window = threads * 8
-    with open(file = tmp, mode = "wb") as raw, ThreadPoolExecutor(max_workers = threads) as pool:
+    # 大块写入：分片常写到 Windows 磁盘（WSL 的 /mnt/<盘符>），默认的 8 KB 缓冲在那里只有约 20 MB/s
+    with open(file = tmp, mode = "wb", buffering = WRITE_BUFFER) as raw, ThreadPoolExecutor(max_workers = threads) as pool:
         with tarfile.open(
             fileobj = raw,
             mode = "w",
