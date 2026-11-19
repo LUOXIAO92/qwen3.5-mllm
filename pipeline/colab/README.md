@@ -382,6 +382,7 @@ drive.flush_and_unmount()
 - Colab 的 Python 是 3.13，本机是 3.14，包的版本相同。数据读取进程固定用 forkserver 启动（`train.WORKER_START_METHOD`，Python 3.14 的默认值），读取进程不继承主进程中几百万行清单字典。torchcodec 使用 Colab 系统的 FFmpeg，FLAC 是无损格式，解码结果与本机相同。
 - 输出目录在 Drive 上：每 2,500 步保存的检查点、`progress.json` 和日志都写到 Drive。训练程序只保留最近一个检查点的 `trainer_state.pt`，删掉的旧文件进入 Drive 的回收站并占用空间，需要时手动清空。
 - 窗口程序读 `$OUT/latest` 和 `$OUT/progress.json` 得知训练进度。换输出目录时，单元格 5、6、7 的 `$OUT` 要一致。
+- 拼接批次 `--pack-sequences`（任务 #66，见 `pipeline/train/__init__.py`「交叉熵实现与拼接批次」）需要 flash-attn 和 causal-conv1d，`requirements-train.txt` 目前没有这两个包，Colab 上用这个选项要先为 Python 3.13、torch 2.13 装好它们；缺少时训练程序开始前就停止，不会悄悄退回会让样本互相串扰的实现。`--loss-impl torch` 不需要额外的包。
 
 ## 6. 监控图
 

@@ -17,11 +17,14 @@
   (seed, 轮次) 决定，续训时与不中断的训练一致。
 - mixing.py：在数据读取进程中给语音样本实时混入背景声，信噪比在设定范围内均匀随机，背景声可按类别加权。
 - model.py：加载模型（冻结部分 bfloat16，projector float32），损失计算。词表约 25 万，词表投影和
-  交叉熵合在一起分块计算，只在计损失的位置进行。
+  交叉熵合在一起分块计算，只在计损失的位置进行；也可以改用 torch 的 linear_cross_entropy（--loss-impl torch）。
+  拼接批次时把样本边界交给语言模型各层，并核对用的是按边界分段的内核（任务 #66）。
 - master.py：全量微调时语言模型的 float32 主权重（任务 #66）。
 - train.py：训练入口，梯度累积、线性预热加余弦退火、定期 dev 损失、检查点与断点续训。
+- check_packing.py：在真实模型和真实训练批次上核对拼接批次（任务 #66）：损失与梯度、样本之间有无串扰、用的内核。
 - optimize.py：显存与速度选项（任务 T59），每项单独开关，不改变数据、损失和学习率：语言模型的梯度检查点、
-  冻结层的块流式加载、激活值卸载、冻结权重 fp8、torch.compile、音频塔的变长注意力、显存上限。
+  冻结层的块流式加载、激活值卸载、冻结权重 fp8、torch.compile、音频塔的变长注意力、显存上限；任务 #66 加了
+  交叉熵的实现（--loss-impl）和拼接批次（--pack-sequences）。
 - offload.py：梯度检查点、块流式加载与激活值卸载的实现，照搬 moss-image-trainer 的做法。
 - quant.py：冻结线性层的 fp8 存储（默认关闭）。
 - checkpoint.py：检查点格式与导出完整模型。
@@ -34,7 +37,8 @@
 - shards.py：音频分片（任务 C1，Colab 训练用）。训练音频打包成约 1 GB 的 tar，按训练计划排成常驻分片和顺序分片
   （或按路径排列）；索引的读写、按位置读取原始字节的 ShardReader、训练计划摘要。打包与窗口管理在 pipeline/colab/。
 - tests/：空目标标签、混音信噪比与比例、加权抽样比例与续训一致性、分片读取与续训配置核对的单元测试，以及显存与
-  速度选项与原实现一致的测试（需要 GPU，没有时跳过），在仓库根目录运行 python -m unittest discover -s pipeline/train/tests -t .。
+  速度选项与原实现一致的测试（需要 GPU，没有时跳过），以及拼接批次和 torch 交叉熵的测试（test_packing.py，GPU 部分
+  还需要 flash-attn、causal-conv1d、fla），在仓库根目录运行 python -m unittest discover -s pipeline/train/tests -t .。
 
 训练清单
 ========
@@ -239,6 +243,104 @@ moss-image-trainer）、quant.py（fp8）、data.batch_metadata 与 model.token_
 显存和重算决定。expandable_segments 比默认分配器少保留约 6 GB；garbage_collection_threshold:0.9 只在保留的
 显存超过上限的 90% 时起作用，这些测量中都没有触发，作用是显存接近用满时先回收缓存再申请。torch.compile 在 0.8B 上
 再快约 12%（每批 32 条时 4%），但 4B 上编译后的梯度明显不对（只编译音频塔也是如此，见 optimize.py），不建议使用。
+
+交叉熵实现与拼接批次（任务 #66）
+================================
+
+两项都是速度选项，默认关闭（保持原来的行为），不在续训核对的配置中，续训时可以打开或关闭。
+
+--loss-impl torch：计损失位置的词表投影加交叉熵改用 torch 2.13 的 torch.nn.functional.linear_cross_entropy。
+它的 options（torch.nn.LinearCrossEntropyOptions）决定分块：batch_chunk_size 是每块的行数，chunking_method 按
+「分数块与输入一样大」自动定块大小，acc_policy 决定哪些中间量用 float32（bfloat16 输入在 CUDA 上默认 compact：
+分数与梯度在 float32 中累加，输出层权重的梯度逐块直接累加），acc_dtype 是累加精度，allow_retain_graph 只影响
+求和、求平均两种归约。这里每块 1024 行，与 LinearCrossEntropy 相同（自动分块在每批几百个计损失位置、词表 25 万时
+每块只有几行）。训练要逐个 token 的损失（按语言、空目标样本统计），只能用 reduction = "none"：这时前向只算损失，
+反传时逐块重算分数再求梯度；返回的损失是 bfloat16；它不给出最大分数的位置，token 准确率要另算一遍分数。
+
+--pack-sequences：每批的样本首尾相接拼成一行、去掉填充（data.pack_batch），每步的样本、顺序和音频都不变，训练计划
+与 Colab 的分片索引照常可用。做法按 transformers 无填充训练的说明（https://huggingface.co/docs/transformers/en/padding_free）：
+批次带上 DataCollatorWithFlattening(return_flash_attn_kwargs = True, return_seq_idx = True) 给出的各项，即各条样本
+的起点 cu_seq_lens_q/k、最长一条的长度 max_length_q/k、每个 token 属于哪条样本的 seq_idx，位置编号每条从 0 开始
+（MRoPE 的三路相同），每条第一个 token 不被预测。transformers 的 Qwen3.5 代码把它们交给三种内核：全注意力层用
+flash_attention_2 按 cu_seq_lens 分段；线性注意力层（Gated DeltaNet）的递推用 fla 的 chunk_gated_delta_rule，
+按 cu_seqlens 在样本边界清空状态；短卷积用 causal-conv1d 的 causal_conv1d_fn，按 seq_idx 分段。transformers 在导入
+模型代码时检查后两个包，导入失败就悄悄换成 PyTorch 参考实现，参考实现不认样本边界，各条样本会互相串扰而不报错，
+所以训练程序开始前核对三处的实现（model.check_packing_kernels），不对就停止。环境要求：flash-attn（本机
+2.8.3+cu132torch2.13）、flash-linear-attention 0.6.0、causal-conv1d 1.7.0。causal-conv1d 要按本机的 torch 从源码编译
+（预编译的包与 torch 2.13 不兼容，导入时报 undefined symbol），例如：
+
+    CUDA_HOME=/usr/local/cuda-13.0 TORCH_CUDA_ARCH_LIST="12.0" CAUSAL_CONV1D_FORCE_BUILD=TRUE \\
+        python -m pip install --no-build-isolation --no-cache-dir --no-deps causal-conv1d==1.7.0
+
+需要 PATH 中有 ninja；setup.py 固定为 sm_75 到 sm_121 的多种架构编译，本机 MAX_JOBS=8 时约 6 分钟。本机 conda 环境中
+装的是用同样的环境变量从 GitHub 源码（提交 cd81f04）编译的 1.7.0，下面的核对和测量都用它。
+
+正确性（check_packing.py，真实模型、v2b 训练计划前几步的真实批次，含背景声混音；每批 16 条、填充约占 8%）：
+
+- 内核：拼接批次的一次前向反传中，全注意力层都调用 flash-attn 的变长前向与反传，线性注意力层都调用 causal-conv1d 的
+  channel-last 前向与反传和 fla 的 chunk_gated_delta_rule 内核；transformers 参考实现的 aten::conv1d、语言模型的
+  sdpa 调用次数为 0。transformers 调用 causal_conv1d_fn 时 x 由 (批, 长度, 通道) 转置而来，正是 seq_idx 要求的 channel-last 布局。
+- 串扰：拼接的批次中只改第 9 条（16 条中的中间一条），把它的音频倒放，或把它的目标文本 token 换成别的 token（长度都
+  不变）。0.8B（两批，另在全量微调的设置下一批）、2B、4B 上，其余 15 条在语言模型最后一层的隐状态都逐位不变（最大差 0），
+  被改的那条变化 9.75–70。作为对照，把线性注意力换回 PyTorch 参考实现后再做同样的改动，后面各条的隐状态变化 2.1–5.1。
+- 损失与梯度：同一批分别按填充（sdpa，原实现）和拼接计算。每个计损失 token 的损失平均相差约 0.03（与 bfloat16 的舍入
+  同一量级，整批的平均损失相差不超过 0.006）。float32 填充批次作参考时，两者的误差相当：0.8B 只训练 projector（三批），projector
+  梯度的相对误差填充 3.1%–4.5%、拼接 4.1%–6.1%，两者之间 2.1%–4.8%；0.8B 全量微调（两批），语言模型全部参数梯度的
+  相对误差填充 2.9%–3.2%、拼接 3.0%–3.3%，两者之间 2.2%–2.3%，误差最大的单个张量（线性注意力的 A_log、dt_bias）两者
+  都约 7%；2B（三批）projector 梯度填充 7.0%–8.6%、拼接 5.0%–11.3%。4B 用 #62 第 25,000 步训练过的 projector（两批）：
+  填充 5.5%–8.1%、拼接 4.3%–6.5%，填充改用 flash_attention_2（不拼接）5.8%–11.4%。
+- 4B 用未训练的 projector 时，bfloat16 的 projector 梯度本身就不可靠：与 float32 参考相比，原实现（填充、sdpa）的相对误差
+  第一批 240%、第二批 26%，只把注意力换成 flash_attention_2 时 175%、61%，拼接 244%、71%；同一批的平均损失三者相差
+  不到 0.003。这时的差别来自 bfloat16 的舍入（换一种注意力内核就相差 40%–60%），与拼接无关；训练过的 projector 上
+  各种算法都回到上面的误差范围。
+
+速度。RTX 5090，直接用 train.py 训练 v2b 训练计划的第 0–500 步（音频从 F: 上的分片读取，背景声混音，6 个读取进程，
+run.sh 的其余设置，显存上限 0.94），统计第 100 步之后的 400 步；各配置的步数范围相同，批次逐一相同。显存是这段的峰值，
+没有任何一次因显存不足退让。环境中已装好 causal-conv1d，填充的批次也用它的内核（不带 seq_idx）。
+
+| 模型与训练范围 | 设置 | it/s | 音频h/h | 显存峰值（已分配 / 保留） | 相对原实现 |
+| --- | --- | ---: | ---: | --- | ---: |
+| 0.8B projector | 填充 + chunked（原实现） | 8.77 | 927 | 15.8 / 16.6 GB | — |
+|  | 填充 + torch | 8.66 | 915 | 15.3 / 15.6 GB | −1.3% |
+|  | 拼接 + torch | 8.39 | 887 | 14.2 / 14.4 GB | −4.3% |
+|  | 拼接 + chunked | 8.61 | 910 | 14.7 / 15.3 GB | −1.8% |
+| 2B projector | 填充 + chunked（原实现） | 7.10 | 750 | 21.3 / 22.1 GB | — |
+|  | 填充 + torch | 6.90 | 729 | 20.9 / 21.2 GB | −2.8% |
+|  | 拼接 + torch | 7.19 | 760 | 19.4 / 19.7 GB | +1.3% |
+|  | 拼接 + chunked | 7.34 | 776 | 19.9 / 20.6 GB | +3.4% |
+| 4B projector（末尾 24 层检查点） | 填充 + chunked（原实现） | 2.78 | 294 | 19.9 / 20.7 GB | — |
+|  | 填充 + torch | 2.74 | 290 | 19.4 / 19.8 GB | −1.4% |
+|  | 拼接 + torch | 3.05 | 322 | 18.6 / 18.9 GB | +9.6% |
+|  | 拼接 + chunked | 3.10 | 327 | 19.1 / 19.8 GB | +11.2% |
+| 4B projector（末尾 20 层检查点） | 填充 + chunked | 2.88 | 305 | 23.7 / 24.6 GB | +3.6% |
+|  | 拼接 + chunked | 3.21 | 340 | 22.5 / 23.3 GB | +15.4% |
+| 0.8B 全量微调 | 填充 + chunked（原实现） | 6.20 | 655 | 28.3 / 29.1 GB | — |
+|  | 填充 + torch | 6.30 | 666 | 28.4 / 28.7 GB | +1.7% |
+|  | 拼接 + torch | 6.13 | 647 | 26.9 / 27.2 GB | −1.2% |
+|  | 拼接 + chunked | 6.16 | 651 | 26.9 / 27.7 GB | −0.6% |
+
+同一配置先后两次的差别约 1%（0.8B 原实现 8.85 与 8.77），同一段步数中各窗口的速度随批次在 ±10% 之间变化。
+
+交叉熵单独测量（随机隐状态与输出层，词表 248320，每批 640 或 1536 个计损失位置，隐藏维度 1024 / 2048 / 2560）：
+torch 的实现每次前向反传比 chunked 慢：输出层冻结时慢 1.4–1.6 倍（例如 2560 维、1536 个位置 51.6 毫秒对 32.9 毫秒），
+训练输出层时慢 1.07–1.16 倍；临时显存少 0.2–0.5 GB 或相同。与 float32 参考相比，两者的隐状态与
+输出层梯度误差相同（0.3%–1%），预测是否正确逐位相同；torch 返回的每个 token 的损失是 bfloat16，最大误差 0.05–0.06，
+chunked 为 0.008–0.017。交叉熵只占一步的一小部分，所以训练中差 1%–3%。
+
+时间花在哪里。0.8B 在这些批次上 GPU 只有 60%–69% 的时间在算（nvidia-smi 采样：原实现 67%，拼接 60%，全量微调拼接 69%；
+2B 原实现 87%、拼接 81%）。读取进程从 6 个加到 12 个，0.8B 原实现仍是 8.78 it/s，拼接 8.51，瓶颈不在读取，在训练主进程
+发射内核（每步约 4,300 个）和每步几次让 CPU 等 GPU 的同步。单独测量一步前向反传（不含读取和优化器，FLEURS dev 的批次），
+拼接比填充快 8.5%（133 对 146 毫秒，GPU 内核时间 115 对 130 毫秒，每步同步 3 次对 4 次）；但在训练中 GPU 省下的时间
+变成空闲，拼接在 Python 中多出的一点开销（变长注意力与 fla 的分段准备）反而让 0.8B 慢约 2%。4B 受 GPU 计算量限制，
+省下的计算直接变成速度：语言模型一侧的填充约 9%，提速 11%。拼接还让显存峰值少 0.8–1.4 GB，4B 因此可以少做 4 层
+梯度检查点，再快 4 个百分点（这 500 步中峰值 22.5 GB；完整一轮中遇到更长的批次时，训练程序会在显存不足时自动增加
+检查点层数，见 optimize.py）。
+
+建议。--loss-impl 保持 chunked：torch 的实现不更快，损失的精度更低。4B 只训练 projector 时打开 --pack-sequences，并可
+改用 --checkpoint-layers 20；2B 打开也快约 3%；0.8B 不必打开（速度不变或略慢，只省显存）。0.8B 全量微调在 32 GB 显卡上
+的峰值约 28 GB，拼接后约 27 GB。2B 全量微调在 32 GB 上放不下（见上文「全量微调」），与拼接无关，只在 Colab 上测；
+Colab 的环境目前没有 flash-attn 和 causal-conv1d（pipeline/colab/README.md）。0.8B 若要更快，需要减少训练循环中每步
+让 CPU 等 GPU 的同步（损失、正确数、梯度范数是否有限的检查），不在本任务范围内。
 
 v1 超参数建议
 =============

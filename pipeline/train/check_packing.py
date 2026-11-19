@@ -7,7 +7,7 @@
         --batch-size 16 --max-duration-s 30 --max-batch-seconds 360 [--audio-shards ...] [--noise-manifest ...] \\
         [--train-language-model --language-model-lr 1e-5] [--checkpoint-layers N]
 
-报告写到 <输出目录>/check_packing.json，并打印摘要。核对四项：
+报告写到 <输出目录>/check_packing.json，并打印摘要。核对三项：
 
 1. 损失与梯度：同一批先按填充的批次（sdpa，原实现）、再按拼接的批次（flash_attention_2 加样本边界）各做一次前向
    反传，比较每个计损失 token 的损失、projector 的梯度，以及 --train-language-model 时语言模型全部参数的梯度。

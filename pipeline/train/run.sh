@@ -10,6 +10,8 @@
 #   2B、4B 主干加 --model-dir <仓库>/qwen3.5-2b-mllm 或 qwen3.5-4b-mllm，其余设置相同。
 #   全量微调（语言模型连同 projector 一起训练）加 --train-language-model --language-model-lr <峰值学习率>，
 #   通常再加 --init-projector <只训练 projector 的检查点目录>，见 train.py 的说明。
+#   每批样本拼成一行、去掉填充加 --pack-sequences（需要 flash-attn、causal-conv1d、fla），交叉熵改用 torch 的实现加
+#   --loss-impl torch，两项都不改变批次，实测见 pipeline/train/__init__.py「交叉熵实现与拼接批次」。
 # 环境变量：
 #   WORK_DIR  工作目录（含 envs/mllm-train、gpu.lock、data/T10/fleurs_dev.jsonl），默认是仓库旁边的 qwen3.5-asr-work
 set -uo pipefail
