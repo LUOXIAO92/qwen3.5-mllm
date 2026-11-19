@@ -387,18 +387,69 @@ def batch_metadata(batch, audio_token_id, n_window, n_window_infer):
     }
 
 
+def pack_batch(batch):
+    """把一批样本首尾相接拼成一行，去掉填充（任务 #66，--pack-sequences）。batch 是 batch_metadata 补充过的批次。
+
+    样本、顺序和音频都不变，只是语言模型一侧不再算填充位置：v2b 的批次中填充约占语言模型 token 的 9%。做法与
+    transformers 的 DataCollatorWithFlattening(return_flash_attn_kwargs = True, return_seq_idx = True) 相同：
+
+    - input_ids、mm_token_type_ids、labels、audio_mask 只保留各条的有效 token，按样本顺序接成形状 (1, 总长) 的一行；
+      attention_mask 全为 1。每条样本第一个 token 的标签改为 -100（本来就是提示，不计损失），于是没有位置去预测
+      下一条样本的开头。
+    - position_ids：每条样本从 0 重新编号，形状 (3, 1, 总长)。输入中只有文字和音频，MRoPE 的三路位置相同。
+    - cu_seq_lens_q：各条样本在这一行中的起点，最后一项是总长度（int32，FlashAttention 和 fla 的 cu_seqlens）；
+      max_length_q：最长一条的长度（Python 整数）；seq_idx：每个 token 属于第几条样本，形状 (1, 总长)（int32，
+      causal_conv1d 的 seq_idx）。
+    - loss_index、loss_targets：计损失的位置在这一行中的下标和目标 token；loss_rows 仍是所在样本的序号。各条样本
+      计损失的 token 与填充的批次一一对应、顺序相同。
+
+    音频塔的分块与窗口信息（audio_*）与填充无关，保持不变。
+    """
+    mask = batch["attention_mask"].bool()
+    lengths = mask.sum(dim = -1)
+    count = lengths.shape[0]
+    total = int(lengths.sum())
+    starts = torch.zeros(size = (count + 1,), dtype = torch.int32)
+    starts[1:] = lengths.cumsum(dim = 0)
+    seq_idx = torch.repeat_interleave(torch.arange(count, dtype = torch.int32), repeats = lengths)
+    positions = torch.arange(total) - starts[:-1].long()[seq_idx.long()]
+    labels = batch["labels"][mask].clone()
+    labels[starts[:-1].long()] = IGNORE_INDEX
+    shifted = labels[1:]
+    columns = (shifted != IGNORE_INDEX).nonzero(as_tuple = True)[0]
+    batch.update({
+        "input_ids": batch["input_ids"][mask][None],
+        "attention_mask": torch.ones(size = (1, total), dtype = batch["attention_mask"].dtype),
+        "mm_token_type_ids": batch["mm_token_type_ids"][mask][None],
+        "labels": labels[None],
+        "position_ids": positions[None, None].expand(size = (3, -1, -1)).contiguous(),
+        "audio_mask": batch["audio_mask"][mask][None],
+        "loss_index": columns,
+        "loss_targets": shifted[columns],
+        "loss_rows": seq_idx[columns].long(),
+        "cu_seq_lens_q": starts,
+        "max_length_q": int(lengths.max()),
+        "seq_idx": seq_idx[None],
+    })
+    return batch
+
+
 class TrainCollator:
     """把若干条样本拼成一个批次。
 
     每条样本渲染成带助手回答的完整对话，整批交给 processor 做特征提取、音频标记展开和分词（与评测推理
     相同的调用），再在最终的 input_ids 上用 mm_assistant_mask 生成标签。给出 audio_windows（音频塔的
-    n_window、n_window_infer）时，再用 batch_metadata 预先算出前向要用的位置与索引。
+    n_window、n_window_infer）时，再用 batch_metadata 预先算出前向要用的位置与索引；pack 为真时（需要
+    audio_windows）再用 pack_batch 把整批拼成一行、去掉填充。
     """
 
-    def __init__(self, processor, audio_windows = None):
+    def __init__(self, processor, audio_windows = None, pack = False):
+        if pack and audio_windows is None:
+            raise ValueError("拼接批次（pack）需要预先算好的元数据（audio_windows，即 --precompute-metadata）")
         self.processor = processor
         self.tokenizer = processor.tokenizer
         self.audio_windows = audio_windows
+        self.pack = pack
 
     def __call__(self, items):
         # 读不出音频的样本（TranscriptionDataset 返回 None）不进批次，这一批少几条照常训练
@@ -448,6 +499,8 @@ class TrainCollator:
                 n_window = n_window,
                 n_window_infer = n_window_infer,
             ))
+            if self.pack:
+                batch = pack_batch(batch = batch)
         return batch
 
 

@@ -27,6 +27,13 @@
 - --memory-fraction F：PyTorch 最多使用显存总量的 F 倍。WSL 下显存用满后会悄悄借用内存继续运行、速度骤降
   而不报错；设上限后超出时报 out of memory，训练程序据此逐步增加做梯度检查点的层、再逐步改为流式加载，
   重试同一批（Applied.degrade、train.py），训练结果不变。
+- --loss-impl chunked|torch（默认 chunked，任务 #66）：计损失位置的词表投影加交叉熵用本项目的分块实现
+  （model.LinearCrossEntropy）还是 torch.nn.functional.linear_cross_entropy 的分块实现，两者算的是同一个量，
+  差异在 bfloat16 舍入以内。
+- --pack-sequences（默认关闭，任务 #66）：每批的样本首尾相接拼成一行、去掉填充（data.pack_batch），每步的样本
+  不变。语言模型的全注意力层改用 flash_attention_2，按样本边界分段计算；线性注意力层的短卷积和递推用 causal-conv1d
+  与 fla 的内核分段计算。三者缺一时各条样本会互相串扰，训练程序开始前核对（model.check_packing_kernels）。需要
+  --precompute-metadata，不能与 --compile 同用。
 
 视觉塔在本项目中从不使用，始终留在 CPU 上，不占显存。
 
@@ -57,6 +64,8 @@ OPTION_KEYS = (
     "audio_attention",
     "precompute_metadata",
     "memory_fraction",
+    "loss_impl",
+    "pack_sequences",
 )
 
 
@@ -121,6 +130,18 @@ def add_arguments(parser):
         default = None,
         help = "PyTorch 最多使用的显存比例，超出时报 out of memory 而不是借用内存",
     )
+    group.add_argument(
+        "--loss-impl",
+        default = "chunked",
+        choices = ("chunked", "torch"),
+        help = "词表投影加交叉熵的实现：chunked 本项目的分块实现，torch 用 torch.nn.functional.linear_cross_entropy",
+    )
+    group.add_argument(
+        "--pack-sequences",
+        action = argparse.BooleanOptionalAction,
+        default = False,
+        help = "每批样本首尾相接拼成一行、去掉填充（需要 flash-attn、causal-conv1d、flash-linear-attention 的内核）",
+    )
     return group
 
 
@@ -145,6 +166,11 @@ def validate(options, total, train_language_model = False):
         raise ValueError("训练语言模型时不能流式加载语言模型的层（--lm-blocks-to-swap 只适用于冻结的权重）")
     if train_language_model and _covers(choice = options["fp8_frozen"], part = "lm"):
         raise ValueError("训练语言模型时不能把语言模型的权重存为 fp8（--fp8-frozen lm 或 all）")
+    if options.get("pack_sequences"):
+        if not options["precompute_metadata"]:
+            raise ValueError("--pack-sequences 需要 --precompute-metadata（样本边界在数据读取进程中算好）")
+        if options["compile"] != "none":
+            raise ValueError("--pack-sequences 没有与 --compile 一起验证过，不能同用")
 
 
 def _covers(choice, part):

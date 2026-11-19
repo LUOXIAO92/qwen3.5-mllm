@@ -51,6 +51,9 @@
   数值与它不同时打印提示。
 - 检查点每次多存 language_model.safetensors（bfloat16，评测用）；主权重与 AdamW 状态在 trainer_state.pt 中，
   与 projector 的续训状态一样只在最近的检查点中保留（--keep-trainer-states）。格式见 checkpoint.py。
+
+速度选项 --loss-impl（交叉熵的实现）和 --pack-sequences（每批样本拼成一行、去掉填充）见 optimize.py（任务 #66）。
+它们不改变每步的样本和损失的定义，不在 RESUME_KEYS 中，续训时可以改变。
 """
 
 import argparse
@@ -95,7 +98,9 @@ from pipeline.train.sampling import (
     sample_weights,
 )
 from pipeline.train.model import (
+    PACKED_ATTENTION,
     PROJECTOR_PREFIX,
+    check_packing_kernels,
     frozen_fingerprint,
     language_model_parameters,
     load_model,
@@ -573,13 +578,19 @@ class BatchStream:
         return next(self._iterator)
 
 
-def evaluate(model, loader, device, feature_dtype):
+def evaluate(
+    model,
+    loader,
+    device,
+    feature_dtype,
+    loss_impl = "chunked",
+):
     """在 dev 清单上计算目标文本的平均交叉熵和 token 准确率，按语言汇总。"""
     totals = {}
     with torch.no_grad():
         for batch in loader:
             inputs = move_batch(batch = batch, device = device, feature_dtype = feature_dtype)
-            losses, correct, rows = token_losses(model = model, inputs = inputs)
+            losses, correct, rows = token_losses(model = model, inputs = inputs, loss_impl = loss_impl)
             for row_index, lang in enumerate(batch["langs"]):
                 in_row = rows == row_index
                 entry = totals.setdefault(lang, [0.0, 0, 0])
@@ -726,6 +737,7 @@ def main(argv = None):
     model, processor = load_model(
         model_dir = args.model_dir,
         device = device,
+        attn_implementation = PACKED_ATTENTION if args.pack_sequences else "sdpa",
         train_language_model = args.train_language_model,
     )
     if args.init_projector and trainer_state is None:
@@ -740,6 +752,9 @@ def main(argv = None):
         device = device,
         train_language_model = args.train_language_model,
     )
+    if args.pack_sequences:
+        # 拼接批次时三处都必须是按样本边界分段的内核，退回参考实现时各条样本互相串扰而不报错。
+        print(json.dumps(obj = {"packing_kernels": check_packing_kernels(model = model)}, ensure_ascii = False), flush = True)
     params = projector_parameters(model = model)
     language_named = language_model_parameters(model = model) if args.train_language_model else []
     language_names = [name for name, _ in language_named]
@@ -787,6 +802,7 @@ def main(argv = None):
     collator = TrainCollator(
         processor = processor,
         audio_windows = (audio_config.n_window, audio_config.n_window_infer) if args.precompute_metadata else None,
+        pack = args.pack_sequences,
     )
     stream = make_batch_stream(
         args = args,
@@ -986,6 +1002,7 @@ def main(argv = None):
             loader = eval_loader,
             device = device,
             feature_dtype = feature_dtype,
+            loss_impl = args.loss_impl,
         )
         last_eval = {"step": step, **result}
         append_jsonl(path = eval_path, record = last_eval)
@@ -1015,7 +1032,7 @@ def main(argv = None):
         for batch in micro_batches:
             inputs = move_batch(batch = batch, device = device, feature_dtype = feature_dtype)
             with optimized.forward_context():
-                losses, correct, rows = token_losses(model = model, inputs = inputs)
+                losses, correct, rows = token_losses(model = model, inputs = inputs, loss_impl = args.loss_impl)
             loss_sum = losses.sum()
             (loss_sum / n_tokens).backward()
             loss_total += loss_sum.detach()
