@@ -9,6 +9,7 @@
 #   LANGS     只评测这些语言（空格分隔，默认全部 18 种）；无人声评测集用 LANGS=zxx
 #   WORK_DIR  工作目录（含 envs/mllm-eval、envs/mllm-train、gpu.lock），默认是仓库旁边的 qwen3.5-asr-work
 #   MODEL_DIR 融合模型目录，默认 <仓库>/qwen3.5-0.8b-mllm；评测 2B、4B 的训练时设为 qwen3.5-2b-mllm、qwen3.5-4b-mllm
+# 全量微调的训练（train.py --train-language-model）中，选中的检查点另有 language_model.safetensors，自动一并载入。
 set -uo pipefail
 run="${1:?训练输出目录}"
 manifest="${2:?评测清单目录}"
@@ -19,9 +20,12 @@ work="${WORK_DIR:-$repo/../qwen3.5-asr-work}"
 cd "$repo"
 best=$("$work/envs/mllm-train/bin/python" -m pipeline.train.best_checkpoint "$run") || exit 1
 echo "选用 $best"
+language_model=()
+[ -f "$best/language_model.safetensors" ] && language_model=(--language-model "$best/language_model.safetensors")
 flock "$work/gpu.lock" "$work/envs/mllm-eval/bin/python" -m pipeline.eval.run_eval \
   --model-dir "${MODEL_DIR:-$repo/qwen3.5-0.8b-mllm}" \
   --projector "$best/projector.safetensors" \
+  "${language_model[@]}" \
   --manifest-dir "$manifest" \
   ${LANGS:+--langs $LANGS} \
   --batch-size "${BATCH_SIZE:-48}" \

@@ -21,6 +21,9 @@
 - `--projector`（可选）：一个 safetensors 文件，只含完整模型 state_dict 中以 `model.audio_projector.`
   开头的键，键名与完整模型一致。加载前检查文件里的键恰好等于模型的全部 projector 参数，
   不缺也不多，形状一致。不给时直接使用 `--model-dir` 里的 projector。
+- `--language-model`（可选）：全量微调的检查点中的 `language_model.safetensors`，含语言模型的全部参数（以
+  `model.language_model.` 开头，与输出层共用的词嵌入只有一份），在加载模型和 projector 之后载入。同样检查键恰好
+  等于模型的全部语言模型参数、形状一致；载入后输出层仍与词嵌入共用同一个权重。
 
 输入格式
 ========
@@ -56,6 +59,8 @@ from pipeline.eval.scoring import LANGS, METRIC_BY_LANG, NONSPEECH_LANG, false_o
 
 PROMPT_TEXT = "Transcribe the audio."
 PROJECTOR_PREFIX = "model.audio_projector."
+# 与 pipeline.train.model.LANGUAGE_MODEL_PREFIXES 相同。这里不导入训练模块，评测环境不需要训练的依赖。
+LANGUAGE_MODEL_PREFIXES = ("model.language_model.", "lm_head.")
 _THINK_BLOCK = re.compile(pattern = r"<think>.*?</think>", flags = re.DOTALL)
 
 
@@ -120,7 +125,41 @@ def load_projector(model, projector_path: Path) -> None:
         raise ValueError(f"出现多余的键：{result.unexpected_keys}")
 
 
-def load_model(model_dir: Path, projector_path: Path | None):
+def load_language_model(model, language_model_path: Path) -> None:
+    """加载全量微调后的语言模型权重：键必须恰好覆盖模型的全部语言模型参数，形状一致。
+
+    named_parameters 中与输出层共用的词嵌入只有 model.language_model.embed_tokens.weight 一个名字。
+    """
+    from safetensors.torch import load_file
+
+    state = load_file(filename = str(language_model_path), device = "cpu")
+    expected = {
+        name: parameter.shape
+        for name, parameter in model.named_parameters()
+        if name.startswith(LANGUAGE_MODEL_PREFIXES)
+    }
+    missing = sorted(set(expected) - set(state))
+    extra = sorted(set(state) - set(expected))
+    if missing or extra:
+        raise ValueError(
+            f"语言模型权重的键与模型不一致。缺少：{missing[:5]}；多余：{extra[:5]}",
+        )
+    for name, shape in expected.items():
+        if tuple(state[name].shape) != tuple(shape):
+            raise ValueError(
+                f"{name} 形状不一致：文件 {tuple(state[name].shape)}，模型 {tuple(shape)}",
+            )
+    embedding = model.get_input_embeddings().weight
+    tied = model.lm_head.weight.data_ptr() == embedding.data_ptr()
+    result = model.load_state_dict(state_dict = state, strict = False)
+    if result.unexpected_keys:
+        raise ValueError(f"出现多余的键：{result.unexpected_keys}")
+    # load_state_dict 原地复制，共用的权重仍然共用；确认输出层随词嵌入一起更新了。
+    if tied and model.lm_head.weight.data_ptr() != model.get_input_embeddings().weight.data_ptr():
+        raise ValueError("载入后输出层不再与词嵌入共用权重")
+
+
+def load_model(model_dir: Path, projector_path: Path | None, language_model_path: Path | None = None):
     import torch
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
@@ -136,6 +175,8 @@ def load_model(model_dir: Path, projector_path: Path | None):
     )
     if projector_path is not None:
         load_projector(model = model, projector_path = projector_path)
+    if language_model_path is not None:
+        load_language_model(model = model, language_model_path = language_model_path)
     model.to(device = "cuda")
     model.eval()
     return model, processor
@@ -243,6 +284,12 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description = "批量转写评测清单并按语言打分")
     parser.add_argument("--model-dir", required = True, type = Path, help = "完整模型目录（remote code）")
     parser.add_argument("--projector", default = None, type = Path, help = "projector 检查点（safetensors，可选）")
+    parser.add_argument(
+        "--language-model",
+        default = None,
+        type = Path,
+        help = "全量微调检查点中的 language_model.safetensors（可选），在模型和 projector 之后载入",
+    )
     parser.add_argument("--manifest-dir", required = True, type = Path, help = "含 <lang>/test.jsonl 的目录")
     parser.add_argument("--audio-root", default = None, type = Path, help = "audio_path 的根目录，默认等于 --manifest-dir")
     parser.add_argument("--langs", nargs = "+", default = LANGS, help = "要评测的语言代码，默认全部 18 种")
@@ -263,7 +310,11 @@ def main(argv: list | None = None) -> int:
     audio_root = args.audio_root if args.audio_root is not None else args.manifest_dir
     args.output_dir.mkdir(parents = True, exist_ok = True)
 
-    model, processor = load_model(model_dir = args.model_dir, projector_path = args.projector)
+    model, processor = load_model(
+        model_dir = args.model_dir,
+        projector_path = args.projector,
+        language_model_path = args.language_model,
+    )
     token_cfg = {"tokens_per_second": args.tokens_per_second, "extra": args.extra_tokens}
 
     results = []
