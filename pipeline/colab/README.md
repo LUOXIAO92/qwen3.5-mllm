@@ -91,6 +91,8 @@ Drive 上的目录（`$DRIVE_DIR` 是 Drive 上本项目的目录）：
 | `$DRIVE_DIR/upload/noise-v2.tar` | 背景声 |
 | `$DRIVE_DIR/upload/fleurs-dev.tar` | dev 清单与音频 |
 | `$DRIVE_DIR/upload/qwen3.5-4b-mllm/` | 融合模型目录（仓库中没有，约 9.8 GB） |
+| `$DRIVE_DIR/upload/qwen3.5-2b-mllm/` | 全量微调用的 2B 融合模型目录（约 5.7 GB），见单元格 7 的全量微调变体 |
+| `$DRIVE_DIR/upload/v2b-2b-checkpoint-0005000/` | 全量微调的起点：本机 `<工作目录>/data/T61/v2b-2b/checkpoint-0005000/` 整个目录（`projector.safetensors` 与 `projector.json`，约 34 MB） |
 | `$DRIVE_DIR/shards/v2b-e0/` | 索引和全部分片（`$SHARDS_DRIVE`） |
 | `$DRIVE_DIR/runs/v2b-4b/` | 训练输出目录：本机训练的输出目录复制过来，不含 `dataset/` |
 | `$DRIVE_DIR/wheels/` | 安装包缓存，第一次运行 `setup.sh` 时生成 |
@@ -207,12 +209,54 @@ pipeline/train/run.sh "$DATASET/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl" o
     2>&1 | tee -a "$WORK_DIR/train.log"
 ```
 
-- 峰值学习率用 `run.sh` 的默认值 3e-3。从 #63 的低学习率状态接着训（#64，或用它做速度测试）时要加上对应的 `--lr 1e-3` 或 `--lr 7e-4`：学习率不在续训核对的配置中，漏写时训练会按 3e-3 继续而不报错。
+- 峰值学习率用 `run.sh` 的默认值 3e-3。续训时峰值学习率取自检查点中学习率调度器保存的数值（`base_lrs`），命令行的 `--lr` 不起作用，与它不同时训练开始时打印一行提示；从 #63 的低学习率状态接着训（#64，或用它做速度测试）时仍按那一组的 1e-3 或 7e-4 继续。加上对应的 `--lr 1e-3` 或 `--lr 7e-4`，检查点中记录的训练配置才与实际一致。
 - `--audio-shard-dirs` 是本地查找分片的目录，依次是窗口目录和常驻目录。本地没有某个分片时到 `--audio-shard-fallback`（Drive）读取，并在日志中记一行 `[shard-fallback]`；窗口程序跟得上时不应出现这样的行。
 - `--rows-cache-dir` 把清单行的缓存放在本地磁盘。输出目录在 Drive 上，缓存放在那里会让读取进程通过 Drive 访问它。
 - `--num-workers` 是数据读取进程数。机器有 48 个 vCPU，16 是起点，具体数值按速度测试中的 `audio_h_per_h` 调整。
 - `--stop-after-minutes 1260`（21 小时）让训练在 Colab 会话的 24 小时上限之前保存检查点并停下，下一个会话从单元格 1 开始，`run.sh` 默认 `--resume`，从最近的检查点续训。会话意外断开时最多损失 `--save-every` 的 2,500 步。
 - 96 GB 显存下 4B 每批 16 条、360 秒应当不需要梯度检查点，所以没有加本机用的 `--checkpoint-layers 24`。显存不够时训练程序会自己逐步打开梯度检查点并重试同一批，结果不变。
+
+**单元格 7（全量微调变体，#66）。** 从 2B 只训练 projector 的 v2b 训练（#61）第 5,000 步的检查点出发，语言模型连同 projector 一起训练 30,000 步，音频塔和视觉塔冻结。数据与上面相同：同一份 v2b 训练清单和训练计划，从计划的第 0 步开始，直接用 `$SHARDS_DRIVE` 上的完整索引和分片（`--max-steps` 只决定学习率日程的长度，不改变训练计划，开始时的分片核对照常通过）。开始前做三件事：
+
+1. 在 Drive 上放好 2B 的融合模型 `$DRIVE_DIR/upload/qwen3.5-2b-mllm/`，以及起点检查点 `$DRIVE_DIR/upload/v2b-2b-checkpoint-0005000/`：把本机 `<工作目录>/data/T61/v2b-2b/checkpoint-0005000/` 整个目录上传，里面只有 `projector.safetensors` 和 `projector.json`。
+2. 单元格 2 中把输出目录改为新的目录，并让 `setup.sh` 复制 2B 模型：
+
+   ```python
+   os.environ["OUT"] = os.environ["DRIVE_DIR"] + "/runs/v2b-2b-full"
+   os.environ["MODEL_NAME"] = "qwen3.5-2b-mllm"
+   ```
+
+3. 依次运行单元格 3–6（单元格 5、6 用同一个 `$OUT`；新的输出目录中没有检查点，从第 0 步开始准备分片），再运行下面的单元格代替单元格 7。
+
+```bash
+%%bash
+cd "$REPO"
+pipeline/train/run.sh "$DATASET/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl" original "$OUT" \
+    --model-dir "$REPO/qwen3.5-2b-mllm" \
+    --train-language-model \
+    --language-model-lr 1e-5 \
+    --lr 1e-4 \
+    --warmup-steps 1000 \
+    --max-steps 30000 \
+    --eval-every 2500 \
+    --save-every 2500 \
+    --init-projector "$DRIVE_DIR/upload/v2b-2b-checkpoint-0005000" \
+    --noise-manifest "$DATASET/audio/qwen3.5-asr/nonspeech/v2/background.jsonl" \
+    --audio-shards "$INDEX" \
+    --audio-shard-dirs "$SHARDS_LOCAL/window:$SHARDS_LOCAL/pool" \
+    --audio-shard-fallback "$SHARDS_DRIVE" \
+    --rows-cache-dir "$WORK_DIR/rows/v2b-2b-full" \
+    --num-workers 16 \
+    --stop-after-minutes 1260 \
+    2>&1 | tee -a "$WORK_DIR/train.log"
+```
+
+- 语言模型参数组的峰值学习率 1e-5，projector 参数组 1e-4，两组都在前 1,000 步线性预热，再按余弦降到峰值的 0.1 倍。续训时两组的峰值学习率沿用检查点中保存的数值；`--train-language-model` 和 `--language-model-lr` 在续训时也要照样给出，所以重新运行同一个单元格即可。
+- `--init-projector` 只在第一次开始时载入起点的 projector；续训时 projector 取自输出目录中最近的检查点，这一项不起作用。
+- 精度：语言模型以 bfloat16 计算，优化器更新 float32 主权重。2B 的语言模型约 18.8 亿个参数，主权重、它的梯度和 AdamW 状态比只训练 projector 多约 30 GB 显存；按 0.8B 的实测估计，每批 16 条、360 秒的峰值约 50–55 GB（`pipeline/train/__init__.py`「全量微调」），96 GB 显存应当不需要梯度检查点，显存不够时训练程序会逐步打开梯度检查点并重试同一批。
+- 检查点：每 2,500 步多一个 `language_model.safetensors`（bfloat16，约 3.8 GB，评测用），12 个检查点共约 46 GB；最近检查点的 `trainer_state.pt` 含主权重和 AdamW 状态，约 22.6 GB，每次保存都整个重写，旧的随即删除。删掉的文件进入 Drive 的回收站，30,000 步下来回收站中约有 270 GB 旧的 `trainer_state.pt`，需要时手动清空。
+- 这一段训练读第 0–29,999 步的数据：常驻分片 48 GB 加约 54 GB 顺序分片，单元格 6 的 `--ahead-steps 31600` 已经覆盖全程。
+- 评测在本机进行（Colab 上只建立了训练环境）：把输出目录下载到本机（`trainer_state.pt` 不需要），再运行 `MODEL_DIR=<仓库>/qwen3.5-2b-mllm pipeline/eval/run.sh <下载的输出目录> <评测清单目录> <结果目录>`。它选 dev 损失最低的检查点，并自动载入其中的 `language_model.safetensors`。
 
 **单元格 8：查看进度。**
 

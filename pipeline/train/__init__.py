@@ -1,6 +1,7 @@
 """音频 projector 训练（实验 v1，任务 T10；空目标、加权抽样与混音，实验 v2，任务 T1）。
 
-只训练阶段 1 模型中的 model.audio_projector（Linear → SiLU → Linear），音频塔、视觉塔和语言模型冻结。
+默认只训练阶段 1 模型中的 model.audio_projector（Linear → SiLU → Linear），音频塔、视觉塔和语言模型冻结；
+加 --train-language-model 时语言模型也参与训练（全量微调，见下文「全量微调」）。
 输入使用 CONVENTIONS 中「训练与评测的对话格式」：用户消息是一段音频加指令 Transcribe the audio.，
 用模型自带的 chat template 展开（add_generation_prompt = True、enable_thinking = False），助手回合
 以空思考块开头；只对空思考块之后的目标文本和结尾的 <|im_end|> 计算损失。
@@ -17,6 +18,7 @@
 - mixing.py：在数据读取进程中给语音样本实时混入背景声，信噪比在设定范围内均匀随机，背景声可按类别加权。
 - model.py：加载模型（冻结部分 bfloat16，projector float32），损失计算。词表约 25 万，词表投影和
   交叉熵合在一起分块计算，只在计损失的位置进行。
+- master.py：全量微调时语言模型的 float32 主权重（任务 #66）。
 - train.py：训练入口，梯度累积、线性预热加余弦退火、定期 dev 损失、检查点与断点续训。
 - optimize.py：显存与速度选项（任务 T59），每项单独开关，不改变数据、损失和学习率：语言模型的梯度检查点、
   冻结层的块流式加载、激活值卸载、冻结权重 fp8、torch.compile、音频塔的变长注意力、显存上限。
@@ -52,10 +54,51 @@
   可以用 load_state_dict(strict = False) 直接载入完整模型。
 - projector.json：训练目标、步数、轮数、最近训练损失、dev 损失、冻结参数核对结果和完整训练配置。
 - trainer_state.pt：优化器、学习率调度器、随机数状态和数据位置，只在最近的检查点中保留。
+- language_model.safetensors：只在全量微调时有，见下文「全量微调」。
 
 <output-dir>/ 下另有 train_config.json、train_log.jsonl（每 --log-every 步一行，见下文）、
 eval_log.jsonl（dev 损失，按语言）、frozen_check.json（训练前后冻结参数逐张量的 SHA-256 比较）、
 progress.json（见下文）和 latest（最近检查点的目录名）。
+
+全量微调（任务 #66）
+===================
+
+加 --train-language-model 时，语言模型的全部参数（词嵌入兼输出层、各解码层和最后的归一化；0.8B 约 7.5 亿个，
+2B 约 18.8 亿个）与 projector 一起训练，音频塔和视觉塔仍冻结。--language-model-lr 是语言模型参数组的峰值学习率，
+projector 用 --lr，两组按同一条预热加余弦的曲线变化。--init-projector <检查点目录> 让新开始的训练从已有的 projector
+出发，例如只训练 projector 的训练越过损失突降之后的检查点；续训时它不起作用。
+
+精度。语言模型的参数在模型中保持 bfloat16，前向和反传的计算方式与只训练 projector 时相同；优化器更新另存的 float32
+主权重（master.py）。反传中每个参数的梯度一算出就转成 float32 加到主权重的梯度上，bfloat16 的梯度随即释放；AdamW
+更新主权重后，再舍入成 bfloat16 写回模型。输出层与词嵌入共用一个权重，两处的梯度相加后更新一次。分块交叉熵在反传时
+重算计损失位置的分数，同时给出隐状态和输出层权重的梯度（model.LinearCrossEntropy）。AdamW 用 fused 实现，默认的
+foreach 实现会为整组参数临时再分配一份与二阶矩一样大的显存。
+
+显存。每个语言模型参数比只训练 projector 时多 16 字节：主权重 4、主权重的梯度 4、AdamW 的两个状态 8，0.8B 多约
+12 GB，2B 多约 30 GB。反传还要为语言模型各线性层保存输入以求权重的梯度，中间结果比冻结时多。梯度检查点
+（--gradient-checkpointing、--checkpoint-layers）照常可用，反传重算一层时同时求这一层参数的梯度；--lm-blocks-to-swap
+和 --fp8-frozen lm、all 只适用于冻结的权重，训练语言模型时不能使用，显存不足时的退让也跳过语言模型的流式加载。
+
+检查点。每个检查点多一个 language_model.safetensors：语言模型的全部参数，bfloat16，即训练中参与计算的权重（0.8B
+1.5 GB，2B 约 3.8 GB）。评测时用 pipeline/eval/run_eval.py --language-model 在模型和 projector 之后载入，
+pipeline/eval/run.sh 发现选中的检查点有这个文件时自动带上。float32 主权重放在 trainer_state.pt 的
+language_model_master 中，连同 AdamW 的状态，trainer_state.pt 在 0.8B 约 9 GB、2B 约 22.6 GB；它与只训练 projector 时
+一样只在最近的检查点中保留（--keep-trainer-states），较早检查点的主权重随它们的 trainer_state.pt 一起删除。续训时主权重写回模型，
+模型中的 bfloat16 参数与保存时逐位相同。
+
+续训核对。train_language_model 在 RESUME_KEYS 中；以前的训练配置中没有这一项，按默认值（不训练语言模型）比较，
+照常续训。--init-projector 和两组学习率不参与核对。续训时两组的峰值学习率都沿用检查点中学习率调度器保存的数值
+（只训练 projector 时的 --lr 也是这样），命令行给出的数值不同时只打印提示。
+
+冻结参数核对（frozen_check.json）比较音频塔、视觉塔以及语言模型的缓冲区，语言模型的参数不参与。
+
+实测（RTX 5090 32 GB，FLEURS dev 当作训练清单，每批 16 条、360 秒，从 0.8B v2b 训练第 5,000 步的 projector 出发，
+projector 峰值学习率 1e-4、语言模型 1e-5，训练 60 步）：0.8B 全量微调每秒约 4.4 步，同样设置只训练 projector 约 6.0 步；
+显存峰值 28.7 GB（只训练 projector 16.4 GB），末尾 12 层做梯度检查点时 21.2 GB。第 60 步的 dev 损失 1.055，只训练
+projector 为 1.418（dev 与训练清单是同一批句子，只说明全量微调在这些数据上下降得更快）。打开 --deterministic 时，
+连续训练 40 步与在第 20 步停下再续训到第 40 步，两者的损失、学习率、dev 损失和最后的权重逐位相同。2B 在 32 GB 上
+放不下：用最长的样本组成一批（12 条、约 30 秒），全部层做检查点时前向反传的峰值 19.8 GB，再加 AdamW 的两个状态
+（14 GB）就超出；不做检查点时前向反传就超过 30 GB。按 0.8B 的比例估计，96 GB 显存上 2B 不做检查点的峰值约 50–55 GB。
 
 进度
 ====

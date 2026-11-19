@@ -89,6 +89,8 @@ pipeline/train/run.sh $DATASET/audio/qwen3.5-asr/v1/train/manifest-r1.jsonl orig
 
 实验 v2 的训练清单还包含无人声片段（语言 `zxx`，训练目标为空），合并时用 `--uncapped zh en zxx` 整份收录。训练时无人声片段只学输出结束标记，`--empty-target-share`（默认 0.03）按抽样权重把它们控制在每轮样本的 3%；`--sample-weight 字段:取值=权重`（可重复，例如 `lang:fa=2`）让某些语言或来源多抽或少抽；加 `--noise-manifest $DATASET/audio/qwen3.5-asr/nonspeech/v2/background.jsonl` 后，30% 的语音样本（`--noise-prob`）在 0–20 dB 信噪比下实时混入背景声，`--noise-category-weight music=0.5` 这类参数调整各类背景声的比例。细节见 `pipeline/train/train.py`、`sampling.py` 和 `mixing.py` 的说明。
 
+全量微调让语言模型连同 projector 一起训练，音频塔和视觉塔仍冻结：加 `--train-language-model --language-model-lr <语言模型的峰值学习率>`，projector 的峰值学习率仍由 `--lr` 给出；通常再加 `--init-projector <只训练 projector 的检查点目录>`，从已经训练过的 projector 出发。语言模型以 bfloat16 计算、优化器更新 float32 主权重，每个检查点另存一份 bfloat16 的 `language_model.safetensors`。精度、显存和检查点格式见 `pipeline/train/__init__.py`「全量微调」。
+
 ## 7. 评测
 
 ```bash
@@ -110,7 +112,7 @@ python -m pipeline.eval.report --out-dir <报告目录> --nonspeech v1b-20k=<工
 
 结果目录的 summary.json 中 `nonspeech` 项即该指标；`report --nonspeech` 把多个模型并列成表。
 
-`run.sh` 取该次训练中 dev 损失最低的检查点，转写评测集并按语言打分；`report` 把多次评测汇总成表格。
+`run.sh` 取该次训练中 dev 损失最低的检查点，转写评测集并按语言打分，全量微调的检查点中的 `language_model.safetensors` 一并载入；`report` 把多次评测汇总成表格。
 
 ## 8. 在 Google Colab 上训练
 
