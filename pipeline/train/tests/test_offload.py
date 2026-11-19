@@ -1,7 +1,8 @@
 """梯度检查点、块流式加载、激活值卸载、fp8 与变长音频注意力的一致性：python -m unittest pipeline.train.tests.test_offload
 
 需要 CUDA；没有 GPU 时跳过。前一部分在一组小的冻结层上比较输出和传回可训练层的梯度，后一部分在按阶段 1
-配置缩小的随机初始化模型上比较 token_losses 的损失和 projector 的梯度。
+配置缩小的随机初始化模型上比较 token_losses 的损失和 projector 的梯度；LanguageModelTrainingTest 在语言模型也参与
+训练时比较全部可训练参数的梯度（任务 #66）。
 """
 
 import unittest
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from pipeline.train.offload import ActivationOffload, FrozenBlocks
@@ -388,6 +390,122 @@ class TinyModelTest(unittest.TestCase):
             options = self.options(audio_attention = "varlen", gradient_checkpointing = True, precompute_metadata = precompute)
             result = self.losses_and_grad(options = options, dtype = torch.bfloat16)
             self.compare(reference = reference, result = result, atol = 2e-2, label = f"varlen precompute {precompute}")
+
+
+@unittest.skipUnless(CUDA and (MODEL_DIR / "config.json").exists(), "需要 CUDA 和阶段 1 模型目录中的代码与配置")
+class LanguageModelTrainingTest(unittest.TestCase):
+    """全量微调（任务 #66）：语言模型参与训练时，各选项下的损失和全部可训练参数的梯度与直接用模型代码、
+    F.cross_entropy 算出的一致（float32）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.full_batch = tiny_batch(audio_windows = (50, 800))
+        cls.batch = without_metadata(batch = cls.full_batch)
+
+    def model(self):
+        from pipeline.train.model import LANGUAGE_MODEL_PREFIXES
+
+        model = tiny_model(dtype = torch.float32)
+        for name, parameter in model.named_parameters():
+            if name.startswith(LANGUAGE_MODEL_PREFIXES):
+                parameter.requires_grad_(requires_grad = True)
+        return model
+
+    @staticmethod
+    def grads(model):
+        return {name: parameter.grad.clone() for name, parameter in model.named_parameters() if parameter.requires_grad}
+
+    def reference(self):
+        """模型代码的前向，完整的词表投影和 F.cross_entropy，autograd 求全部梯度。"""
+        from pipeline.train.model import move_batch
+
+        model = self.model()
+        inputs = move_batch(batch = self.batch, device = "cuda", feature_dtype = model.model.audio_tower.dtype)
+        outputs = model.model(
+            input_ids = inputs["input_ids"],
+            attention_mask = inputs["attention_mask"],
+            mm_token_type_ids = inputs["mm_token_type_ids"],
+            input_features = inputs["input_features"],
+            feature_attention_mask = inputs["feature_attention_mask"],
+            use_cache = False,
+        )
+        logits = model.lm_head(outputs.last_hidden_state[:, :-1])
+        labels = inputs["labels"][:, 1:]
+        mask = labels != -100
+        losses = F.cross_entropy(input = logits[mask], target = labels[mask], reduction = "none")
+        losses.sum().backward()
+        return losses.detach(), self.grads(model = model)
+
+    def run_with(self, options):
+        from pipeline.train.model import move_batch, token_losses
+        from pipeline.train.optimize import apply
+
+        model = self.model()
+        applied = apply(model = model, options = options, train_language_model = True)
+        batch = self.full_batch if options["precompute_metadata"] else self.batch
+        inputs = move_batch(batch = batch, device = "cuda", feature_dtype = model.model.audio_tower.dtype)
+        with applied.forward_context():
+            losses, _, _ = token_losses(model = model, inputs = inputs)
+        losses.sum().backward()
+        return losses.detach(), self.grads(model = model), model, applied, inputs
+
+    def compare(self, reference, result, label):
+        want_loss, want_grads = reference
+        got_loss, got_grads = result
+        self.assertTrue(torch.allclose(input = want_loss, other = got_loss, atol = 1e-4, rtol = 1e-4), msg = f"{label} loss")
+        self.assertEqual(set(want_grads), set(got_grads), msg = label)
+        for name, want in want_grads.items():
+            relative = float((want - got_grads[name]).norm() / want.norm().clamp(min = 1e-12))
+            self.assertLess(relative, 1e-3, msg = f"{label} {name}")
+
+    def test_matches_reference(self):
+        reference = self.reference()
+        # 语言模型参数和词嵌入（兼输出层）都得到梯度。
+        self.assertIn("model.language_model.embed_tokens.weight", reference[1])
+        self.assertIn("model.language_model.layers.0.linear_attn.conv1d.weight", reference[1])
+        base = TinyModelTest.options(self)
+        cases = {
+            "off": base,
+            "precompute": {**base, "precompute_metadata": True},
+            "checkpoint": {**base, "gradient_checkpointing": True},
+            "precompute + checkpoint 2 layers + audio swap": {
+                **base,
+                "precompute_metadata": True,
+                "checkpoint_layers": 2,
+                "audio_blocks_to_swap": 4,
+            },
+        }
+        for label, options in cases.items():
+            losses, grads, _, _, _ = self.run_with(options = options)
+            self.compare(reference = reference, result = (losses, grads), label = label)
+
+    def test_degrade_skips_language_model_streaming(self):
+        from pipeline.train.model import token_losses
+
+        base = {**TinyModelTest.options(self), "precompute_metadata": True}
+        losses, grads, model, applied, inputs = self.run_with(options = base)
+        reference = (losses, grads)
+        changes = []
+        while (change := applied.degrade()) is not None:
+            changes.append(change)
+            model.zero_grad(set_to_none = True)
+            with applied.forward_context():
+                again, _, _ = token_losses(model = model, inputs = inputs)
+            again.sum().backward()
+            self.compare(reference = reference, result = (again.detach(), self.grads(model = model)), label = f"degrade {change}")
+        # 检查点 1→4 层、音频塔流式 1→4 层；语言模型的层要更新，不流式加载。
+        self.assertEqual(len(changes), 8)
+        self.assertTrue(all("lm_blocks_to_swap" not in change for change in changes))
+
+    def test_frozen_only_options_rejected(self):
+        from pipeline.train.optimize import validate
+
+        base = TinyModelTest.options(self)
+        with self.assertRaises(ValueError):
+            validate(options = {**base, "gradient_checkpointing": True, "lm_blocks_to_swap": 2}, total = 4, train_language_model = True)
+        with self.assertRaises(ValueError):
+            validate(options = {**base, "fp8_frozen": "all"}, total = 4, train_language_model = True)
+        validate(options = {**base, "fp8_frozen": "audio"}, total = 4, train_language_model = True)
 
 
 if __name__ == "__main__":

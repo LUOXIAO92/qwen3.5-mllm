@@ -8,6 +8,14 @@
 - trainer_state.pt：断点续训用的优化器、学习率调度器、随机数状态和数据位置。默认只在最近的
   检查点中保留，较早检查点只保留前两个文件。
 
+全量微调（--train-language-model）时另有：
+
+- language_model.safetensors：语言模型的全部参数（键名与完整模型一致，以 model.language_model. 开头；
+  与输出层共用的词嵌入只存 model.language_model.embed_tokens.weight 一份），bfloat16，即训练中参与计算的权重，
+  每个检查点都有，评测时在加载模型和 projector 之后载入（pipeline/eval/run_eval.py --language-model）。
+- trainer_state.pt 中多一项 language_model_master：语言模型的 float32 主权重，续训用。它在
+  trainer_state.pt 里面，随较早检查点的 trainer_state.pt 一起删除。
+
 <output-dir>/latest 记录最近一个完整写出的检查点目录名。
 """
 
@@ -20,6 +28,7 @@ import torch
 from pipeline.train.model import PROJECTOR_PREFIX, projector_state_dict
 
 PROJECTOR_FILE = "projector.safetensors"
+LANGUAGE_MODEL_FILE = "language_model.safetensors"
 INFO_FILE = "projector.json"
 STATE_FILE = "trainer_state.pt"
 LATEST_FILE = "latest"
@@ -37,8 +46,13 @@ def save_checkpoint(
     info,
     trainer_state,
     keep_trainer_states = 1,
+    language_model = None,
 ):
-    """写出一个检查点。先写到临时目录再改名，中途中断不会留下不完整的检查点。"""
+    """写出一个检查点。先写到临时目录再改名，中途中断不会留下不完整的检查点。
+
+    language_model 是全量微调时语言模型的 {名称: CPU 上的 bfloat16 张量}（master.MasterWeights.model_state），
+    给出时写成 language_model.safetensors。
+    """
     from safetensors.torch import save_file
 
     output_dir = Path(output_dir)
@@ -61,6 +75,19 @@ def save_checkpoint(
         "dtype": "float32",
         **info,
     }
+    if language_model is not None:
+        save_file(
+            tensors = language_model,
+            filename = str(staging / LANGUAGE_MODEL_FILE),
+            metadata = {"format": "pt"},
+        )
+        dtypes = sorted({str(tensor.dtype).removeprefix("torch.") for tensor in language_model.values()})
+        info["language_model"] = {
+            "file": LANGUAGE_MODEL_FILE,
+            "tensors": len(language_model),
+            "parameters": sum(tensor.numel() for tensor in language_model.values()),
+            "dtype": ",".join(dtypes),
+        }
     (staging / INFO_FILE).write_text(
         data = json.dumps(obj = info, ensure_ascii = False, indent = 2) + "\n",
         encoding = "utf-8",

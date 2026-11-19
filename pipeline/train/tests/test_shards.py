@@ -198,7 +198,8 @@ class ConfigTest(unittest.TestCase):
 
     def test_plan_keys_are_resume_keys(self):
         self.assertTrue(set(PLAN_KEYS) <= set(RESUME_KEYS))
-        self.assertEqual(set(RESUME_KEYS) - set(PLAN_KEYS), {key for key in RESUME_KEYS if key.startswith("noise_")})
+        noise = {key for key in RESUME_KEYS if key.startswith("noise_")}
+        self.assertEqual(set(RESUME_KEYS) - set(PLAN_KEYS), noise | {"train_language_model"})
 
 
 class DigestTest(unittest.TestCase):

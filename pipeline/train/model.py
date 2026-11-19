@@ -1,4 +1,8 @@
-"""加载阶段 1 模型、冻结 projector 以外的参数、计算目标文本上的损失。"""
+"""加载阶段 1 模型、冻结训练范围以外的参数、计算目标文本上的损失。
+
+默认只训练 projector；全量微调（任务 #66，train.py 的 --train-language-model）时语言模型的全部参数也参与训练，
+音频塔和视觉塔始终冻结。
+"""
 
 import hashlib
 
@@ -8,6 +12,10 @@ import torch.nn.functional as F
 from pipeline.train.data import IGNORE_INDEX
 
 PROJECTOR_PREFIX = "model.audio_projector."
+# 语言模型的参数：词嵌入、解码层和最后的归一化都在 model.language_model 下。输出层 lm_head 与词嵌入共用同一个
+# 权重（tie_word_embeddings），named_parameters 只以 model.language_model.embed_tokens.weight 给出一次；
+# 不共用权重的模型中 lm_head.weight 是单独的参数，也属于语言模型。
+LANGUAGE_MODEL_PREFIXES = ("model.language_model.", "lm_head.")
 _RAW_DTYPES = {1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
 MODEL_INPUT_KEYS = (
     "input_ids",
@@ -35,12 +43,14 @@ def load_model(
     device = "cuda",
     dtype = torch.bfloat16,
     attn_implementation = "sdpa",
+    train_language_model = False,
 ):
-    """加载阶段 1 完整模型，只让 model.audio_projector 参与训练。
+    """加载阶段 1 完整模型，让 model.audio_projector 参与训练；train_language_model 为真时语言模型也参与训练。
 
-    冻结部分（音频塔、视觉塔、语言模型）按 dtype 加载，projector 转为 float32，
+    冻结部分（音频塔、视觉塔，只训练 projector 时还有语言模型）按 dtype 加载，projector 转为 float32，
     这样优化器更新的主权重保持 float32 精度。模型内部会把音频塔输出转成 projector 的
     精度，再把 projector 输出转成语言模型的精度，两处转换都在模型代码中完成。
+    训练语言模型时它的参数仍按 dtype 加载并用于计算，float32 主权重另由 master.MasterWeights 保存。
     """
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
@@ -56,8 +66,10 @@ def load_model(
     )
     model.model.audio_projector.float()
     for name, parameter in model.named_parameters():
-        parameter.requires_grad_(requires_grad = name.startswith(PROJECTOR_PREFIX))
+        trainable = name.startswith(PROJECTOR_PREFIX) or (train_language_model and name.startswith(LANGUAGE_MODEL_PREFIXES))
+        parameter.requires_grad_(requires_grad = trainable)
     # 冻结部分没有 dropout 需要关闭以外的训练行为，整个模型保持 eval 模式，前向结果确定。
+    # 语言模型的 attention_dropout 为 0，训练它时也不需要 train 模式。
     model.eval()
     model.to(device = device)
     return model, processor
@@ -68,6 +80,15 @@ def projector_parameters(model):
         parameter
         for name, parameter in model.named_parameters()
         if name.startswith(PROJECTOR_PREFIX)
+    ]
+
+
+def language_model_parameters(model):
+    """语言模型的全部参数 [(名称, 参数)]，与输出层共用的词嵌入只出现一次。"""
+    return [
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if name.startswith(LANGUAGE_MODEL_PREFIXES)
     ]
 
 
@@ -99,12 +120,16 @@ def load_projector(model, state):
         raise ValueError(f"意外的键：{result.unexpected_keys}")
 
 
-def frozen_fingerprint(model):
-    """对 projector 以外的全部参数和缓冲区逐个计算 SHA-256，用来确认训练前后没有变化。"""
+def frozen_fingerprint(model, trainable = ()):
+    """对 projector 和 trainable 中的参数以外的全部参数和缓冲区逐个计算 SHA-256，用来确认训练前后没有变化。
+
+    trainable 是另外参与训练的参数名（训练语言模型时为语言模型的参数），它们不参与核对。
+    """
+    skip = set(trainable)
     digests = {}
     tensors = list(model.named_parameters()) + list(model.named_buffers())
     for name, tensor in tensors:
-        if name.startswith(PROJECTOR_PREFIX):
+        if name.startswith(PROJECTOR_PREFIX) or name in skip:
             continue
         data = tensor.detach().contiguous().to(device = "cpu")
         # 按字节宽度换成整数视图再取字节，bfloat16 等 numpy 不支持的类型也能逐位比较。
@@ -137,8 +162,12 @@ class LinearCrossEntropy(torch.autograd.Function):
     """把词表投影和交叉熵合在一起分块计算，返回每个位置的损失和预测是否正确。
 
     词表约 25 万，一次算出全部位置的 float32 分数和它的梯度，批量大时要占十几 GB 显存。
-    输出层冻结，只需要对隐状态求梯度，所以前向时逐块算出分数、损失以及损失对隐状态的梯度，
+    输出层冻结时只需要对隐状态求梯度，所以前向时逐块算出分数、损失以及损失对隐状态的梯度，
     分数用完即丢；反传时把保存的梯度乘上传回的系数。数值与先投影再 F.cross_entropy 相同。
+
+    训练语言模型时输出层的权重（与词嵌入共用）也需要梯度。权重梯度是各位置「(softmax − one-hot) × 传回的系数」
+    与隐状态的乘积之和，要等反传时才知道系数，所以前向只算损失并记下每个位置的 logsumexp；反传时逐块重算分数，
+    同时求隐状态和权重的梯度。重算只在计损失的位置进行（每批几百到几千个），比语言模型本身的计算小得多。
     """
 
     @staticmethod
@@ -146,8 +175,10 @@ class LinearCrossEntropy(torch.autograd.Function):
         count = hidden_states.shape[0]
         losses = torch.empty(size = (count,), device = hidden_states.device, dtype = torch.float32)
         correct = torch.empty(size = (count,), device = hidden_states.device, dtype = torch.bool)
-        need_grad = ctx.needs_input_grad[0]
+        weight_grad = ctx.needs_input_grad[1]
+        need_grad = ctx.needs_input_grad[0] and not weight_grad
         grads = torch.empty_like(input = hidden_states) if need_grad else None
+        normalizers = torch.empty(size = (count,), device = hidden_states.device, dtype = torch.float32) if weight_grad else None
         for start in range(0, count, chunk_size):
             end = min(start + chunk_size, count)
             logits = F.linear(input = hidden_states[start:end], weight = weight).float()
@@ -156,21 +187,49 @@ class LinearCrossEntropy(torch.autograd.Function):
             target_logits = logits.gather(dim = -1, index = target[:, None]).squeeze(dim = -1)
             losses[start:end] = log_normalizer - target_logits
             correct[start:end] = logits.argmax(dim = -1) == target
+            if weight_grad:
+                normalizers[start:end] = log_normalizer
             if need_grad:
                 # 交叉熵对分数的梯度是 softmax 减去目标位置的 one-hot，原地计算以节省显存。
                 probs = logits.sub_(other = log_normalizer[:, None]).exp_()
                 rows = torch.arange(end - start, device = probs.device)
                 probs[rows, target] -= 1
                 grads[start:end] = probs.to(dtype = weight.dtype) @ weight
-        ctx.save_for_backward(grads)
+        ctx.weight_grad = weight_grad
+        ctx.chunk_size = chunk_size
+        if weight_grad:
+            ctx.save_for_backward(hidden_states, weight, targets, normalizers)
+        else:
+            ctx.save_for_backward(grads)
         ctx.mark_non_differentiable(correct)
         return losses, correct
 
     @staticmethod
     def backward(ctx, grad_losses, grad_correct):
-        (grads,) = ctx.saved_tensors
-        grad_hidden = (grads.float() * grad_losses[:, None]).to(dtype = grads.dtype)
-        return grad_hidden, None, None, None
+        if not ctx.weight_grad:
+            (grads,) = ctx.saved_tensors
+            grad_hidden = (grads.float() * grad_losses[:, None]).to(dtype = grads.dtype)
+            return grad_hidden, None, None, None
+        hidden_states, weight, targets, normalizers = ctx.saved_tensors
+        count = hidden_states.shape[0]
+        grad_hidden = torch.empty_like(input = hidden_states) if ctx.needs_input_grad[0] else None
+        grad_weight = None
+        for start in range(0, count, ctx.chunk_size):
+            end = min(start + ctx.chunk_size, count)
+            chunk = hidden_states[start:end]
+            logits = F.linear(input = chunk, weight = weight).float()
+            probs = logits.sub_(other = normalizers[start:end, None]).exp_()
+            rows = torch.arange(end - start, device = probs.device)
+            probs[rows, targets[start:end]] -= 1
+            scaled = probs.mul_(other = grad_losses[start:end, None]).to(dtype = weight.dtype)
+            if grad_hidden is not None:
+                grad_hidden[start:end] = scaled @ weight
+            # 权重梯度与整个输出层一样大（词表 × 隐藏维度），各块直接累加在同一个张量上，不另留 float32 副本。
+            if grad_weight is None:
+                grad_weight = scaled.t() @ chunk
+            else:
+                grad_weight.addmm_(mat1 = scaled.t(), mat2 = chunk)
+        return grad_hidden, grad_weight, None, None
 
 
 def token_losses_precomputed(model, inputs, chunk_size = 1024):
@@ -235,7 +294,8 @@ def token_losses(model, inputs, chunk_size = 1024):
     """前向一次，返回每个计损失位置的 (损失, 是否预测正确, 所在的样本行号)。
 
     音频塔的参数和输入都不需要梯度，autograd 不会为它保存中间结果，效果等同于 no_grad；
-    梯度从损失经过冻结的语言模型传到输入嵌入中的音频位置，再传回 projector。
+    梯度从损失经过冻结的语言模型传到输入嵌入中的音频位置，再传回 projector。训练语言模型时，
+    同一次反传也给语言模型的各层、输出层和词嵌入算出梯度。
     语言模型只输出最后一层隐状态，词表投影只在计损失的位置上分块进行。
     批次带有预先算好的元数据时改用 token_losses_precomputed。
     """

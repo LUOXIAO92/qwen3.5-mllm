@@ -29,6 +29,10 @@
   重试同一批（Applied.degrade、train.py），训练结果不变。
 
 视觉塔在本项目中从不使用，始终留在 CPU 上，不占显存。
+
+全量微调（train.py 的 --train-language-model，任务 #66）时语言模型的权重要更新：梯度检查点照常可用（反传重算
+一层时同时求这一层参数的梯度），--lm-blocks-to-swap 和 --fp8-frozen lm/all 只适用于冻结的权重，不能使用；显存
+不足时的退让只增加做梯度检查点的层，再改为流式加载音频塔。
 """
 
 import argparse
@@ -131,12 +135,16 @@ def checkpoint_count(options, total):
     return total if options["gradient_checkpointing"] else 0
 
 
-def validate(options, total):
+def validate(options, total, train_language_model = False):
     count = checkpoint_count(options = options, total = total)
     if min(options["lm_blocks_to_swap"], total) > count:
         raise ValueError("语言模型流式加载的层（--lm-blocks-to-swap）必须都做梯度检查点")
     if options["offload_activations"] and count == 0:
         raise ValueError("--offload-activations 需要梯度检查点")
+    if train_language_model and options["lm_blocks_to_swap"] > 0:
+        raise ValueError("训练语言模型时不能流式加载语言模型的层（--lm-blocks-to-swap 只适用于冻结的权重）")
+    if train_language_model and _covers(choice = options["fp8_frozen"], part = "lm"):
+        raise ValueError("训练语言模型时不能把语言模型的权重存为 fp8（--fp8-frozen lm 或 all）")
 
 
 def _covers(choice, part):
@@ -201,10 +209,12 @@ def pin_device_and_dtype(module, reference):
 class Applied:
     """apply 的结果：记录各项实际生效的设置，提供前向用的上下文，以及显存不足时的退让。"""
 
-    def __init__(self, model, options, device):
+    def __init__(self, model, options, device, train_language_model = False):
         self.model = model
         self.options = dict(options)
         self.device = device
+        # 训练语言模型时它的层不能流式加载，显存不足时跳过这一档退让。
+        self.train_language_model = train_language_model
         self.lm = None
         self.audio = None
         self.lm_forwards = None
@@ -256,7 +266,7 @@ class Applied:
         lm_step, audio_step = math.ceil(lm_total / 4), math.ceil(audio_total / 4)
         if checkpointed < lm_total:
             change = {"checkpoint_layers": min(lm_total, checkpointed + lm_step)}
-        elif options["lm_blocks_to_swap"] < lm_total:
+        elif not self.train_language_model and options["lm_blocks_to_swap"] < lm_total:
             change = {"lm_blocks_to_swap": min(lm_total, options["lm_blocks_to_swap"] + lm_step)}
         elif options["audio_blocks_to_swap"] < audio_total:
             change = {"audio_blocks_to_swap": min(audio_total, options["audio_blocks_to_swap"] + audio_step)}
@@ -277,13 +287,18 @@ class Applied:
         }
 
 
-def apply(model, options, device = "cuda"):
+def apply(model, options, device = "cuda", train_language_model = False):
     """按 options 设置模型（模型已在 device 上），返回 Applied。
 
     顺序：视觉塔移回 CPU → fp8 → 音频注意力 → torch.compile → 接管各层前向（检查点、流式加载）。
-    编译的是各层原来的前向，流式加载和检查点的包装在编译范围之外。
+    编译的是各层原来的前向，流式加载和检查点的包装在编译范围之外。train_language_model 为真时语言模型的权重
+    要更新，不允许只适用于冻结权重的设置。
     """
-    validate(options = options, total = len(model.model.language_model.layers))
+    validate(
+        options = options,
+        total = len(model.model.language_model.layers),
+        train_language_model = train_language_model,
+    )
     inner = model.model
     if getattr(inner, "visual", None) is not None:
         inner.visual.to(device = "cpu")
@@ -318,7 +333,12 @@ def apply(model, options, device = "cuda"):
             )
     if options["memory_fraction"] is not None:
         torch.cuda.set_per_process_memory_fraction(fraction = options["memory_fraction"])
-    applied = Applied(model = model, options = options, device = device)
+    applied = Applied(
+        model = model,
+        options = options,
+        device = device,
+        train_language_model = train_language_model,
+    )
     applied.install_blocks()
     torch.cuda.empty_cache()
     return applied
