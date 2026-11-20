@@ -13,8 +13,9 @@
 - language_model.safetensors：语言模型的全部参数（键名与完整模型一致，以 model.language_model. 开头；
   与输出层共用的词嵌入只存 model.language_model.embed_tokens.weight 一份），bfloat16，即训练中参与计算的权重，
   每个检查点都有，评测时在加载模型和 projector 之后载入（pipeline/eval/run_eval.py --language-model）。
-- trainer_state.pt 中多一项 language_model_master：语言模型的 float32 主权重，续训用。它在
-  trainer_state.pt 里面，随较早检查点的 trainer_state.pt 一起删除。
+- trainer_state.pt 中多一项 language_model_master：语言模型的 float32 主权重，续训用；不用主权重时
+  （--language-model-master-weights none）换成 language_model_weights：优化器直接更新的语言模型参数（bfloat16）。
+  它在 trainer_state.pt 里面，随较早检查点的 trainer_state.pt 一起删除。AdamW 状态的格式由精度选项决定（precision.py）。
 
 <output-dir>/latest 记录最近一个完整写出的检查点目录名。
 """

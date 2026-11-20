@@ -44,13 +44,17 @@
 - --init-projector <检查点目录或 projector.safetensors>：新开始的训练从已有的 projector 出发（例如只训练 projector
   的训练越过损失突降之后的检查点）。续训时不起作用，projector 取自续训的检查点。只记在训练配置中，不参与续训核对。
 - --train-language-model：语言模型的全部参数（词嵌入兼输出层、各解码层、最后的归一化）也参与训练，音频塔和视觉塔
-  仍冻结。语言模型的参数仍以 bfloat16 计算，优化器更新它们的 float32 主权重（master.py）。它改变训练内容，在
+  仍冻结。语言模型的参数仍以 bfloat16 计算，默认由优化器更新它们的 float32 主权重（master.py）。它改变训练内容，在
   RESUME_KEYS 中；以前的训练配置中没有这一项，按默认值（不训练）核对，可以照常续训。
+- --language-model-master-weights、--language-model-grad-dtype、--language-model-rounding、
+  --language-model-optimizer-states：语言模型参数组的精度（有没有 float32 主权重、梯度精度、直接更新 bfloat16 参数时
+  的舍入、AdamW 状态的格式），默认值是以前的做法，见 precision.py。它们改变优化器状态的格式，在 RESUME_KEYS 中；
+  以前的训练配置中没有这几项，按默认值核对。
 - --language-model-lr：语言模型参数组的峰值学习率，projector 仍用 --lr，两组按同一条预热加余弦的曲线变化。
   与 --lr 一样不在续训核对的配置中；续训时两组的峰值学习率都沿用检查点中学习率调度器保存的数值，命令行给出的
   数值与它不同时打印提示。
-- 检查点每次多存 language_model.safetensors（bfloat16，评测用）；主权重与 AdamW 状态在 trainer_state.pt 中，
-  与 projector 的续训状态一样只在最近的检查点中保留（--keep-trainer-states）。格式见 checkpoint.py。
+- 检查点每次多存 language_model.safetensors（bfloat16，评测用）；主权重（没有主权重时是语言模型参数）与 AdamW 状态
+  在 trainer_state.pt 中，与 projector 的续训状态一样只在最近的检查点中保留（--keep-trainer-states）。格式见 checkpoint.py。
 
 速度选项 --loss-impl（交叉熵的实现）和 --pack-sequences（每批样本拼成一行、去掉填充）见 optimize.py（任务 #66）。
 它们不改变每步的样本和损失的定义，不在 RESUME_KEYS 中，续训时可以改变。
@@ -84,7 +88,8 @@ from pipeline.train.data import (
     read_manifest,
     summarize_rows,
 )
-from pipeline.train.master import MasterWeights
+from pipeline.train import precision
+from pipeline.train.master import DirectWeights, MasterWeights
 from pipeline.train.mixing import BackgroundMixer, parse_category_weights
 from pipeline.train.shards import attach_shards, parse_dirs, plan_digest, read_header
 from pipeline.train.optimize import add_arguments as add_optimize_arguments
@@ -113,7 +118,8 @@ from pipeline.train.model import (
 EXIT_STOPPED = 75
 # 只为取得各选项的默认值而解析一次参数时，填入必填项的占位值。
 REQUIRED_PLACEHOLDERS = ["--model-dir", "", "--train-manifest", "", "--target", TARGETS[0], "--output-dir", ""]
-# 续训时必须与原训练一致的配置：它们决定数据顺序、批次内容和损失，train_language_model 决定训练哪些参数。
+# 续训时必须与原训练一致的配置：它们决定数据顺序、批次内容和损失，train_language_model 决定训练哪些参数，
+# precision.KEYS 决定语言模型参数组的更新方式和优化器状态的格式。
 # 音频从哪里读（--audio-shards、--audio-shard-dirs、--audio-shard-fallback）、清单行缓存放在哪里（--rows-cache-dir）、
 # 读取进程数、模型和输出目录都不改变批次，不在其中；--init-projector 只影响新开始的训练，也不在其中。
 RESUME_KEYS = (
@@ -136,6 +142,8 @@ RESUME_KEYS = (
     "noise_snr_max",
     "noise_category_weight",
     "train_language_model",
+    # 全量微调的精度（precision.py）：决定优化器更新哪一份权重、状态以什么格式保存。
+    *precision.KEYS,
 )
 # 决定训练计划（每一步读哪些样本）的配置，即 RESUME_KEYS 中混音和训练范围以外的各项。音频分片按这个计划排列。
 PLAN_KEYS = (
@@ -258,7 +266,7 @@ def parse_args(argv = None):
     parser.add_argument(
         "--train-language-model",
         action = "store_true",
-        help = "语言模型的全部参数也参与训练（bfloat16 计算、float32 主权重），音频塔和视觉塔仍冻结；续训时必须与原训练一致",
+        help = "语言模型的全部参数也参与训练（bfloat16 计算，精度见 --language-model-* 各项），音频塔和视觉塔仍冻结；续训时必须与原训练一致",
     )
     parser.add_argument(
         "--language-model-lr",
@@ -361,6 +369,7 @@ def parse_args(argv = None):
     )
     parser.add_argument("--no-frozen-check", action = "store_true", help = "跳过冻结参数前后一致的检查")
     parser.add_argument("--deterministic", action = "store_true", help = "使用确定性算法，同样的配置逐位复现")
+    precision.add_arguments(parser = parser)
     add_optimize_arguments(parser = parser)
     return parser.parse_args(args = argv)
 
@@ -648,35 +657,35 @@ def append_jsonl(path, record):
 
 
 def check_language_model_args(args):
-    """--train-language-model 与 --language-model-lr 必须同时给出。"""
+    """--train-language-model 与 --language-model-lr 必须同时给出；精度选项的组合必须合法（precision.validate）。"""
     if args.train_language_model and args.language_model_lr is None:
         raise SystemExit("--train-language-model 需要同时给出语言模型的峰值学习率 --language-model-lr。")
     if args.language_model_lr is not None and not args.train_language_model:
         raise SystemExit("--language-model-lr 只在 --train-language-model 时使用。")
+    try:
+        precision.validate(options = precision.options_from_args(args = args), train_language_model = args.train_language_model)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
 
 
-def make_optimizer(args, params, masters):
-    """AdamW：只训练 projector 时一个参数组；训练语言模型时 projector 与语言模型各一组（--lr、--language-model-lr）。
-
-    训练语言模型时用 fused 实现：它逐个张量就地更新；默认的 foreach 实现会为整组参数临时再分配一份与二阶矩一样大的
-    显存（2B 约 7.5 GB）。
+def make_optimizer(args, params, language_weights):
+    """AdamW：只训练 projector 时一个参数组；训练语言模型时 projector 与语言模型各一组（--lr、--language-model-lr），
+    实现与语言模型组的精度见 precision.make_optimizer。
     """
-    if masters is None:
+    if language_weights is None:
         return torch.optim.AdamW(
             params = params,
             lr = args.lr,
             betas = (0.9, 0.999),
             weight_decay = args.weight_decay,
         )
-    return torch.optim.AdamW(
-        params = [
-            {"params": params, "lr": args.lr},
-            {"params": masters.optimizer_params(), "lr": args.language_model_lr},
-        ],
+    return precision.make_optimizer(
+        projector_params = params,
+        language_model_params = language_weights.optimizer_params(),
         lr = args.lr,
-        betas = (0.9, 0.999),
+        language_model_lr = args.language_model_lr,
         weight_decay = args.weight_decay,
-        fused = True,
+        options = precision.options_from_args(args = args),
     )
 
 
@@ -763,16 +772,22 @@ def main(argv = None):
     if not trainable or set(trainable) != set(expected):
         scope = "projector 和语言模型" if args.train_language_model else "projector"
         raise RuntimeError(f"可训练参数应当只有 {scope}：{sorted(set(trainable) ^ set(expected))[:10]}")
-    # 训练语言模型时它的参数仍以 bfloat16 计算，优化器更新 float32 主权重（master.py）。续训时直接用检查点中的
-    # 主权重，并写回模型参数。
-    masters = None
+    # 训练语言模型时它的参数仍以 bfloat16 计算，优化器更新 float32 主权重或直接更新这些参数（master.py、
+    # precision.py）。续训时用检查点中保存的那份权重，并写回模型参数。
+    language_weights = None
     if args.train_language_model:
-        saved_masters = trainer_state.pop("language_model_master", None) if trainer_state is not None else None
-        if trainer_state is not None and saved_masters is None:
-            raise SystemExit(f"{resume_dir / STATE_FILE} 中没有语言模型的主权重，无法续训。")
-        masters = MasterWeights(named_parameters = language_named, state = saved_masters)
-        del saved_masters
-    trainable_tensors = params + (masters.optimizer_params() if masters is not None else [])
+        weights_class = MasterWeights if args.language_model_master_weights == "fp32" else DirectWeights
+        saved_weights = trainer_state.pop(weights_class.STATE_KEY, None) if trainer_state is not None else None
+        if trainer_state is not None and saved_weights is None:
+            raise SystemExit(f"{resume_dir / STATE_FILE} 中没有 {weights_class.STATE_KEY}（语言模型的权重），无法续训。")
+        language_weights = weights_class(
+            named_parameters = language_named,
+            state = saved_weights,
+            grad_dtype = precision.DTYPES[args.language_model_grad_dtype],
+        )
+        del saved_weights
+    # 裁剪梯度的对象：projector 参数和优化器更新的语言模型张量（梯度在它们的 .grad 上）。
+    trainable_tensors = params + (language_weights.optimizer_params() if language_weights is not None else [])
 
     mixer = None
     if args.noise_manifest:
@@ -821,7 +836,7 @@ def main(argv = None):
         raise SystemExit("请给出 --epochs 或 --max-steps。")
     config["total_steps"] = total_steps
 
-    optimizer = make_optimizer(args = args, params = params, masters = masters)
+    optimizer = make_optimizer(args = args, params = params, language_weights = language_weights)
     # 同一条曲线作用于每个参数组：各组的学习率都是本组峰值乘以这个系数。
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer = optimizer,
@@ -843,7 +858,7 @@ def main(argv = None):
         stream.offset = trainer_state["offset"]
         print(f"从 {resume_dir.name} 续训：第 {step} 步，第 {stream.epoch} 轮第 {stream.offset} 个微批。")
         # 学习率调度器的状态带着各组的峰值学习率（base_lrs），续训按它继续，命令行的 --lr 等不起作用。
-        requested = [args.lr] + ([args.language_model_lr] if masters is not None else [])
+        requested = [args.lr] + ([args.language_model_lr] if language_weights is not None else [])
         if [float(value) for value in scheduler.base_lrs] != requested:
             print(f"续训沿用检查点中的峰值学习率 {scheduler.base_lrs}，命令行给出的 {requested} 不起作用。", flush = True)
     else:
@@ -903,6 +918,13 @@ def main(argv = None):
         "total_steps": total_steps,
         "start_step": step,
         "optimize": optimized.describe(),
+        "language_model_precision": (
+            precision.describe(
+                options = precision.options_from_args(args = args),
+                parameters = sum(parameter.numel() for _, parameter in language_named),
+            )
+            if args.train_language_model else None
+        ),
     }, ensure_ascii = False))
 
     before = None
@@ -977,8 +999,8 @@ def main(argv = None):
             "config": config,
             "wall_seconds": progress.elapsed(),
         }
-        if masters is not None:
-            state["language_model_master"] = masters.state_dict()
+        if language_weights is not None:
+            state[language_weights.STATE_KEY] = language_weights.state_dict()
         directory = save_checkpoint(
             output_dir = output_dir,
             step = step,
@@ -986,7 +1008,7 @@ def main(argv = None):
             info = current_info(),
             trainer_state = state,
             keep_trainer_states = args.keep_trainer_states,
-            language_model = masters.model_state() if masters is not None else None,
+            language_model = language_weights.model_state() if language_weights is not None else None,
         )
         print(f"已保存 {directory}", flush = True)
         progress.write(step = step, last_checkpoint = directory.name)
@@ -1059,8 +1081,8 @@ def main(argv = None):
                 # 显存不足：丢掉这一步已累积的梯度，加大梯度检查点或流式加载后重试同一批，训练结果不变。
                 # 在 except 之外处理，这时异常连同失败那一步的中间结果已经释放。
                 optimizer.zero_grad(set_to_none = True)
-                if masters is not None:
-                    masters.zero_model_grads()
+                if language_weights is not None:
+                    language_weights.zero_model_grads()
                 torch.cuda.empty_cache()
                 change = optimized.degrade()
                 if change is None:
@@ -1077,7 +1099,7 @@ def main(argv = None):
                 ]
                 if leaked:
                     raise RuntimeError(f"冻结参数出现了梯度：{leaked[:5]}")
-                missing = masters.without_grad() if masters is not None else []
+                missing = language_weights.without_grad() if language_weights is not None else []
                 if missing:
                     raise RuntimeError(f"语言模型的这些参数没有得到梯度：{missing[:5]}")
                 checked_grads = True
@@ -1093,8 +1115,8 @@ def main(argv = None):
                 continue
             skipped_steps = 0
             optimizer.step()
-            if masters is not None:
-                masters.copy_to_model()
+            if language_weights is not None:
+                language_weights.copy_to_model()
             scheduler.step()
             optimizer.zero_grad(set_to_none = True)
             step += 1
@@ -1141,7 +1163,8 @@ def main(argv = None):
                         number = window["mixed"] / max(1, window["samples"] - window["empty"]),
                         ndigits = 4,
                     ),
-                    "lr": scheduler.get_last_lr()[0],
+                    # torchao 的优化器中学习率是张量，统一转成数值。
+                    "lr": float(scheduler.get_last_lr()[0]),
                     "grad_norm": round(number = window["grad_norm"] / window["steps"], ndigits = 4),
                     "it_per_s": round(number = window["steps"] / train_seconds, ndigits = 3),
                     "samples_per_s": round(number = window["samples"] / train_seconds, ndigits = 2),
@@ -1153,9 +1176,9 @@ def main(argv = None):
                     "elapsed_s": round(number = progress.elapsed()),
                     "eta_s": round(number = eta) if eta is not None else None,
                 }
-                if masters is not None:
+                if language_weights is not None:
                     # 语言模型参数组的学习率；lr 是 projector 参数组的。
-                    record["lm_lr"] = scheduler.get_last_lr()[1]
+                    record["lm_lr"] = float(scheduler.get_last_lr()[1])
                 append_jsonl(path = log_path, record = record)
                 print(progress.line(record = record), flush = True)
                 progress.write(
