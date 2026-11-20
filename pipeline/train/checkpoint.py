@@ -51,7 +51,7 @@ def save_checkpoint(
 ):
     """写出一个检查点。先写到临时目录再改名，中途中断不会留下不完整的检查点。
 
-    language_model 是全量微调时语言模型的 {名称: CPU 上的 bfloat16 张量}（master.MasterWeights.model_state），
+    language_model 是全量微调时语言模型的 {名称: CPU 上的 bfloat16 张量}（master.py 中两个类的 model_state），
     给出时写成 language_model.safetensors。
     """
     from safetensors.torch import save_file

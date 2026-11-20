@@ -68,7 +68,7 @@ def load_model(
     冻结部分（音频塔、视觉塔，只训练 projector 时还有语言模型）按 dtype 加载，projector 转为 float32，
     这样优化器更新的主权重保持 float32 精度。模型内部会把音频塔输出转成 projector 的
     精度，再把 projector 输出转成语言模型的精度，两处转换都在模型代码中完成。
-    训练语言模型时它的参数仍按 dtype 加载并用于计算，float32 主权重另由 master.MasterWeights 保存。
+    训练语言模型时它的参数仍按 dtype 加载并用于计算，优化器怎样更新它们见 master.py 和 precision.py。
     attn_implementation 也可以是按子配置给出的字典，拼接批次时用 PACKED_ATTENTION。
     """
     from transformers import AutoModelForImageTextToText, AutoProcessor

@@ -663,7 +663,10 @@ def check_language_model_args(args):
     if args.language_model_lr is not None and not args.train_language_model:
         raise SystemExit("--language-model-lr 只在 --train-language-model 时使用。")
     try:
-        precision.validate(options = precision.options_from_args(args = args), train_language_model = args.train_language_model)
+        precision.validate(
+            options = precision.options_from_args(args = args),
+            train_language_model = args.train_language_model,
+        )
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
