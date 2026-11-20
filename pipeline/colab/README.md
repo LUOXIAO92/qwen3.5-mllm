@@ -382,7 +382,17 @@ drive.flush_and_unmount()
 - Colab 的 Python 是 3.13，本机是 3.14，包的版本相同。数据读取进程固定用 forkserver 启动（`train.WORKER_START_METHOD`，Python 3.14 的默认值），读取进程不继承主进程中几百万行清单字典。torchcodec 使用 Colab 系统的 FFmpeg，FLAC 是无损格式，解码结果与本机相同。
 - 输出目录在 Drive 上：每 2,500 步保存的检查点、`progress.json` 和日志都写到 Drive。训练程序只保留最近一个检查点的 `trainer_state.pt`，删掉的旧文件进入 Drive 的回收站并占用空间，需要时手动清空。
 - 窗口程序读 `$OUT/latest` 和 `$OUT/progress.json` 得知训练进度。换输出目录时，单元格 5、6、7 的 `$OUT` 要一致。
-- 拼接批次 `--pack-sequences`（任务 #66，见 `pipeline/train/__init__.py`「交叉熵实现与拼接批次」）需要 flash-attn 和 causal-conv1d，`requirements-train.txt` 目前没有这两个包，Colab 上用这个选项要先为 Python 3.13、torch 2.13 装好它们；缺少时训练程序开始前就停止，不会悄悄退回会让样本互相串扰的实现。`--loss-impl torch` 不需要额外的包。
+- 拼接批次 `--pack-sequences`（任务 #66，见 `pipeline/train/__init__.py`「交叉熵实现与拼接批次」）需要 flash-attn 和 causal-conv1d。PyPI 上没有与 torch 2.13.0+cu130、Python 3.13 对应的安装包，所以不放在 `requirements-train.txt` 中，而是事先把两个 `.whl` 放到 Drive 的 `$DRIVE_DIR/wheels/packing/`，`setup.sh` 看到这个目录就安装并导入核对；目录不存在时跳过。缺少这两个包而用了 `--pack-sequences` 时，训练程序开始前就停止，不会悄悄退回会让样本互相串扰的实现。`--loss-impl torch` 不需要额外的包。
+
+  拼接批次用的安装包在本机这样准备（`<工作目录>/tmp/C1/wheel-build/build.sh`）：flash-attn 用社区预编译包 [mjun0812/flash-attention-prebuild-wheels](https://github.com/mjun0812/flash-attention-prebuild-wheels) v0.9.47 的 `flash_attn-2.8.3+cu130torch2.13-cp313-cp313-linux_x86_64.whl`；causal-conv1d 没有对应的预编译包（它的 `setup.py` 默认下载的现成包与 torch 2.13.0 稳定版不兼容，导入时缺符号 `c10::cuda::CUDAErrorLogCapture`），在一个装了 torch 2.13.0+cu130 的 Python 3.13 临时环境中从源码编译：
+
+  ```bash
+  CUDA_HOME=/usr/local/cuda-13.0 CAUSAL_CONV1D_FORCE_BUILD=TRUE TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0;12.0" MAX_JOBS=8 \
+      <Python 3.13 临时环境>/bin/python -m pip wheel --no-build-isolation --no-deps -w <输出目录> \
+      "git+https://github.com/Dao-AILab/causal-conv1d.git@cd81f0413cad2fc1e6f17e785ac39f59aae690cd"
+  ```
+
+  `CAUSAL_CONV1D_FORCE_BUILD=TRUE` 让它在本机编译而不去下载现成包；编译需要 `ninja` 在 PATH 上。
 
 ## 6. 监控图
 

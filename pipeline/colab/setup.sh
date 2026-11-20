@@ -60,6 +60,17 @@ if ! done_before venv; then
   mark venv
 fi
 
+# 2b. 拼接批次（--pack-sequences）用的 flash-attn 和 causal-conv1d：PyPI 上没有与 torch 2.13.0+cu130、Python 3.13
+#     对应的安装包，事先放在 Drive 的 wheels/packing/（来源与做法见 README「拼接批次用的安装包」）。目录不存在时跳过，
+#     不用 --pack-sequences 的训练不受影响；用了而缺包时，训练程序开始前就会停止。
+packing_wheels="$wheels/packing"
+if ! done_before packing && compgen -G "$packing_wheels/*.whl" > /dev/null; then
+  step "安装拼接批次用的 flash-attn、causal-conv1d"
+  "$venv/bin/python" -m pip install --no-index --no-deps "$packing_wheels"/*.whl
+  "$venv/bin/python" -c "import causal_conv1d_cuda, flash_attn_2_cuda"
+  mark packing
+fi
+
 # 3. 训练清单放回与本机相同的路径
 if ! done_before manifest; then
   step "解压训练清单到 $manifest"
