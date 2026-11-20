@@ -67,7 +67,7 @@ packing_wheels="$wheels/packing"
 if ! done_before packing && compgen -G "$packing_wheels/*.whl" > /dev/null; then
   step "安装拼接批次用的 flash-attn、causal-conv1d"
   "$venv/bin/python" -m pip install --no-index --no-deps "$packing_wheels"/*.whl
-  "$venv/bin/python" -c "import causal_conv1d_cuda, flash_attn_2_cuda"
+  "$venv/bin/python" -c "import torch, causal_conv1d_cuda, flash_attn_2_cuda"
   mark packing
 fi
 
