@@ -22,12 +22,15 @@
 - master.py：全量微调时语言模型参数的两种更新方式：float32 主权重，或直接更新 bfloat16 参数（任务 #66）。
 - precision.py：全量微调时语言模型参数组的精度选项（主权重、梯度精度、舍入、AdamW 状态格式）与优化器的选择（任务 #66）。
 - torchao_adamw.py：按参数组选择状态格式的 AdamW，计算用 torchao 的实现（任务 #66）。
+- placement.py：全量微调时语言模型参数在显存还是主机内存中更新：流式加载的层、卸载优化器（torchao 的
+  CPUOffloadOptimizer）、CPU 上的 AdamW、合并成同一格式的续训状态（任务 #66，见下文「把语言模型参数放到主机内存」）。
 - train.py：训练入口，梯度累积、线性预热加余弦退火、定期 dev 损失、检查点与断点续训。
 - check_packing.py：在真实模型和真实训练批次上核对拼接批次（任务 #66）：损失与梯度、样本之间有无串扰、用的内核。
 - optimize.py：显存与速度选项（任务 T59），每项单独开关，不改变数据、损失和学习率：语言模型的梯度检查点、
   冻结层的块流式加载、激活值卸载、冻结权重 fp8、torch.compile、音频塔的变长注意力、显存上限；任务 #66 加了
   交叉熵的实现（--loss-impl）和拼接批次（--pack-sequences）。
-- offload.py：梯度检查点、块流式加载与激活值卸载的实现，照搬 moss-image-trainer 的做法。
+- offload.py：梯度检查点、块流式加载（冻结的层，以及全量微调时可训练的层）与激活值卸载（层边界提前一层上传）
+  的实现，照搬 moss-image-trainer 的做法。
 - quant.py：冻结线性层的 fp8 存储（默认关闭）。
 - checkpoint.py：检查点格式与导出完整模型。
 - progress.py：进度日志行与持续更新的 progress.json。
@@ -41,6 +44,7 @@
 - tests/：空目标标签、混音信噪比与比例、加权抽样比例与续训一致性、分片读取与续训配置核对的单元测试，以及显存与
   速度选项与原实现一致的测试（需要 GPU，没有时跳过），以及拼接批次和 torch 交叉熵的测试（test_packing.py，GPU 部分
   还需要 flash-attn、causal-conv1d、fla），以及全量微调精度选项的测试（test_precision.py，torchao 部分没有 torchao 时跳过），
+  以及语言模型参数在主机内存中更新的测试（test_placement.py，需要 GPU 和 torchao），
   在仓库根目录运行 python -m unittest discover -s pipeline/train/tests -t .。
 
 训练清单
@@ -117,8 +121,9 @@ torchao 只在用到时导入，Colab 的环境中已列入 requirements-train.t
 梯度一项是一步反传结束到优化器更新之间同时存在的那一份；有主权重且梯度为 fp32 时 bfloat16 的梯度随算随放，只算
 float32 的 4 字节。torchao 的实现逐个张量更新，最大的张量（词嵌入兼输出层：0.8B 2.5 亿、2B 5.1 亿、4B 6.4 亿个参数）
 更新时另有临时显存。反传还要为语言模型各线性层保存输入以求权重的梯度，中间结果比冻结时多。梯度检查点
-（--gradient-checkpointing、--checkpoint-layers）照常可用，反传重算一层时同时求这一层参数的梯度；--lm-blocks-to-swap
-和 --fp8-frozen lm、all 只适用于冻结的权重，训练语言模型时不能使用，显存不足时的退让也跳过语言模型的流式加载。
+（--gradient-checkpointing、--checkpoint-layers）照常可用，反传重算一层时同时求这一层参数的梯度；--fp8-frozen lm、all
+只适用于冻结的权重，训练语言模型时不能使用。--lm-blocks-to-swap 和 --offload-optimizer 把语言模型参数的一部分或全部放到
+主机内存中更新，见下一节；显存不足时的退让在全部层做检查点之后，逐步把语言模型的层改为流式加载。
 
 检查点。每个检查点多一个 language_model.safetensors：语言模型的全部参数，bfloat16，即训练中参与计算的权重（0.8B
 1.5 GB，2B 约 3.8 GB）。评测时用 pipeline/eval/run_eval.py --language-model 在模型和 projector 之后载入，
@@ -197,6 +202,58 @@ fp32 状态；none + 随机舍入 + 8 bit 状态；none + fp32 梯度 + 随机�
 第 3 步的检查点、新代码续训（旧配置中没有精度选项）。七组的每步损失、学习率、dev 损失和第 6 步的 projector、
 language_model.safetensors 都逐位相同；两次运行结束时的冻结参数核对都是 682 个张量无变化。第 2,000 步的
 language_model.safetensors（a 和 d）都能用 pipeline/eval/run_eval.py --language-model 载入评测。
+
+把语言模型参数放到主机内存（任务 #66）
+======================================
+
+全量微调时显存中最大的几项是语言模型的 bfloat16 权重、主权重、梯度和 AdamW 状态（默认每个参数 18 字节），以及
+反传要用的层输入。三个可选项把它们按层或按张量放到锁页主机内存中，默认都关闭，打开时算法不变（placement.py、
+offload.py）：
+
+- --offload-activations（需要梯度检查点）：做检查点的层的输入（层边界）在前向中拷到主机，反传时取回。
+  --activation-prefetch（默认打开）让反传算第 i 层的同时在拷贝流上提前上传第 i - 1 层的边界，用事件同步，每层的锁页
+  主机缓冲和上传用的显存缓冲在各步之间复用（offload.BoundaryOffload）；--no-activation-prefetch 是以前的做法，用到时才
+  上传。做法照搬 moss-image-trainer 的 BlockSwap（独立的拷贝流、前向提前一层、反传提前一层、事件等待、复用的缓冲）。
+- --lm-blocks-to-swap N（需要这些层做梯度检查点）：语言模型末尾 N 层的 bfloat16 权重只放在锁页主机内存中，前向和反传
+  重算时提前一层上传、用完即释放（与冻结时的流式加载相同）；反传算完一层后，这一层的梯度先在显存中求出 float32 范数
+  （裁剪用），再在拷贝流上搬到锁页的梯度缓冲，显存中的梯度随即释放。这些层的主权重和 AdamW 状态也在主机内存中，
+  一步结束时由 CPU 上的 AdamW 更新主机内存中的权重，下一步上传的就是新权重。
+- --offload-optimizer：其余元素不少于 4096 个的语言模型参数（常驻显存的层、词嵌入兼输出层）由 torchao 0.18.0 的
+  CPUOffloadOptimizer 管理：显存中只留 bfloat16 权重，梯度一累加完就在独立的流上拷到锁页内存并释放，主权重和 AdamW
+  状态在主机内存中，CPU 更新后把新的 bfloat16 权重拷回显存。torchao 的这个类没有主权重、梯度裁剪和合并的续训格式，
+  所以每个参数的 CPU 优化器换成本项目的 HostAdamW，裁剪和续训状态由 placement.LanguageModelUpdate 处理。更小的张量
+  （归一化层的权重等，4B 共 153 个张量、约 18 万个元素）仍在显存中更新。
+
+CPU 上的 AdamW（placement.HostAdamW）。梯度以 bfloat16 搬到主机，转成 float32 是精确的，再乘上与显存中相同的裁剪系数。
+有主权重时用 torch 的 CPU fused AdamW（torch._fused_adamw_，与显存中默认的 fused AdamW 是同一种算法）按 400 万个元素
+一块更新 float32 主权重，再就近舍入写回 bfloat16 权重；没有主权重时按 torchao 的 single_param_adam 的算式（显存中这类
+组合用的实现）在 float32 中算出新权重，就近或随机舍入写回，用 torch.compile 编译成一个 CPU 内核。两种都受内存带宽
+限制，本机（16 核）约每秒 15 亿个参数。随机舍入的随机数来自自己的一份生成器状态（种子由 --seed 决定），随
+trainer_state.pt 保存（rng 中的 host_rounding），不受数据读取等其他用到 CPU 默认生成器的地方影响。
+
+支持的精度组合（precision.host_problem）：AdamW 状态必须是 fp32；主权重 fp32 或 none 都可以，none 时可以就近或随机舍入；
+还要求 --grad-accum 1（梯度每次反传后直接覆盖主机上的缓冲，torchao 的 offload_gradients 也是这样）。--grad-accum 1 时
+float32 梯度就是 bfloat16 梯度的精确转换，所以 --language-model-grad-dtype 在主机内存中不起作用。bf16、8bit、4bit、fp8
+状态是为省显存设计的，状态在主机内存中时不需要，没有实现；这些设置下打开两项会报错，显存不足的退让也跳过语言模型的
+流式加载。另外，流式加载可训练的层不能与 --compile lm、all 同用（没有验证过）。
+
+每个语言模型参数的位置与字节数（默认精度；none 时主机内存中少主权重 4 字节）：
+
+| 去处 | 显存 | 锁页主机内存 | 普通主机内存 |
+| --- | ---: | ---: | ---: |
+| 显存（默认） | 18 | 0 | 0 |
+| --offload-optimizer | 2（另有正在算的梯度；词嵌入兼输出层的梯度在整个反传中都在） | 4（权重副本、梯度） | 12（主权重、两个状态） |
+| --lm-blocks-to-swap 的层 | 0（同时最多两层的权重和一层的梯度） | 4（权重、梯度缓冲） | 12 |
+
+锁页内存由 PyTorch 的锁页分配器按 2 的幂取整，实际占用比上表多（最多一倍）；训练主进程本身（清单行等）另占约 20 GB。
+打开激活值卸载时每个做检查点的层另有一块锁页缓冲（这一批层边界大小的 1.25 倍，按需扩大）。
+
+续训。这几项不在 RESUME_KEYS 中：续训状态并回只在显存中训练时的格式（优化器两组参数、语言模型参数按 MasterWeights /
+DirectWeights 的顺序编号，每个参数的 step、exp_avg、exp_avg_sq；language_model_master 或 language_model_weights 含全部
+语言模型参数），只是主机上的那部分是 CPU 张量。所以同一个训练可以中途打开或关闭它们：只在显存中训练的检查点可以加上
+--offload-optimizer 在小显存上续训，反过来也可以。打开 --offload-optimizer 或全量微调的 --lm-blocks-to-swap 时，
+trainer_state.pt 用 map_location="cpu" 读入，主机上的状态直接使用、不再复制一份。显存不足的退让把语言模型的层改为流式
+加载时，placement.LanguageModelUpdate.rebuild 把这些层的主权重和 AdamW 状态原样搬到主机。
 
 进度
 ====

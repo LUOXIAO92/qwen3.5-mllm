@@ -16,6 +16,8 @@
 - trainer_state.pt 中多一项 language_model_master：语言模型的 float32 主权重，续训用；不用主权重时
   （--language-model-master-weights none）换成 language_model_weights：优化器直接更新的语言模型参数（bfloat16）。
   它在 trainer_state.pt 里面，随较早检查点的 trainer_state.pt 一起删除。AdamW 状态的格式由精度选项决定（precision.py）。
+  语言模型参数放在主机内存中更新时（--lm-blocks-to-swap、--offload-optimizer，placement.py），主权重和 AdamW 状态
+  并回同样的格式保存（主机上的那部分是 CPU 张量），rng 中另有 host_rounding（主机内存中随机舍入的随机数状态）。
 
 <output-dir>/latest 记录最近一个完整写出的检查点目录名。
 """

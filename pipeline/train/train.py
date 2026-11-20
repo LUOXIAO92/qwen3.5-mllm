@@ -58,6 +58,11 @@
 
 速度选项 --loss-impl（交叉熵的实现）和 --pack-sequences（每批样本拼成一行、去掉填充）见 optimize.py（任务 #66）。
 它们不改变每步的样本和损失的定义，不在 RESUME_KEYS 中，续训时可以改变。
+
+省显存的卸载选项 --offload-activations（层边界提前一层上传，--activation-prefetch）、全量微调时的 --lm-blocks-to-swap
+（流式加载可训练的层，参数在主机内存中更新）和 --offload-optimizer（梯度、主权重与 AdamW 状态放到主机内存）见
+optimize.py 和 placement.py（任务 #66）。它们只改变数据放在哪里，续训状态的格式不变，不在 RESUME_KEYS 中，续训时可以
+打开或关闭；打开后两项时续训状态读到 CPU 上（torch.load 的 map_location）。
 """
 
 import argparse
@@ -90,6 +95,7 @@ from pipeline.train.data import (
 )
 from pipeline.train import precision
 from pipeline.train.master import DirectWeights, MasterWeights
+from pipeline.train.placement import LanguageModelUpdate
 from pipeline.train.mixing import BackgroundMixer, parse_category_weights
 from pipeline.train.shards import attach_shards, parse_dirs, plan_digest, read_header
 from pipeline.train.optimize import add_arguments as add_optimize_arguments
@@ -116,6 +122,8 @@ from pipeline.train.model import (
 )
 
 EXIT_STOPPED = 75
+# trainer_state.pt 的 rng 中主机内存里随机舍入的随机数状态（placement.HostContext）。
+HOST_RNG_KEY = "host_rounding"
 # 只为取得各选项的默认值而解析一次参数时，填入必填项的占位值。
 REQUIRED_PLACEHOLDERS = ["--model-dir", "", "--train-manifest", "", "--target", TARGETS[0], "--output-dir", ""]
 # 续训时必须与原训练一致的配置：它们决定数据顺序、批次内容和损失，train_language_model 决定训练哪些参数，
@@ -643,6 +651,15 @@ def rng_state():
     }
 
 
+def host_rss_bytes():
+    """本进程当前的常驻内存（/proc/self/statm 的第二项乘页大小）；读不到时为 0。"""
+    try:
+        with open(file = "/proc/self/statm", encoding = "ascii") as handle:
+            return int(handle.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
 def restore_rng_state(state):
     random.setstate(state = state["python"])
     np.random.set_state(state = state["numpy"])
@@ -671,25 +688,23 @@ def check_language_model_args(args):
         raise SystemExit(str(error)) from error
 
 
-def make_optimizer(args, params, language_weights):
+def make_optimizer(args, params, language):
     """AdamW：只训练 projector 时一个参数组；训练语言模型时 projector 与语言模型各一组（--lr、--language-model-lr），
-    实现与语言模型组的精度见 precision.make_optimizer。
+    实现与语言模型组的精度见 precision.make_optimizer，参数放在哪里更新见 placement.py。
     """
-    if language_weights is None:
+    if language is None:
         return torch.optim.AdamW(
             params = params,
             lr = args.lr,
             betas = (0.9, 0.999),
             weight_decay = args.weight_decay,
         )
-    return precision.make_optimizer(
-        projector_params = params,
-        language_model_params = language_weights.optimizer_params(),
-        lr = args.lr,
-        language_model_lr = args.language_model_lr,
-        weight_decay = args.weight_decay,
-        options = precision.options_from_args(args = args),
-    )
+    return language.optimizer
+
+
+def host_placement(args):
+    """这次运行是否把语言模型参数放在主机内存中更新（placement.py）；续训时据此把续训状态读到 CPU 上。"""
+    return args.train_language_model and (args.offload_optimizer or args.lm_blocks_to_swap > 0)
 
 
 def main(argv = None):
@@ -735,7 +750,13 @@ def main(argv = None):
     resume_dir = latest_checkpoint(output_dir = output_dir) if args.resume else None
     trainer_state = None
     if resume_dir is not None:
-        trainer_state = torch.load(f = resume_dir / STATE_FILE, weights_only = False)
+        # 语言模型参数在主机内存中更新时，续训状态先读到 CPU：只在显存中训练时保存的检查点也能在小显存上续训，
+        # 主机上的那部分状态直接使用、不再复制（placement.adopt）。其余情况照旧按保存时的设备读入。
+        trainer_state = torch.load(
+            f = resume_dir / STATE_FILE,
+            weights_only = False,
+            map_location = "cpu" if host_placement(args = args) else None,
+        )
         changed = resume_mismatches(saved = trainer_state["config"], config = config)
         if changed:
             raise SystemExit(f"续训的配置与原训练不一致：{changed}")
@@ -763,6 +784,10 @@ def main(argv = None):
         options = options_from_args(args = args),
         device = device,
         train_language_model = args.train_language_model,
+        host_problem = precision.host_problem(
+            options = precision.options_from_args(args = args),
+            grad_accum = args.grad_accum,
+        ),
     )
     if args.pack_sequences:
         # 拼接批次时三处都必须是按样本边界分段的内核，退回参考实现时各条样本互相串扰而不报错。
@@ -776,21 +801,26 @@ def main(argv = None):
         scope = "projector 和语言模型" if args.train_language_model else "projector"
         raise RuntimeError(f"可训练参数应当只有 {scope}：{sorted(set(trainable) ^ set(expected))[:10]}")
     # 训练语言模型时它的参数仍以 bfloat16 计算，优化器更新 float32 主权重或直接更新这些参数（master.py、
-    # precision.py）。续训时用检查点中保存的那份权重，并写回模型参数。
-    language_weights = None
+    # precision.py）；参数在显存还是主机内存中更新见 placement.py。续训时用检查点中保存的那份权重，并写回模型参数。
+    language = None
     if args.train_language_model:
         weights_class = MasterWeights if args.language_model_master_weights == "fp32" else DirectWeights
         saved_weights = trainer_state.pop(weights_class.STATE_KEY, None) if trainer_state is not None else None
         if trainer_state is not None and saved_weights is None:
             raise SystemExit(f"{resume_dir / STATE_FILE} 中没有 {weights_class.STATE_KEY}（语言模型的权重），无法续训。")
-        language_weights = weights_class(
+        language = LanguageModelUpdate(
             named_parameters = language_named,
+            projector_params = params,
+            options = precision.options_from_args(args = args),
+            lr = args.lr,
+            language_model_lr = args.language_model_lr,
+            weight_decay = args.weight_decay,
+            applied = optimized,
+            offload_optimizer = args.offload_optimizer,
+            seed = args.seed,
             state = saved_weights,
-            grad_dtype = precision.DTYPES[args.language_model_grad_dtype],
         )
         del saved_weights
-    # 裁剪梯度的对象：projector 参数和优化器更新的语言模型张量（梯度在它们的 .grad 上）。
-    trainable_tensors = params + (language_weights.optimizer_params() if language_weights is not None else [])
 
     mixer = None
     if args.noise_manifest:
@@ -839,7 +869,7 @@ def main(argv = None):
         raise SystemExit("请给出 --epochs 或 --max-steps。")
     config["total_steps"] = total_steps
 
-    optimizer = make_optimizer(args = args, params = params, language_weights = language_weights)
+    optimizer = make_optimizer(args = args, params = params, language = language)
     # 同一条曲线作用于每个参数组：各组的学习率都是本组峰值乘以这个系数。
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer = optimizer,
@@ -853,15 +883,18 @@ def main(argv = None):
     step = 0
     if trainer_state is not None:
         load_projector(model = model, state = read_projector(path = resume_dir))
-        optimizer.load_state_dict(state_dict = trainer_state["optimizer"])
+        # 载入后不再留着这份引用：主机上的优化器直接使用其中的张量（placement.adopt），其余已复制到显存。
+        optimizer.load_state_dict(state_dict = trainer_state.pop("optimizer"))
         scheduler.load_state_dict(state_dict = trainer_state["scheduler"])
         restore_rng_state(state = trainer_state["rng"])
+        if language is not None and HOST_RNG_KEY in trainer_state["rng"]:
+            language.context.rng = trainer_state["rng"][HOST_RNG_KEY]
         step = trainer_state["step"]
         stream.epoch = trainer_state["epoch"]
         stream.offset = trainer_state["offset"]
         print(f"从 {resume_dir.name} 续训：第 {step} 步，第 {stream.epoch} 轮第 {stream.offset} 个微批。")
         # 学习率调度器的状态带着各组的峰值学习率（base_lrs），续训按它继续，命令行的 --lr 等不起作用。
-        requested = [args.lr] + ([args.language_model_lr] if language_weights is not None else [])
+        requested = [args.lr] + ([args.language_model_lr] if language is not None else [])
         if [float(value) for value in scheduler.base_lrs] != requested:
             print(f"续训沿用检查点中的峰值学习率 {scheduler.base_lrs}，命令行给出的 {requested} 不起作用。", flush = True)
     else:
@@ -928,6 +961,7 @@ def main(argv = None):
             )
             if args.train_language_model else None
         ),
+        "language_model_placement": language.describe() if language is not None else None,
     }, ensure_ascii = False))
 
     before = None
@@ -1002,8 +1036,10 @@ def main(argv = None):
             "config": config,
             "wall_seconds": progress.elapsed(),
         }
-        if language_weights is not None:
-            state[language_weights.STATE_KEY] = language_weights.state_dict()
+        if language is not None:
+            state[language.STATE_KEY] = language.weights_state()
+            # 主机内存中随机舍入用的随机数状态（placement.HostContext），只在显存中训练时用不到，照样保存。
+            state["rng"][HOST_RNG_KEY] = language.context.rng
         directory = save_checkpoint(
             output_dir = output_dir,
             step = step,
@@ -1011,7 +1047,7 @@ def main(argv = None):
             info = current_info(),
             trainer_state = state,
             keep_trainer_states = args.keep_trainer_states,
-            language_model = language_weights.model_state() if language_weights is not None else None,
+            language_model = language.model_state() if language is not None else None,
         )
         print(f"已保存 {directory}", flush = True)
         progress.write(step = step, last_checkpoint = directory.name)
@@ -1084,12 +1120,15 @@ def main(argv = None):
                 # 显存不足：丢掉这一步已累积的梯度，加大梯度检查点或流式加载后重试同一批，训练结果不变。
                 # 在 except 之外处理，这时异常连同失败那一步的中间结果已经释放。
                 optimizer.zero_grad(set_to_none = True)
-                if language_weights is not None:
-                    language_weights.zero_model_grads()
+                if language is not None:
+                    language.zero_model_grads()
                 torch.cuda.empty_cache()
                 change = optimized.degrade()
                 if change is None:
                     raise RuntimeError("显存不足：梯度检查点和全部层的流式加载都已打开")
+                if language is not None and "lm_blocks_to_swap" in change:
+                    # 改为流式加载的层的参数改在主机内存中更新，主权重和 AdamW 状态原样搬过去（placement.py）。
+                    language.rebuild()
                 config["optimize_degraded"] = optimized.describe()
                 print(f"第 {step + 1} 步显存不足，改为 {change}，重试同一批。", flush = True)
             step_loss, step_correct, empty_loss_total, empty_correct_total = totals
@@ -1102,12 +1141,16 @@ def main(argv = None):
                 ]
                 if leaked:
                     raise RuntimeError(f"冻结参数出现了梯度：{leaked[:5]}")
-                missing = language_weights.without_grad() if language_weights is not None else []
+                missing = language.without_grad() if language is not None else []
                 if missing:
                     raise RuntimeError(f"语言模型的这些参数没有得到梯度：{missing[:5]}")
                 checked_grads = True
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(parameters = trainable_tensors, max_norm = args.max_grad_norm)
+            if language is not None:
+                # projector 和语言模型的梯度一起裁剪；语言模型的梯度可能在主机内存中（placement.py）。
+                grad_norm = language.clip_grad_norm(max_norm = args.max_grad_norm)
+            else:
+                grad_norm = torch.nn.utils.clip_grad_norm_(parameters = params, max_norm = args.max_grad_norm)
             if not math.isfinite(step_loss) or not torch.isfinite(input = grad_norm):
                 optimizer.zero_grad(set_to_none = True)
                 skipped_steps += 1
@@ -1118,8 +1161,8 @@ def main(argv = None):
                 continue
             skipped_steps = 0
             optimizer.step()
-            if language_weights is not None:
-                language_weights.copy_to_model()
+            if language is not None:
+                language.copy_to_model()
             scheduler.step()
             optimizer.zero_grad(set_to_none = True)
             step += 1
@@ -1176,10 +1219,12 @@ def main(argv = None):
                     "mem_gb": round(number = mem_gb, ndigits = 2),
                     # PyTorch 缓存分配器向驱动申请并保留的显存峰值（含已释放、留作复用的部分），更接近显卡上的实际占用。
                     "reserved_gb": round(number = reserved_gb, ndigits = 2),
+                    # 训练主进程占用的主机内存（常驻集，含锁页内存；不含数据读取进程），参数放在主机内存中时用来核对。
+                    "host_rss_gb": round(number = host_rss_bytes() / 2 ** 30, ndigits = 2),
                     "elapsed_s": round(number = progress.elapsed()),
                     "eta_s": round(number = eta) if eta is not None else None,
                 }
-                if language_weights is not None:
+                if language is not None:
                     # 语言模型参数组的学习率；lr 是 projector 参数组的。
                     record["lm_lr"] = float(scheduler.get_last_lr()[1])
                 append_jsonl(path = log_path, record = record)

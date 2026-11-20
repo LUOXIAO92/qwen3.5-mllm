@@ -17,8 +17,14 @@
   每少做一层检查点，每个 token 多占这一层的中间结果（0.8B 约 0.085 MB，4B 约 0.18 MB），每步少重算一层。
 - --lm-blocks-to-swap N、--audio-blocks-to-swap N：把语言模型 / 音频塔末尾 N 层的冻结权重放在锁页主机内存中，
   训练时按层流式上传（offload.py），N 大于层数时就是全部层。语言模型流式加载的层必须都做梯度检查点。
+  全量微调时（任务 #66）语言模型的这些层要更新：权重只在主机内存中，反传算完一层后梯度搬到主机，主权重和 AdamW 状态
+  也在主机内存中，由 CPU 更新（placement.py）。
 - --offload-activations：前向时把 autograd 保存的张量（主要是梯度检查点留下的层输入）搬到锁页主机内存，
-  反传时搬回（offload.py）。需要梯度检查点。
+  反传时搬回（offload.py）。需要梯度检查点。--activation-prefetch（默认打开，任务 #66）：层输入由 BoundaryOffload 管理，
+  反传算第 i 层时提前上传第 i - 1 层的输入；--no-activation-prefetch 时与以前一样，用到时才上传。
+- --offload-optimizer（任务 #66，只用于全量微调）：常驻显存的语言模型参数的梯度、主权重和 AdamW 状态放在主机内存中，
+  显存中只留 bfloat16 权重；梯度在反传中一算出就搬走，CPU 更新后把新权重拷回显存（torchao 的 CPUOffloadOptimizer，
+  placement.py）。
 - --fp8-frozen none|lm|audio|all（默认 none）：冻结层的线性权重存为 fp8（quant.py）。
 - --compile none|lm|audio|all（默认 none）：用 torch.compile 编译语言模型解码层 / 音频塔编码层的前向（形状可变，
   dynamic = True）。fla 的线性注意力内核不参与编译。每个进程开始时要先编译几分钟。0.8B 上速度再快约 12%，测得的
@@ -38,8 +44,16 @@
 视觉塔在本项目中从不使用，始终留在 CPU 上，不占显存。
 
 全量微调（train.py 的 --train-language-model，任务 #66）时语言模型的权重要更新：梯度检查点照常可用（反传重算
-一层时同时求这一层参数的梯度），--lm-blocks-to-swap 和 --fp8-frozen lm/all 只适用于冻结的权重，不能使用；显存
-不足时的退让只增加做梯度检查点的层，再改为流式加载音频塔。
+一层时同时求这一层参数的梯度）；--lm-blocks-to-swap 和 --offload-optimizer 把语言模型参数放到主机内存中更新，
+只支持 fp32 的 AdamW 状态和 --grad-accum 1（precision.host_problem，其余组合不允许）；--fp8-frozen lm/all 只适用于
+冻结的权重，不能使用。显存不足时的退让先增加做梯度检查点的层，再逐步把语言模型的层改为流式加载（参数改在主机内存中
+更新，主权重和 AdamW 状态原样搬过去，placement.LanguageModelUpdate.rebuild；精度设置不支持时跳过这一档），最后改为
+流式加载音频塔。
+
+续训。--offload-activations、--activation-prefetch、--lm-blocks-to-swap、--offload-optimizer 与其余各项一样不在续训
+核对项中：它们只改变激活值、权重、梯度和优化器状态放在显存还是主机内存中，算法不变，续训状态的格式也不变（placement.py
+把主机上的状态并回只在显存中训练时的格式），所以续训时可以打开或关闭。层输入和权重的搬运是逐位拷贝，激活值卸载的结果与
+不卸载时逐位相同；CPU 上的 AdamW 与显存中的 AdamW 舍入不同，主机内存中更新的训练与只在显存中的训练只在舍入误差上不同。
 """
 
 import argparse
@@ -48,7 +62,7 @@ import math
 
 import torch
 
-from pipeline.train.offload import ActivationOffload, FrozenBlocks
+from pipeline.train.offload import ActivationOffload, BoundaryOffload, FrozenBlocks
 from pipeline.train.quant import quantize_fp8
 
 PARTS = ("none", "lm", "audio", "all")
@@ -66,6 +80,8 @@ OPTION_KEYS = (
     "memory_fraction",
     "loss_impl",
     "pack_sequences",
+    "activation_prefetch",
+    "offload_optimizer",
 )
 
 
@@ -87,7 +103,10 @@ def add_arguments(parser):
         "--lm-blocks-to-swap",
         type = int,
         default = 0,
-        help = "语言模型末尾多少层的冻结权重放在主机内存中按层流式加载，0 表示全部常驻显存",
+        help = (
+            "语言模型末尾多少层的权重放在主机内存中按层流式加载，0 表示全部常驻显存；全量微调时这些层的梯度、"
+            "主权重和 AdamW 状态也在主机内存中，由 CPU 更新（placement.py）"
+        ),
     )
     group.add_argument(
         "--audio-blocks-to-swap",
@@ -99,6 +118,20 @@ def add_arguments(parser):
         "--offload-activations",
         action = "store_true",
         help = "前向时把保存给反传的激活值搬到锁页主机内存（需要梯度检查点）",
+    )
+    group.add_argument(
+        "--activation-prefetch",
+        action = argparse.BooleanOptionalAction,
+        default = True,
+        help = "激活值卸载时，反传算一层的同时提前上传前一层的层边界（默认打开；关闭时用到才上传）",
+    )
+    group.add_argument(
+        "--offload-optimizer",
+        action = "store_true",
+        help = (
+            "全量微调时常驻显存的语言模型参数的梯度、主权重和 AdamW 状态放在主机内存中，由 CPU 更新"
+            "（torchao 的 CPUOffloadOptimizer，placement.py）；显存中只留 bfloat16 权重"
+        ),
     )
     group.add_argument(
         "--fp8-frozen",
@@ -156,14 +189,29 @@ def checkpoint_count(options, total):
     return total if options["gradient_checkpointing"] else 0
 
 
-def validate(options, total, train_language_model = False):
+def validate(
+    options,
+    total,
+    train_language_model = False,
+    host_problem = None,
+):
+    """检查选项的组合，不合法时抛出 ValueError。
+
+    host_problem 是全量微调时语言模型参数不能在主机内存中更新的原因（precision.host_problem），为 None 时可以：
+    它决定全量微调能否流式加载语言模型的层（--lm-blocks-to-swap）和打开 --offload-optimizer。
+    """
     count = checkpoint_count(options = options, total = total)
     if min(options["lm_blocks_to_swap"], total) > count:
         raise ValueError("语言模型流式加载的层（--lm-blocks-to-swap）必须都做梯度检查点")
     if options["offload_activations"] and count == 0:
         raise ValueError("--offload-activations 需要梯度检查点")
-    if train_language_model and options["lm_blocks_to_swap"] > 0:
-        raise ValueError("训练语言模型时不能流式加载语言模型的层（--lm-blocks-to-swap 只适用于冻结的权重）")
+    if options.get("offload_optimizer") and not train_language_model:
+        raise ValueError("--offload-optimizer 只作用于语言模型参数组，需要 --train-language-model")
+    if train_language_model and host_problem is not None:
+        if options["lm_blocks_to_swap"] > 0:
+            raise ValueError(f"全量微调时流式加载语言模型的层（--lm-blocks-to-swap）不支持这组设置：{host_problem}")
+        if options.get("offload_optimizer"):
+            raise ValueError(f"--offload-optimizer 不支持这组设置：{host_problem}")
     if train_language_model and _covers(choice = options["fp8_frozen"], part = "lm"):
         raise ValueError("训练语言模型时不能把语言模型的权重存为 fp8（--fp8-frozen lm 或 all）")
     if options.get("pack_sequences"):
@@ -171,6 +219,8 @@ def validate(options, total, train_language_model = False):
             raise ValueError("--pack-sequences 需要 --precompute-metadata（样本边界在数据读取进程中算好）")
         if options["compile"] != "none":
             raise ValueError("--pack-sequences 没有与 --compile 一起验证过，不能同用")
+    if train_language_model and options["lm_blocks_to_swap"] > 0 and _covers(choice = options["compile"], part = "lm"):
+        raise ValueError("全量微调时流式加载语言模型的层没有与 --compile lm、all 一起验证过，不能同用")
 
 
 def _covers(choice, part):
@@ -235,12 +285,20 @@ def pin_device_and_dtype(module, reference):
 class Applied:
     """apply 的结果：记录各项实际生效的设置，提供前向用的上下文，以及显存不足时的退让。"""
 
-    def __init__(self, model, options, device, train_language_model = False):
+    def __init__(
+        self,
+        model,
+        options,
+        device,
+        train_language_model = False,
+        host_problem = None,
+    ):
         self.model = model
         self.options = dict(options)
         self.device = device
-        # 训练语言模型时它的层不能流式加载，显存不足时跳过这一档退让。
         self.train_language_model = train_language_model
+        # 全量微调时语言模型的层能否流式加载（参数在主机内存中更新，placement.py）；不能时显存不足的退让跳过这一档。
+        self.lm_streamable = not train_language_model or host_problem is None
         self.lm = None
         self.audio = None
         self.lm_forwards = None
@@ -255,11 +313,16 @@ class Applied:
     def install_blocks(self):
         """按当前设置接管语言模型和音频塔各层的前向。"""
         options = self.options
+        boundaries = None
+        if options["offload_activations"] and options.get("activation_prefetch", True):
+            boundaries = BoundaryOffload(device = self.device)
         self.lm = FrozenBlocks(
             blocks = self.lm_layers(),
             checkpoint = checkpoint_count(options = options, total = len(self.lm_layers())),
             swap_count = options["lm_blocks_to_swap"],
             device = self.device,
+            trainable = self.train_language_model,
+            boundaries = boundaries,
         )
         self.audio = FrozenBlocks(
             blocks = self.audio_layers(),
@@ -274,17 +337,27 @@ class Applied:
                 stack.remove()
         self.lm = self.audio = None
 
+    @contextlib.contextmanager
     def forward_context(self):
-        """训练前向用的上下文：打开激活值卸载时把保存的张量搬到主机内存。"""
-        if self.options["offload_activations"]:
-            return ActivationOffload(device = self.device)
-        return contextlib.nullcontext()
+        """训练前向用的上下文：打开激活值卸载时，做检查点的层的输入交给 BoundaryOffload（提前上传），其余保存的张量
+        由 ActivationOffload 的钩子搬到主机内存。"""
+        if not self.options["offload_activations"]:
+            yield
+            return
+        self.lm.offloading = True
+        try:
+            with ActivationOffload(device = self.device):
+                yield
+        finally:
+            self.lm.offloading = False
 
     def degrade(self):
         """显存不足时退一步：先逐步增加做梯度检查点的语言模型层，再逐步把语言模型、音频塔的层改为流式加载。
 
         每步增加该组层数的四分之一（向上取整），层数和维度都从模型读取。返回这一步改动的设置；已经无法再省时
-        返回 None。只改变权重和激活值放在哪里，下一次重试同一批数据，训练结果不变。
+        返回 None。只改变权重和激活值放在哪里，下一次重试同一批数据，训练结果不变。全量微调时语言模型的层改为流式
+        加载后，这些层的参数改在主机内存中更新，调用者要让 placement.LanguageModelUpdate.rebuild 重新安排；
+        精度设置不支持主机内存中的更新时（lm_streamable 为假）跳过这一档。
         """
         options = self.options
         lm_total, audio_total = len(self.lm_layers()), len(self.audio_layers())
@@ -292,7 +365,7 @@ class Applied:
         lm_step, audio_step = math.ceil(lm_total / 4), math.ceil(audio_total / 4)
         if checkpointed < lm_total:
             change = {"checkpoint_layers": min(lm_total, checkpointed + lm_step)}
-        elif not self.train_language_model and options["lm_blocks_to_swap"] < lm_total:
+        elif self.lm_streamable and options["lm_blocks_to_swap"] < lm_total:
             change = {"lm_blocks_to_swap": min(lm_total, options["lm_blocks_to_swap"] + lm_step)}
         elif options["audio_blocks_to_swap"] < audio_total:
             change = {"audio_blocks_to_swap": min(audio_total, options["audio_blocks_to_swap"] + audio_step)}
@@ -313,17 +386,24 @@ class Applied:
         }
 
 
-def apply(model, options, device = "cuda", train_language_model = False):
+def apply(
+    model,
+    options,
+    device = "cuda",
+    train_language_model = False,
+    host_problem = None,
+):
     """按 options 设置模型（模型已在 device 上），返回 Applied。
 
     顺序：视觉塔移回 CPU → fp8 → 音频注意力 → torch.compile → 接管各层前向（检查点、流式加载）。
     编译的是各层原来的前向，流式加载和检查点的包装在编译范围之外。train_language_model 为真时语言模型的权重
-    要更新，不允许只适用于冻结权重的设置。
+    要更新，不允许只适用于冻结权重的设置；host_problem 见 validate。
     """
     validate(
         options = options,
         total = len(model.model.language_model.layers),
         train_language_model = train_language_model,
+        host_problem = host_problem,
     )
     inner = model.model
     if getattr(inner, "visual", None) is not None:
@@ -364,6 +444,7 @@ def apply(model, options, device = "cuda", train_language_model = False):
         options = options,
         device = device,
         train_language_model = train_language_model,
+        host_problem = host_problem,
     )
     applied.install_blocks()
     torch.cuda.empty_cache()

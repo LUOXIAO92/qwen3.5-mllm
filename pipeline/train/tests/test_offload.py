@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from pipeline.train.offload import ActivationOffload, FrozenBlocks
+from pipeline.train.offload import ActivationOffload, BoundaryOffload, FrozenBlocks
 from pipeline.train.quant import FP8Linear, quantize_fp8
 
 CUDA = torch.cuda.is_available()
@@ -143,6 +143,85 @@ class FrozenBlocksTest(unittest.TestCase):
         self.assert_same(reference = self.reference, result = result, label = "offload")
         _, _, result = self.run_with(checkpoint = True, swap_count = 6, offload = True)
         self.assert_same(reference = self.reference, result = result, label = "offload + swap")
+
+    def run_boundaries(
+        self,
+        swap_count,
+        prefetch,
+        trainable = False,
+        steps = 3,
+        offload = True,
+    ):
+        """层边界交给 BoundaryOffload（提前一层上传或不提前），返回结果、各步每次取回时是否已提前上传、主机缓冲。
+        offload 为假时不卸载层边界（对照）。"""
+        model = build_stack()
+        if trainable:
+            for layer in model.layers:
+                layer.requires_grad_(requires_grad = True)
+        store = BoundaryOffload(prefetch = prefetch) if offload else None
+        stack = FrozenBlocks(
+            blocks = model.layers,
+            checkpoint = True,
+            swap_count = swap_count,
+            trainable = trainable,
+            boundaries = store,
+        )
+        ready = []
+        if store is not None:
+            load = store.load
+
+            def recording_load(boundary):
+                ready.append(boundary.device_tensor is not None)
+                return load(boundary = boundary)
+
+            store.load = recording_load
+        generator = torch.Generator().manual_seed(1)
+        inputs = torch.randn(size = (4, 10, 32), generator = generator).to(device = "cuda")
+        scale = torch.full(size = (32,), fill_value = 0.5, device = "cuda")
+        outputs, grads, buffers = [], [], []
+        for _ in range(steps):
+            model.zero_grad(set_to_none = True)
+            stack.offloading = True
+            output = model(inputs = inputs, scale = scale)
+            stack.offloading = False
+            output.square().sum().backward()
+            torch.cuda.synchronize()
+            outputs.append(output.detach().clone())
+            grads.append(model.projector.weight.grad.clone())
+            if store is not None:
+                buffers.append({index: buffer.data_ptr() for index, buffer in store.host.items()})
+        return model, stack, (outputs, grads), ready, buffers
+
+    def test_boundary_prefetch(self):
+        """层边界卸载（提前一层上传、不提前、加上流式加载）的输出和梯度与不卸载时逐位相同；提前上传时，反传中除最后
+        一层外，每层的边界在用到时都已在上传；主机缓冲在各步之间复用，不再申请。"""
+        for swap_count in (0, 6):
+            for prefetch in (True, False):
+                _, stack, result, ready, buffers = self.run_boundaries(swap_count = swap_count, prefetch = prefetch)
+                label = f"swap {swap_count} prefetch {prefetch}"
+                for want, got in zip(self.reference[0] + self.reference[1], result[0] + result[1]):
+                    self.assertTrue(torch.allclose(input = want, other = got, atol = 1e-5, rtol = 1e-5), msg = label)
+                # 每步 6 层：第 5 层（反传的第一层）用到时才上传，其余 5 层已经提前上传。
+                self.assertEqual(len(ready), 18, msg = label)
+                expected = ([False] + [True] * 5) * 3 if prefetch else [False] * 18
+                self.assertEqual(ready, expected, msg = label)
+                self.assertEqual(buffers[0], buffers[-1], msg = label)
+                self.assertEqual(stack.boundaries.saved, {}, msg = label)
+
+    def test_boundary_prefetch_bitwise(self):
+        """卸载只改变层边界放在哪里：与同样做梯度检查点、不卸载的结果逐位相同（含流式加载的可训练层）。"""
+        reference, _, want, _, _ = self.run_boundaries(swap_count = 0, prefetch = True, trainable = True, offload = False)
+        want_layer = reference.layers[5].up.weight.grad.clone()
+        model, stack, got, _, _ = self.run_boundaries(swap_count = 2, prefetch = True, trainable = True)
+        for expected, actual in zip(want[0] + want[1], got[0] + got[1]):
+            self.assertTrue(torch.equal(input = expected, other = actual))
+        # 流式加载的可训练层：梯度在主机缓冲中，与常驻显存时的梯度逐位相同，范数也已求出。
+        grads = {id(parameter): grad for parameter, _, grad in stack.streamed_parameters()}
+        host = grads[id(model.layers[5].up.weight)]
+        self.assertTrue(torch.equal(input = host.to(device = "cuda"), other = want_layer))
+        self.assertIsNone(model.layers[5].up.weight.grad)
+        norms = [norm for layer in stack.swap.grad_norms.values() for norm in layer]
+        self.assertEqual(len(norms), len(grads))
 
     def test_no_grad_streaming(self):
         model = build_stack()
@@ -447,7 +526,7 @@ class LanguageModelTrainingTest(unittest.TestCase):
         with applied.forward_context():
             losses, _, _ = token_losses(model = model, inputs = inputs)
         losses.sum().backward()
-        return losses.detach(), self.grads(model = model), model, applied, inputs
+        return losses.detach(), self.grads_with_host(model = model, applied = applied), model, applied, inputs
 
     def compare(self, reference, result, label):
         want_loss, want_grads = reference
@@ -479,8 +558,26 @@ class LanguageModelTrainingTest(unittest.TestCase):
             losses, grads, _, _, _ = self.run_with(options = options)
             self.compare(reference = reference, result = (losses, grads), label = label)
 
-    def test_degrade_skips_language_model_streaming(self):
+    @staticmethod
+    def streamed_grads(applied):
+        """流式加载的可训练层：梯度在主机上的缓冲中 {参数 id: 梯度}。"""
+        torch.cuda.synchronize()
+        return {id(parameter): grad.clone() for parameter, _, grad in applied.lm.streamed_parameters()}
+
+    def grads_with_host(self, model, applied):
+        """全部可训练参数的梯度：常驻显存的在 .grad 上，流式加载的在主机缓冲中（搬到显存比较）。"""
+        host = self.streamed_grads(applied = applied)
+        return {
+            name: (host[id(parameter)].to(device = "cuda") if id(parameter) in host else parameter.grad.clone())
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        }
+
+    def test_degrade_streams_language_model(self):
+        """全量微调时显存不足的退让：检查点 1→4 层，语言模型流式 1→4 层（梯度搬到主机），音频塔流式 1→4 层，
+        损失和全部梯度不变。精度设置不支持主机内存中的更新时跳过语言模型的流式加载。"""
         from pipeline.train.model import token_losses
+        from pipeline.train.optimize import apply
 
         base = {**TinyModelTest.options(self), "precompute_metadata": True}
         losses, grads, model, applied, inputs = self.run_with(options = base)
@@ -489,20 +586,62 @@ class LanguageModelTrainingTest(unittest.TestCase):
         while (change := applied.degrade()) is not None:
             changes.append(change)
             model.zero_grad(set_to_none = True)
+            if applied.lm.swap is not None:
+                applied.lm.swap.clear_grads()
             with applied.forward_context():
                 again, _, _ = token_losses(model = model, inputs = inputs)
             again.sum().backward()
-            self.compare(reference = reference, result = (again.detach(), self.grads(model = model)), label = f"degrade {change}")
-        # 检查点 1→4 层、音频塔流式 1→4 层；语言模型的层要更新，不流式加载。
+            result = (again.detach(), self.grads_with_host(model = model, applied = applied))
+            self.compare(reference = reference, result = result, label = f"degrade {change}")
+        self.assertEqual(len(changes), 12)
+        self.assertEqual(applied.options["lm_blocks_to_swap"], 4)
+
+        model = self.model()
+        applied = apply(
+            model = model,
+            options = base,
+            train_language_model = True,
+            host_problem = "8bit 状态",
+        )
+        changes = []
+        while (change := applied.degrade()) is not None:
+            changes.append(change)
         self.assertEqual(len(changes), 8)
         self.assertTrue(all("lm_blocks_to_swap" not in change for change in changes))
 
-    def test_frozen_only_options_rejected(self):
+    def test_streamed_trainable_layers(self):
+        """语言模型末尾 2 层、全部 4 层流式加载并参与训练，打开或不打开激活值卸载，损失和梯度与常驻显存时一致。"""
+        base = {**TinyModelTest.options(self), "precompute_metadata": True, "gradient_checkpointing": True}
+        reference = self.run_with(options = base)
+        for swap in (2, 4):
+            for offload in (False, True):
+                options = {**base, "lm_blocks_to_swap": swap, "offload_activations": offload}
+                losses, grads, model, applied, _ = self.run_with(options = options)
+                # 同样做梯度检查点，计算完全相同：损失逐位相同；梯度只差线性注意力短卷积权重梯度本身的不确定性
+                # （不打开确定性算法时两次常驻显存的运行之间也有约 1e-7 的相对差）。
+                label = f"swap {swap} offload {offload}"
+                self.assertTrue(torch.equal(input = losses, other = reference[0]), msg = label)
+                for name, want in reference[1].items():
+                    relative = float((grads[name] - want).abs().max() / want.abs().max().clamp(min = 1e-12))
+                    self.assertLess(relative, 1e-6, msg = f"{label} {name}")
+                for parameter, host, _ in applied.lm.streamed_parameters():
+                    self.assertEqual(parameter.device.type, "cpu")
+                    self.assertIsNone(parameter.grad)
+                    self.assertEqual(parameter.data_ptr(), host.data_ptr())
+
+    def test_host_options_rejected(self):
         from pipeline.train.optimize import validate
 
         base = TinyModelTest.options(self)
+        streamed = {**base, "gradient_checkpointing": True, "lm_blocks_to_swap": 2}
+        validate(options = streamed, total = 4, train_language_model = True)
         with self.assertRaises(ValueError):
-            validate(options = {**base, "gradient_checkpointing": True, "lm_blocks_to_swap": 2}, total = 4, train_language_model = True)
+            validate(options = streamed, total = 4, train_language_model = True, host_problem = "8bit 状态")
+        with self.assertRaises(ValueError):
+            validate(options = {**base, "offload_optimizer": True}, total = 4, train_language_model = True, host_problem = "8bit 状态")
+        with self.assertRaises(ValueError):
+            validate(options = {**base, "offload_optimizer": True}, total = 4, train_language_model = False)
+        validate(options = {**base, "offload_optimizer": True}, total = 4, train_language_model = True)
         with self.assertRaises(ValueError):
             validate(options = {**base, "fp8_frozen": "all"}, total = 4, train_language_model = True)
         validate(options = {**base, "fp8_frozen": "audio"}, total = 4, train_language_model = True)

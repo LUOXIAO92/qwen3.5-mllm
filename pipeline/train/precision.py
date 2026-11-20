@@ -128,6 +128,23 @@ def validate(options, train_language_model):
             ) from error
 
 
+def host_problem(options, grad_accum):
+    """语言模型参数在主机内存中更新（流式加载的层、--offload-optimizer，placement.py）时这组设置有什么不支持，返回原因；
+    支持时返回 None。
+
+    支持：fp32 主权重 + fp32 状态（梯度精度任意，舍入只能就近），以及 none + fp32 状态 + 就近或随机舍入。梯度一层算完
+    就搬到主机、每次反传覆盖主机上的缓冲，所以要求 --grad-accum 1；这时两种梯度精度交给优化器的数值相同。
+    """
+    if options["language_model_optimizer_states"] != "fp32":
+        return (
+            f"语言模型参数在主机内存中更新时 AdamW 状态只支持 fp32（现在是 {options['language_model_optimizer_states']}）："
+            "bf16 和量化状态是为省显存设计的，状态放在主机内存时不需要，也没有实现"
+        )
+    if grad_accum != 1:
+        return f"语言模型参数在主机内存中更新时需要 --grad-accum 1（现在是 {grad_accum}）：梯度每次反传后直接搬到主机，不在主机上累加"
+    return None
+
+
 def bytes_per_parameter(options):
     """每个语言模型参数在训练中常驻显存的字节数，按来源分开。
 
