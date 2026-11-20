@@ -272,6 +272,8 @@ pipeline/train/run.sh "$DATASET/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl" o
 - 4B 的建议：在上面的全量微调单元格中把 `--model-dir` 换成 `$REPO/qwen3.5-4b-mllm`、`--init-projector` 换成 4B 的起点检查点，加上 `--language-model-master-weights none --language-model-grad-dtype bf16 --language-model-rounding stochastic --language-model-optimizer-states 8bit` 和 `--pack-sequences`，不给 `--checkpoint-layers`，让训练程序在显存不足时自己增加做梯度检查点的层。语言模型一侧常驻约 25 GB（默认 76 GB），加上不做检查点的中间结果（每批 360 秒约 48 GB，拼接后略少）和 9 GB 冻结权重，估计只需少量层或不需要梯度检查点；4B 的一步本来就长，torchao 多出的约 0.1 秒与省下的重算大致抵消。想少改一项时，去掉 `--language-model-optimizer-states 8bit`（fp32 状态，约 50 GB），0.8B 上两者与默认设置一样接近。
 - 学习率：同一组 0.8B 测试中，默认精度下把语言模型峰值学习率从 1e-5 降到 2e-6，前 2,000 步的 dev 损失反而更低（1.140 对 1.269）。2B 用 1e-5 训练 3 万步效果很好，较长训练中哪个学习率更好还不知道；4B 是否降低学习率，可以先各跑一小段比较 dev 损失再决定。
 
+**把语言模型参数放到主机内存（#66）。** 显存仍然不够时，三个训练参数把语言模型的一部分放到主机内存中（做法、支持的精度组合和本机测量见 `pipeline/train/__init__.py`「把语言模型参数放到主机内存」）：`--offload-optimizer`（梯度、主权重和 AdamW 状态放主机内存，显存中只留 bfloat16 权重）、`--lm-blocks-to-swap N`（末尾 N 层连权重也放主机内存，需要梯度检查点）、`--offload-activations`（梯度检查点留下的层输入放主机内存，反传时提前一层取回）。前两项要求 fp32 的 AdamW 状态和 `--grad-accum 1`。它们不在续训核对的配置中，同一段训练可以中途打开或关闭（例如 G4 上开始的训练在小显存的机器上加 `--offload-optimizer` 续训）。代价是 CPU 上的 AdamW：本机 16 核约每秒 14–15 亿个参数，主机内存每个放到主机的参数 16 字节（无主权重时 12 字节），另加训练进程本身约 20 GB。本机 RTX 5090 32 GB 上：2B 默认精度流式加载 12 层每秒 1.53 步（显存 22.6 GB）；4B 用 `--offload-optimizer --gradient-checkpointing --offload-activations` 加无主权重、随机舍入、fp32 状态，每秒 0.29 步，显存 11.8 GB，训练进程占主机内存 75 GB。G4 的 96 GB 显存放得下 4B 的默认精度（16 层梯度检查点，每秒 2.39 步），用这些选项只会更慢；它们的用处是在显存更小的机器上训练。开始前用 `free -g` 确认主机内存够用：4B 全部放到主机时，无主权重约需 75 GB，默认的 fp32 主权重约需 92 GB。
+
 **单元格 8：查看进度。**
 
 ```bash
