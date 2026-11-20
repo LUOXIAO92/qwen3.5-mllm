@@ -18,6 +18,8 @@ flash-linear-attention==0.6.0
 fla-core==0.6.0
 einops==0.8.2
 OpenCC==1.4.2
+# 全量微调的低精度优化器（--language-model-* 精度选项，pipeline/train/precision.py）；没有必需的依赖
+torchao==0.18.0
 mm-assistant-mask @ git+https://github.com/LUOXIAO92/MultimodalAssistantMask@95e15d78b5e418e11164fa94a694ee850db4f9f7
 # 以上各包的依赖
 annotated-doc==0.0.5

@@ -150,7 +150,7 @@ os.environ["PY"] = os.environ["WORK_DIR"] + "/envs/mllm-train/bin/python"
 git clone -b exp/v2 https://github.com/LUOXIAO92/qwen3.5-mllm "$REPO"
 ```
 
-**单元格 4：建立环境，放回训练要读的小文件。** `setup.sh` 用 Colab 的 Python 3.13 在 `$WORK_DIR/envs/mllm-train` 建立虚拟环境（`run.sh` 固定使用这个位置），按 `requirements-train.txt` 安装与本机相同版本的包；第一次运行时把安装包缓存到 `$DRIVE_DIR/wheels/`，以后从缓存安装。接着解压训练清单、解开背景声和 dev 清单、复制模型。每一步完成后留下标记，同一个会话中重复运行会跳过已完成的步骤。
+**单元格 4：建立环境，放回训练要读的小文件。** `setup.sh` 用 Colab 的 Python 3.13 在 `$WORK_DIR/envs/mllm-train` 建立虚拟环境（`run.sh` 固定使用这个位置），按 `requirements-train.txt` 安装与本机相同版本的包；第一次运行时把安装包缓存到 `$DRIVE_DIR/wheels/`，以后从缓存安装。缓存的标记 `wheels/.complete` 记着生成它的 `requirements-train.txt` 的 SHA-256，需求改了（例如 #66 加入的 torchao）就再运行一次 `pip wheel`，缓存中已有的安装包不再下载，只补缺少的；同一个会话中已经建好的虚拟环境也按新的需求补装。接着解压训练清单、解开背景声和 dev 清单、复制模型。每一步完成后留下标记，同一个会话中重复运行会跳过已完成的步骤。
 
 ```bash
 %%bash
@@ -253,10 +253,24 @@ pipeline/train/run.sh "$DATASET/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl" o
 
 - 语言模型参数组的峰值学习率 1e-5，projector 参数组 1e-4，两组都在前 1,000 步线性预热，再按余弦降到峰值的 0.1 倍。续训时两组的峰值学习率沿用检查点中保存的数值；`--train-language-model` 和 `--language-model-lr` 在续训时也要照样给出，所以重新运行同一个单元格即可。
 - `--init-projector` 只在第一次开始时载入起点的 projector；续训时 projector 取自输出目录中最近的检查点，这一项不起作用。
-- 精度：语言模型以 bfloat16 计算，优化器更新 float32 主权重。2B 的语言模型约 18.8 亿个参数，主权重、它的梯度和 AdamW 状态比只训练 projector 多约 30 GB 显存；按 0.8B 的实测估计，每批 16 条、360 秒的峰值约 50–55 GB（`pipeline/train/__init__.py`「全量微调」），96 GB 显存应当不需要梯度检查点，显存不够时训练程序会逐步打开梯度检查点并重试同一批。
+- 精度：语言模型以 bfloat16 计算，默认由优化器更新 float32 主权重（其他选择见下文「全量微调的精度」）。2B 的语言模型约 18.8 亿个参数，主权重、它的梯度和 AdamW 状态比只训练 projector 多约 30 GB 显存；按 0.8B 的实测估计，每批 16 条、360 秒的峰值约 50–55 GB（`pipeline/train/__init__.py`「全量微调」），96 GB 显存应当不需要梯度检查点，显存不够时训练程序会逐步打开梯度检查点并重试同一批。
 - 检查点：每 2,500 步多一个 `language_model.safetensors`（bfloat16，约 3.8 GB，评测用），12 个检查点共约 46 GB；最近检查点的 `trainer_state.pt` 含主权重和 AdamW 状态，约 22.6 GB，每次保存都整个重写，旧的随即删除。删掉的文件进入 Drive 的回收站，30,000 步下来回收站中约有 270 GB 旧的 `trainer_state.pt`，需要时手动清空。
 - 这一段训练读第 0–29,999 步的数据：常驻分片 48 GB 加约 54 GB 顺序分片，单元格 6 的 `--ahead-steps 31600` 已经覆盖全程。
 - 评测在本机进行（Colab 上只建立了训练环境）：把输出目录下载到本机（`trainer_state.pt` 不需要），再运行 `MODEL_DIR=<仓库>/qwen3.5-2b-mllm pipeline/eval/run.sh <下载的输出目录> <评测清单目录> <结果目录>`。它选 dev 损失最低的检查点，并自动载入其中的 `language_model.safetensors`。
+
+**全量微调的精度（#66）。** 语言模型参数组怎样更新由四个训练参数选择（`pipeline/train/precision.py`），默认值就是上面 2B 那次训练的做法：float32 主权重、float32 梯度、float32 AdamW 状态，每个语言模型参数 18 字节。4B 的语言模型约 42.1 亿个参数，这一项约 75.7 GB，所以 4B 全量微调的小规模测试（每批 16 条、360 秒）要对 16 层做梯度检查点，峰值 88 GB。省显存的组合（全部选项、显存表和 0.8B 上的比较见 `pipeline/train/__init__.py`「全量微调」）：
+
+| 追加的参数 | 每参数字节 | 4B |
+| --- | ---: | ---: |
+| （默认） | 18 | 75.7 GB |
+| `--language-model-master-weights none --language-model-grad-dtype bf16 --language-model-rounding stochastic` | 12 | 50.5 GB |
+| 同上，再加 `--language-model-optimizer-states 8bit` | 6.03 | 25.4 GB |
+
+- `none` 不另存 float32 主权重，优化器直接更新模型中的 bfloat16 参数；`stochastic` 是 torchao 的随机舍入，学习率 1e-5 时每步的更新多半小于 bfloat16 的舍入间距，就近舍入会把它们舍掉。0.8B 上同样的数据训练 2,000 步，这两种组合与默认设置的训练损失、dev 损失相差很小，与几种数值上近似等价的做法之间的差别相当（第 2,000 步的 dev 损失都在 1.266–1.275 之间）；就近舍入（不加 `--language-model-rounding stochastic`）时只有约四分之一的权重动过，`--language-model-optimizer-states bf16` 的轨迹也与默认设置不同，都不建议使用。
+- 这几项在续训核对的配置中，一段训练开始后不能更换；以前开始的训练（配置中没有这几项）按默认值续训。
+- 除默认设置外用 torchao 的优化器（`requirements-train.txt` 中的 torchao 0.18.0），它逐个张量调用编译过的更新函数：第一步多约 1 分钟编译，之后每步多出逐个张量调用的开销（单独测量优化器一步：torch 的 fused AdamW 在 0.8B 上 15.5 ms，torchao 55–80 ms，4B 的 8 bit 状态 104 ms；0.8B 全量微调从每秒 6.0 步降到 4.3–4.7 步）。8 bit 状态更新词嵌入兼输出层时另有临时显存，4B 约 5.1 GB。省下的显存用来少做或不做梯度检查点。
+- 4B 的建议：在上面的全量微调单元格中把 `--model-dir` 换成 `$REPO/qwen3.5-4b-mllm`、`--init-projector` 换成 4B 的起点检查点，加上 `--language-model-master-weights none --language-model-grad-dtype bf16 --language-model-rounding stochastic --language-model-optimizer-states 8bit` 和 `--pack-sequences`，不给 `--checkpoint-layers`，让训练程序在显存不足时自己增加做梯度检查点的层。语言模型一侧常驻约 25 GB（默认 76 GB），加上不做检查点的中间结果（每批 360 秒约 48 GB，拼接后略少）和 9 GB 冻结权重，估计只需少量层或不需要梯度检查点；4B 的一步本来就长，torchao 多出的约 0.1 秒与省下的重算大致抵消。想少改一项时，去掉 `--language-model-optimizer-states 8bit`（fp32 状态，约 50 GB），0.8B 上两者与默认设置一样接近。
+- 学习率：同一组 0.8B 测试中，默认精度下把语言模型峰值学习率从 1e-5 降到 2e-6，前 2,000 步的 dev 损失反而更低（1.140 对 1.269）。2B 用 1e-5 训练 3 万步效果很好，较长训练中哪个学习率更好还不知道；4B 是否降低学习率，可以先各跑一小段比较 dev 损失再决定。
 
 **单元格 8：查看进度。**
 

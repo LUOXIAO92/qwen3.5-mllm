@@ -42,22 +42,28 @@ fi
 
 # 2. 虚拟环境。安装包第一次从网上下载并缓存到 Drive 上的 wheels/（约 4 GB），以后的会话直接从缓存安装。
 #    mm-assistant-mask 来自 git，缓存时构建成 wheel，安装时按包名从缓存中取。
-if ! done_before venv; then
-  step "建立虚拟环境 $venv"
+#    wheels/.complete 记录缓存对应的 requirements-train.txt 的 SHA-256：需求改了（例如新加 torchao）就再运行一次
+#    pip wheel，缓存中已有的安装包不再下载（--find-links 指向缓存本身），只补缺少的。以前只 touch 的空标记也按需求
+#    改过处理。venv 标记同样记录摘要，需求改了就在已有的虚拟环境中补装。
+req_hash="$(sha256sum "$requirements" | cut -d ' ' -f 1)"
+if [ "$(cat "$marks/venv" 2>/dev/null)" != "$req_hash" ]; then
   command -v uv >/dev/null || python3 -m pip install -q uv
-  rm -rf "$venv"
-  uv venv --seed --python "$(command -v python3)" "$venv"
+  if ! done_before venv; then
+    step "建立虚拟环境 $venv"
+    rm -rf "$venv"
+    uv venv --seed --python "$(command -v python3)" "$venv"
+  fi
   mkdir -p "$wheels"
-  if [ ! -f "$wheels/.complete" ]; then
-    step "下载安装包到 $wheels"
+  if [ "$(cat "$wheels/.complete" 2>/dev/null)" != "$req_hash" ]; then
+    step "下载缺少的安装包到 $wheels"
     "$venv/bin/python" -m pip wheel --wheel-dir "$wheels" --find-links "$wheels" \
       --extra-index-url "$torch_index" -r "$requirements"
-    touch "$wheels/.complete"
+    echo "$req_hash" > "$wheels/.complete"
   fi
   sed 's|^mm-assistant-mask @ .*|mm-assistant-mask|' "$requirements" > "$work/requirements-offline.txt"
   step "从缓存安装"
   "$venv/bin/python" -m pip install --no-index --find-links "$wheels" -r "$work/requirements-offline.txt"
-  mark venv
+  echo "$req_hash" > "$marks/venv"
 fi
 
 # 2b. 拼接批次（--pack-sequences）用的 flash-attn 和 causal-conv1d：PyPI 上没有与 torch 2.13.0+cu130、Python 3.13
@@ -109,10 +115,14 @@ step "完成"
 import sys
 
 import torch
+import torchao
 import torchcodec
 import transformers
 
-print(f"Python {sys.version.split()[0]}，torch {torch.__version__}，torchcodec {torchcodec.__version__}，transformers {transformers.__version__}")
+print(
+    f"Python {sys.version.split()[0]}，torch {torch.__version__}，torchcodec {torchcodec.__version__}，"
+    f"transformers {transformers.__version__}，torchao {torchao.__version__}"
+)
 if torch.cuda.is_available():
     properties = torch.cuda.get_device_properties(0)
     print(f"GPU {properties.name}，{properties.total_memory / 2 ** 30:.0f} GB")
