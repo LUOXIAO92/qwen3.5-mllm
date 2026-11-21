@@ -128,3 +128,18 @@ flock <工作目录>/gpu.lock python -m pipeline.eval.instruct_probe \
 ## 8. 在 Google Colab 上训练
 
 本机的训练可以在 Colab 上续训。训练音频按训练计划打包成约 1 GB 的 tar 分片上传到 Google Drive，Colab 上只在本地保留常驻分片和一段滚动窗口，训练程序按位置读出原始字节再解码（`--audio-shards`）。打包、上传、Colab 单元格和存储桶测试的步骤见 [colab/README.md](colab/README.md)。
+
+## 9. 自生成回放文本
+
+全量微调会让语言模型遗忘原有能力。回放的做法是在训练中混入参考模型（未经训练的 Qwen3.5-2B 语言模型，即阶段 1 融合模型中的原始权重）自己采样的文本（任务 #70，参见 arXiv 2605.26097）。脚本在 `pipeline/replay/`，完整流程由 `run.sh` 串起来：
+
+```bash
+WORK_DIR=<工作目录> DATASET=$DATASET MLLM=<2B 融合模型目录> ORIGINAL=<原始 Qwen3.5-2B 目录> \
+    bash pipeline/replay/run.sh
+```
+
+各步依次为：`export` 把融合模型中的语言模型导出成 vLLM 可加载的目录；`prefixes` 从为 TTS 下载的 HPLT 3.0、FineWeb2-HQ-Plus、fineweb-edu、Wikinews 中按 18 种语言均匀抽取文档开头（排除含 FLEURS 句子的文档）；`prompts` 写出四组的提示；`generate` 用 vLLM 在温度 1、不设 top-k / top-p 的设置下采样，每个样本最多 16k token，同时保存每个位置的 top-20 对数概率；`finalize` 在循环起点截断并写出最终索引；`langid` 用 GlotLID 判断生成文本的语言；`nll` 计算参考模型在评测文本上的每 token 负对数似然；`report` 写出汇总。可以只跑其中几步，例如 `bash pipeline/replay/run.sh finalize langid report`。
+
+四组回放文本是 free_raw（从一个换行开始自由生成，不加模板）、free_chat（从用户轮开头开始，模型自己写用户消息和助手回答）、cont_raw（续写文档开头）、cont_chat（文档开头放进用户轮并加续写指令，助手续写）。带模板的两组与 ASR 训练用同一套 chat template 设置。每组分为训练用的 `train` 和只作评测的 `eval`，两者的文档互不重叠。数据放在 `$DATASET/text/qwen3.5-asr/replay/<组>/<划分>/`，存放格式见 `pipeline/replay/store.py`，每个样本的字段见 `finalize.py`。
+
+`generate` 生成时每 256 个 token 检查一次循环，发现循环后再多生成 1,024 个 token 就中止这条样本，最终在循环起点截断（规则见 `degeneration.py`）；无模板两组的样本有一半左右会陷入循环，不提前中止时大部分算力花在循环上。vLLM 0.28 对只有一个 token 的提示有状态残留的问题（见 `first_token.py`），所以 free_raw 的第一个生成 token 由 `prompts` 用 transformers 按参考模型的分布抽好，vLLM 从两个 token 的提示接着生成。`generate` 每次持有 GPU 锁约 12 分钟（`TIME_BUDGET`），时间用完就释放锁，下次从断点续跑；每次占用 GPU 之前先看 `nvidia-smi`，有其他进程占着显存时等待。
