@@ -199,8 +199,11 @@ class ConfigTest(unittest.TestCase):
     def test_plan_keys_are_resume_keys(self):
         self.assertTrue(set(PLAN_KEYS) <= set(RESUME_KEYS))
         noise = {key for key in RESUME_KEYS if key.startswith("noise_")}
-        # 混音和训练范围、精度不改变每一步读哪些样本。
-        self.assertEqual(set(RESUME_KEYS) - set(PLAN_KEYS), noise | {"train_language_model"} | set(precision.KEYS))
+        # 混音、样本格式（--prompt-format）和训练范围、精度不改变每一步读哪些样本。
+        self.assertEqual(
+            set(RESUME_KEYS) - set(PLAN_KEYS),
+            noise | {"train_language_model", "prompt_format"} | set(precision.KEYS),
+        )
 
 
 class DigestTest(unittest.TestCase):

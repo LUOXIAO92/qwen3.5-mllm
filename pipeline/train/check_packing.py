@@ -314,7 +314,11 @@ def main(argv = None):
         train_language_model = args.train_language_model,
     )
     audio_config = model.config.audio_config
-    collator = TrainCollator(processor = processor, audio_windows = (audio_config.n_window, audio_config.n_window_infer))
+    collator = TrainCollator(
+        processor = processor,
+        audio_windows = (audio_config.n_window, audio_config.n_window_infer),
+        prompt_format = args.prompt_format,
+    )
     names = trainable_names(model = model, train_language_model = args.train_language_model)
 
     path = output_dir / "check_packing.json"

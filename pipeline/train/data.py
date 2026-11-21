@@ -10,6 +10,12 @@ transformers 的 return_assistant_tokens_mask 按展开音频标记之前的字�
 训练目标为空字符串的样本（空目标样本，即无人声片段）照常渲染：助手回合只有空的思考块和 <|im_end|>，
 按同样的规则只有 <|im_end|> 计算损失，模型学着听到无人声的音频时直接结束输出。
 
+以上是默认的聊天格式（prompt_format = "chat"）。纯续写预训练格式（prompt_format = "cpt"，任务 #71）不套 chat
+template，没有系统、用户、助手回合：一条样本是一段音频的标记（与聊天格式中的音频标记相同，
+<|audio_start|><|audio_pad|><|audio_end|>，由 processor 展开成按音频长度计的 <|audio_pad|>），后面直接接目标文本，
+以纯文本的结束标记 <|endoftext|> 结尾。标签在最终的 input_ids 上按位置确定：<|audio_end|> 之后的有效 token
+（目标文本和 <|endoftext|>）计算损失，其余位置填 -100。空目标样本只有 <|endoftext|> 计算损失。
+
 训练时数据集按 sampling.SampleKey 取样本，给出背景声混音器时对语音样本实时混音（mixing.py），
 空目标样本不混音；按整数下标取样本时（dev 评估、标签核对）不混音。
 
@@ -45,6 +51,11 @@ ASSISTANT_MASK_SPEC = AssistantMaskSpec(
     generation_stop = "<|im_end|>",
     excluded_assistant_prefixes = ("<think>\n\n</think>\n\n",),
 )
+# 训练样本的格式：chat 聊天格式（音频 + 固定指令 → 助手回答），cpt 纯续写格式（音频标记后直接接目标文本）。
+PROMPT_FORMATS = ("chat", "cpt")
+# 各格式中目标文本之后的结束标记，计算损失。cpt 用分词器的纯文本结束标记（tokenizer_config 中的 pad_token，
+# generation_config 的 eos_token_id 248044）；chat 的助手回合以 <|im_end|> 结束。
+END_TOKENS = {"chat": "<|im_end|>", "cpt": "<|endoftext|>"}
 
 
 def build_messages(audio_path):
@@ -60,8 +71,19 @@ def build_messages(audio_path):
     ]
 
 
-def build_prompt(processor, audio_path):
-    """展开 chat template，结尾是助手回合开头和空的思考块 <think>\\n\\n</think>\\n\\n。"""
+def audio_markup(processor):
+    """一段音频的标记 <|audio_start|><|audio_pad|><|audio_end|>，与 chat template 中音频的写法相同。"""
+    return processor.audio_start_token + processor.audio_token + processor.audio_end_token
+
+
+def build_prompt(processor, audio_path, prompt_format = "chat"):
+    """推理时的提示。chat：展开 chat template，结尾是助手回合开头和空的思考块 <think>\\n\\n</think>\\n\\n；
+    cpt：只有音频标记。
+    """
+    if prompt_format == "cpt":
+        return audio_markup(processor = processor)
+    if prompt_format != "chat":
+        raise ValueError(f"未知的样本格式：{prompt_format}，可选 {PROMPT_FORMATS}")
     return processor.apply_chat_template(
         conversation = build_messages(audio_path = audio_path),
         tokenize = False,
@@ -70,8 +92,15 @@ def build_prompt(processor, audio_path):
     )
 
 
-def build_training_text(processor, audio_path, target):
-    """渲染带助手回答的完整对话。前半段与 build_prompt 的结果逐字相同，后面接目标文本、<|im_end|> 和换行。"""
+def build_training_text(processor, audio_path, target, prompt_format = "chat"):
+    """渲染带目标文本的完整样本，前半段与 build_prompt 的结果逐字相同。
+
+    chat：带助手回答的完整对话，后面接目标文本、<|im_end|> 和换行。cpt：音频标记、目标文本、<|endoftext|>。
+    """
+    if prompt_format == "cpt":
+        return audio_markup(processor = processor) + target + END_TOKENS["cpt"]
+    if prompt_format != "chat":
+        raise ValueError(f"未知的样本格式：{prompt_format}，可选 {PROMPT_FORMATS}")
     conversation = build_messages(audio_path = audio_path) + [
         {"role": "assistant", "content": [{"type": "text", "text": target}]},
     ]
@@ -81,6 +110,30 @@ def build_training_text(processor, audio_path, target):
         add_generation_prompt = False,
         enable_thinking = False,
     )
+
+
+def build_cpt_labels(input_ids, attention_mask, audio_end_id, end_id):
+    """cpt 格式的标签：每行唯一的 <|audio_end|> 之后的有效 token（目标文本和结尾的 <|endoftext|>）计算损失。
+
+    只看最终的 input_ids（processor 展开音频标记并分词之后）和 attention_mask，与填充在哪一侧无关；填充 token
+    与 <|endoftext|> 是同一个 id，靠 attention_mask 区分。每行必须恰好有一个 <|audio_end|>，最后一个有效 token
+    必须是结束标记，否则报错。
+    """
+    valid = attention_mask.bool()
+    ends = (input_ids == audio_end_id) & valid
+    counts = ends.sum(dim = -1)
+    if bool((counts != 1).any()):
+        raise ValueError(f"cpt 样本每行应恰好有一个音频结束标记，实际为 {counts.tolist()}")
+    # 某个位置之前（不含该位置）出现过 <|audio_end|>，即在它之后。
+    after = (ends.long().cumsum(dim = -1) - ends.long()) > 0
+    supervised = after & valid
+    lengths = valid.long().sum(dim = -1)
+    last = valid.long().cumsum(dim = -1).eq(lengths[:, None]) & valid
+    if bool((input_ids[last] != end_id).any()) or bool((supervised.sum(dim = -1) == 0).any()):
+        raise ValueError("cpt 样本的最后一个有效 token 应为结束标记，且在音频结束标记之后")
+    labels = torch.full_like(input = input_ids, fill_value = IGNORE_INDEX)
+    labels[supervised] = input_ids[supervised]
+    return labels
 
 
 def to_simplified(text):
@@ -438,18 +491,28 @@ class TrainCollator:
     """把若干条样本拼成一个批次。
 
     每条样本渲染成带助手回答的完整对话，整批交给 processor 做特征提取、音频标记展开和分词（与评测推理
-    相同的调用），再在最终的 input_ids 上用 mm_assistant_mask 生成标签。给出 audio_windows（音频塔的
+    相同的调用），再在最终的 input_ids 上用 mm_assistant_mask 生成标签。prompt_format = "cpt" 时样本是音频标记
+    后直接接目标文本和 <|endoftext|>，标签由 build_cpt_labels 在最终的 input_ids 上生成。给出 audio_windows（音频塔的
     n_window、n_window_infer）时，再用 batch_metadata 预先算出前向要用的位置与索引；pack 为真时（需要
     audio_windows）再用 pack_batch 把整批拼成一行、去掉填充。
     """
 
-    def __init__(self, processor, audio_windows = None, pack = False):
+    def __init__(
+        self,
+        processor,
+        audio_windows = None,
+        pack = False,
+        prompt_format = "chat",
+    ):
         if pack and audio_windows is None:
             raise ValueError("拼接批次（pack）需要预先算好的元数据（audio_windows，即 --precompute-metadata）")
+        if prompt_format not in PROMPT_FORMATS:
+            raise ValueError(f"未知的样本格式：{prompt_format}，可选 {PROMPT_FORMATS}")
         self.processor = processor
         self.tokenizer = processor.tokenizer
         self.audio_windows = audio_windows
         self.pack = pack
+        self.prompt_format = prompt_format
 
     def __call__(self, items):
         # 读不出音频的样本（TranscriptionDataset 返回 None）不进批次，这一批少几条照常训练
@@ -461,6 +524,7 @@ class TrainCollator:
                 processor = self.processor,
                 audio_path = item["audio_path"],
                 target = item["target"],
+                prompt_format = self.prompt_format,
             )
             for item in items
         ]
@@ -471,11 +535,19 @@ class TrainCollator:
             padding = True,
             return_tensors = "pt",
         )
-        labels = build_assistant_labels(
-            batch = inputs,
-            tokenizer = self.tokenizer,
-            spec = ASSISTANT_MASK_SPEC,
-        )
+        if self.prompt_format == "cpt":
+            labels = build_cpt_labels(
+                input_ids = inputs["input_ids"],
+                attention_mask = inputs["attention_mask"],
+                audio_end_id = self.tokenizer.convert_tokens_to_ids(tokens = self.processor.audio_end_token),
+                end_id = self.tokenizer.convert_tokens_to_ids(tokens = END_TOKENS["cpt"]),
+            )
+        else:
+            labels = build_assistant_labels(
+                batch = inputs,
+                tokenizer = self.tokenizer,
+                spec = ASSISTANT_MASK_SPEC,
+            )
         batch = {
             "input_ids": inputs["input_ids"],
             "attention_mask": inputs["attention_mask"],

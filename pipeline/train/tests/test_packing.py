@@ -1,7 +1,7 @@
 """拼接批次与 torch 交叉熵（任务 #66）的单元测试：python -m unittest pipeline.train.tests.test_packing
 
 - PackBatchTest（CPU）：data.pack_batch 拼成的一行与填充的批次逐条样本对应：token、标签、计损失的位置和目标相同，
-  位置编号每条从 0 开始，样本边界正确。
+  位置编号每条从 0 开始，样本边界正确。聊天格式和纯续写格式（--prompt-format cpt）的批次各检查一次。
 - TorchLossTest（CPU）：--loss-impl torch 与先投影再 F.cross_entropy 的参考值一致，隐状态和输出层权重的梯度都对。
 - PackedTinyModelTest（需要 CUDA，以及 flash-attn、causal-conv1d、fla 的内核，缺一时跳过）：缩小的随机初始化
   模型上，拼接与填充的批次的损失、projector 与语言模型的梯度在 bfloat16 误差以内一致；改动一条样本的音频，
@@ -34,9 +34,15 @@ def kernels_available():
 @unittest.skipUnless(HAS_MODEL, "需要阶段 1 模型目录中的代码与配置")
 class PackBatchTest(unittest.TestCase):
     def test_rows_match_padded_batch(self):
+        self.check_rows_match(padded = tiny_batch(audio_windows = (50, 800)))
+
+    def test_rows_match_padded_batch_cpt(self):
+        """纯续写格式（--prompt-format cpt，任务 #71）的批次同样逐条对应。"""
+        self.check_rows_match(padded = tiny_batch(audio_windows = (50, 800), prompt_format = "cpt"))
+
+    def check_rows_match(self, padded):
         from pipeline.train.data import IGNORE_INDEX, pack_batch
 
-        padded = tiny_batch(audio_windows = (50, 800))
         packed = pack_batch(batch = copy.copy(padded))
         mask = padded["attention_mask"].bool()
         lengths = mask.sum(dim = -1).tolist()

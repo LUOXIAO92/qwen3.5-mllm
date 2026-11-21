@@ -298,7 +298,7 @@ def tiny_model(dtype, device = "cuda"):
     return model.eval().to(device = device)
 
 
-def tiny_batch(audio_windows = None):
+def tiny_batch(audio_windows = None, prompt_format = "chat"):
     from transformers import AutoProcessor
 
     from pipeline.train.data import TrainCollator
@@ -318,7 +318,7 @@ def tiny_batch(audio_windows = None):
             "empty": number == 2,
             "mix": None,
         })
-    return TrainCollator(processor = processor, audio_windows = audio_windows)(items = items)
+    return TrainCollator(processor = processor, audio_windows = audio_windows, prompt_format = prompt_format)(items = items)
 
 
 def without_metadata(batch):

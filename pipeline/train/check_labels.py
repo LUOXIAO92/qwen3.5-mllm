@@ -9,6 +9,9 @@
 
 最后打印一条空目标样本助手回合附近的 token 和标签，带 [loss] 的是计算损失的位置。
 
+加 --prompt-format cpt 时核对纯续写格式（任务 #71）：计算损失的 token 解码后等于目标文本加 <|endoftext|>，
+之前的序列与只有音频标记的提示展开后逐个相同；空目标样本只有 <|endoftext|> 计算损失。
+
 更换 chat template、processor 或 mm_assistant_mask 版本后运行一次。用法（在仓库根目录运行）::
 
     python -m pipeline.train.check_labels --model-dir qwen3.5-0.8b-mllm --manifest <训练清单> --target original
@@ -22,7 +25,9 @@ import sys
 from pathlib import Path
 
 from pipeline.train.data import (
+    END_TOKENS,
     IGNORE_INDEX,
+    PROMPT_FORMATS,
     SAMPLING_RATE,
     TARGETS,
     TrainCollator,
@@ -37,6 +42,7 @@ def main() -> int:
     parser.add_argument("--model-dir", required = True, type = Path)
     parser.add_argument("--manifest", required = True, type = Path)
     parser.add_argument("--target", choices = TARGETS, default = "original")
+    parser.add_argument("--prompt-format", choices = PROMPT_FORMATS, default = "chat", help = "样本格式，与 train.py 相同")
     parser.add_argument("--per-lang", type = int, default = 8, help = "每种语言抽多少条")
     parser.add_argument("--batch-size", type = int, default = 8)
     parser.add_argument("--seed", type = int, default = 0)
@@ -58,8 +64,9 @@ def main() -> int:
         picked += rng.sample(population = by_lang[lang], k = min(args.per_lang, len(by_lang[lang])))
 
     dataset = TranscriptionDataset(rows = picked, target = args.target)
-    collator = TrainCollator(processor = processor)
-    im_end_id = processor.tokenizer.convert_tokens_to_ids(tokens = "<|im_end|>")
+    collator = TrainCollator(processor = processor, prompt_format = args.prompt_format)
+    end_token = END_TOKENS[args.prompt_format]
+    end_id = processor.tokenizer.convert_tokens_to_ids(tokens = end_token)
     failures = 0
     empty_checked = 0
     empty_example = None
@@ -71,9 +78,13 @@ def main() -> int:
             labels = batch["labels"][row_index]
             supervised = (labels != IGNORE_INDEX).nonzero().view(-1)
             decoded = processor.tokenizer.decode(input_ids[supervised].tolist(), skip_special_tokens = False)
-            expected = item["target"] + "<|im_end|>"
+            expected = item["target"] + end_token
             prompt = processor(
-                text = [build_prompt(processor = processor, audio_path = item["audio_path"])],
+                text = [build_prompt(
+                    processor = processor,
+                    audio_path = item["audio_path"],
+                    prompt_format = args.prompt_format,
+                )],
                 audio = [item["waveform"]],
                 sampling_rate = SAMPLING_RATE,
                 return_tensors = "pt",
@@ -83,7 +94,7 @@ def main() -> int:
             empty_ok = True
             if item["target"] == "":
                 empty_checked += 1
-                empty_ok = input_ids[supervised].tolist() == [im_end_id]
+                empty_ok = input_ids[supervised].tolist() == [end_id]
                 if empty_example is None:
                     empty_example = (item["sample_id"], input_ids, labels, batch["attention_mask"][row_index])
             if decoded != expected or not prefix_ok or not empty_ok:
@@ -99,7 +110,7 @@ def main() -> int:
             marker = "[loss]" if int(labels[position]) != IGNORE_INDEX else ""
             tail.append(f"{marker}{text!r}")
         print(f"空目标样本 {sample_id} 序列末尾 12 个 token：" + " ".join(tail))
-    print(f"核对 {len(dataset)} 条（{len(by_lang)} 种语言，训练目标 {args.target}），"
+    print(f"核对 {len(dataset)} 条（{len(by_lang)} 种语言，训练目标 {args.target}，样本格式 {args.prompt_format}），"
           f"其中空目标 {empty_checked} 条，不一致 {failures} 条")
     return 1 if failures else 0
 

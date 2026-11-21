@@ -33,6 +33,10 @@
 `enable_thinking = False`，助手回合以空思考块开头。批量生成用左填充、贪心解码，
 `max_new_tokens` 按该批最长音频的时长估算，防止未训练的模型无限输出。
 
+`--prompt-format cpt`（任务 #71）用于纯续写格式训练的模型：提示只有一段音频的标记
+`<|audio_start|><|audio_pad|><|audio_end|>`（由 processor 展开），不套 chat template，模型接着写出转写，
+在 `<|endoftext|>` 停止（`<|im_end|>` 同样作为停止标记）。输出的清理与聊天格式相同。
+
 输出（写入 `--output-dir`）
 ===========================
 
@@ -58,23 +62,64 @@ from pathlib import Path
 from pipeline.eval.scoring import LANGS, METRIC_BY_LANG, NONSPEECH_LANG, false_output_summary, score_corpus
 
 PROMPT_TEXT = "Transcribe the audio."
+# 样本格式，与 pipeline.train.data.PROMPT_FORMATS 相同。这里不导入训练模块，评测环境不需要训练的依赖。
+PROMPT_FORMATS = ("chat", "cpt")
+# 生成的停止标记：聊天格式的助手回合以 <|im_end|> 结束，纯续写格式以 <|endoftext|> 结束，两者都停止。
+STOP_TOKENS = ["<|im_end|>", "<|endoftext|>"]
+SAMPLING_RATE = 16000
 PROJECTOR_PREFIX = "model.audio_projector."
 # 与 pipeline.train.model.LANGUAGE_MODEL_PREFIXES 相同。这里不导入训练模块，评测环境不需要训练的依赖。
 LANGUAGE_MODEL_PREFIXES = ("model.language_model.", "lm_head.")
 _THINK_BLOCK = re.compile(pattern = r"<think>.*?</think>", flags = re.DOTALL)
 
 
-def build_messages(audio_path: str) -> list:
-    """按 CONVENTIONS 构造一条对话：音频 + 固定指令。"""
+def build_messages(audio_path: str, instruction: str = PROMPT_TEXT) -> list:
+    """按 CONVENTIONS 构造一条对话：音频 + 指令（默认是训练用的固定指令）。"""
     return [
         {
             "role": "user",
             "content": [
                 {"type": "audio", "audio": audio_path},
-                {"type": "text", "text": PROMPT_TEXT},
+                {"type": "text", "text": instruction},
             ],
         },
     ]
+
+
+def audio_markup(processor) -> str:
+    """一段音频的标记 <|audio_start|><|audio_pad|><|audio_end|>，与 chat template 中音频的写法相同。"""
+    return processor.audio_start_token + processor.audio_token + processor.audio_end_token
+
+
+def build_prompt(
+    processor,
+    audio_path: str,
+    prompt_format: str = "chat",
+    instruction: str = PROMPT_TEXT,
+) -> str:
+    """推理时的提示。chat：展开 chat template（关闭思考，结尾是助手回合开头和空的思考块）；cpt：只有音频标记。"""
+    if prompt_format == "cpt":
+        return audio_markup(processor = processor)
+    if prompt_format != "chat":
+        raise ValueError(f"未知的样本格式：{prompt_format}，可选 {PROMPT_FORMATS}")
+    return processor.apply_chat_template(
+        conversation = build_messages(audio_path = audio_path, instruction = instruction),
+        tokenize = False,
+        add_generation_prompt = True,
+        enable_thinking = False,
+    )
+
+
+def load_waveform(path: str):
+    """读取 16 kHz 音频为 float32 单声道波形。"""
+    import soundfile as sf
+
+    wave, sample_rate = sf.read(file = path, dtype = "float32")
+    if sample_rate != SAMPLING_RATE:
+        raise ValueError(f"{path} 采样率为 {sample_rate}，需要 {SAMPLING_RATE}")
+    if wave.ndim > 1:
+        wave = wave.mean(axis = 1)
+    return wave
 
 
 def clean_output(text: str) -> str:
@@ -159,7 +204,12 @@ def load_language_model(model, language_model_path: Path) -> None:
         raise ValueError("载入后输出层不再与词嵌入共用权重")
 
 
-def load_model(model_dir: Path, projector_path: Path | None, language_model_path: Path | None = None):
+def load_model(
+    model_dir: Path,
+    projector_path: Path | None,
+    language_model_path: Path | None = None,
+    device: str = "cuda",
+):
     import torch
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
@@ -177,57 +227,41 @@ def load_model(model_dir: Path, projector_path: Path | None, language_model_path
         load_projector(model = model, projector_path = projector_path)
     if language_model_path is not None:
         load_language_model(model = model, language_model_path = language_model_path)
-    model.to(device = "cuda")
+    model.to(device = device)
     model.eval()
     return model, processor
 
 
-def build_inputs(processor, audio_paths: list, waveforms: list):
-    """展开 chat template 并处理音频，返回 (展开前的文本列表, 模型输入)。"""
+def build_inputs(processor, audio_paths: list, waveforms: list, prompt_format: str = "chat"):
+    """按样本格式构造提示并处理音频，返回 (展开前的文本列表, 模型输入)。"""
     prompts = [
-        processor.apply_chat_template(
-            conversation = build_messages(audio_path = path),
-            tokenize = False,
-            add_generation_prompt = True,
-            enable_thinking = False,
-        )
+        build_prompt(processor = processor, audio_path = path, prompt_format = prompt_format)
         for path in audio_paths
     ]
     inputs = processor(
         text = prompts,
         audio = waveforms,
-        sampling_rate = 16000,
+        sampling_rate = SAMPLING_RATE,
         padding = True,
         return_tensors = "pt",
     )
     return prompts, inputs
 
 
-def transcribe_batch(model, processor, rows: list, audio_root: Path, max_new_tokens_cfg: dict) -> tuple:
-    """转写一个批量，返回 (hypotheses, n_new_tokens 列表, 生成耗时秒, 峰值显存字节)。"""
-    import soundfile as sf
+def generate(model, processor, inputs, max_new_tokens: int, device: str = "cuda") -> tuple:
+    """贪心解码一个批量（左填充），返回 (清理后的输出, n_new_tokens 列表, 生成耗时秒, 峰值显存字节)。
+
+    在 CPU 上运行时（只用来核对流程）峰值显存记为 0。
+    """
     import torch
 
-    audio_paths = [str(audio_root / row["audio_path"]) for row in rows]
-    waveforms = []
-    for path in audio_paths:
-        wave, sample_rate = sf.read(file = path, dtype = "float32")
-        if sample_rate != 16000:
-            raise ValueError(f"{path} 采样率为 {sample_rate}，需要 16000")
-        if wave.ndim > 1:
-            wave = wave.mean(axis = 1)
-        waveforms.append(wave)
-    longest = max(len(wave) for wave in waveforms) / 16000
-    max_new_tokens = int(
-        math.ceil(longest * max_new_tokens_cfg["tokens_per_second"]) + max_new_tokens_cfg["extra"],
-    )
-
-    _, inputs = build_inputs(processor = processor, audio_paths = audio_paths, waveforms = waveforms)
-    inputs = inputs.to(device = "cuda")
-    inputs["input_features"] = inputs["input_features"].to(dtype = torch.bfloat16)
-
-    torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
+    cuda = device == "cuda"
+    inputs = inputs.to(device = device)
+    if "input_features" in inputs:
+        inputs["input_features"] = inputs["input_features"].to(dtype = torch.bfloat16)
+    if cuda:
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     with torch.inference_mode():
         generated = model.generate(
@@ -237,17 +271,48 @@ def transcribe_batch(model, processor, rows: list, audio_root: Path, max_new_tok
             use_cache = True,
             pad_token_id = processor.tokenizer.pad_token_id,
             # 阶段 1 的 generation_config 只在 <|endoftext|> 停止；助手回合以 <|im_end|> 结束，两者都作为停止标记
-            eos_token_id = processor.tokenizer.convert_tokens_to_ids(tokens = ["<|im_end|>", "<|endoftext|>"]),
+            eos_token_id = processor.tokenizer.convert_tokens_to_ids(tokens = STOP_TOKENS),
         )
-    torch.cuda.synchronize()
+    if cuda:
+        torch.cuda.synchronize()
     elapsed = time.perf_counter() - start
-    peak = torch.cuda.max_memory_allocated()
+    peak = torch.cuda.max_memory_allocated() if cuda else 0
 
     new_ids = generated[:, inputs["input_ids"].shape[1]:]
     pad_id = processor.tokenizer.pad_token_id
     n_new = [int((row != pad_id).sum()) for row in new_ids]
     texts = processor.batch_decode(sequences = new_ids, skip_special_tokens = True)
-    return [clean_output(text = t) for t in texts], n_new, elapsed, peak, max_new_tokens
+    return [clean_output(text = t) for t in texts], n_new, elapsed, peak
+
+
+def transcribe_batch(
+    model,
+    processor,
+    rows: list,
+    audio_root: Path,
+    max_new_tokens_cfg: dict,
+    prompt_format: str = "chat",
+) -> tuple:
+    """转写一个批量，返回 (hypotheses, n_new_tokens 列表, 生成耗时秒, 峰值显存字节, max_new_tokens)。"""
+    audio_paths = [str(audio_root / row["audio_path"]) for row in rows]
+    waveforms = [load_waveform(path = path) for path in audio_paths]
+    longest = max(len(wave) for wave in waveforms) / SAMPLING_RATE
+    max_new_tokens = int(
+        math.ceil(longest * max_new_tokens_cfg["tokens_per_second"]) + max_new_tokens_cfg["extra"],
+    )
+    _, inputs = build_inputs(
+        processor = processor,
+        audio_paths = audio_paths,
+        waveforms = waveforms,
+        prompt_format = prompt_format,
+    )
+    texts, n_new, elapsed, peak = generate(
+        model = model,
+        processor = processor,
+        inputs = inputs,
+        max_new_tokens = max_new_tokens,
+    )
+    return texts, n_new, elapsed, peak, max_new_tokens
 
 
 def format_markdown(summary: dict) -> str:
@@ -299,6 +364,12 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
     parser.add_argument("--extra-tokens", default = 32, type = int, help = "max_new_tokens 估算：额外余量")
     parser.add_argument("--output-dir", required = True, type = Path, help = "输出目录")
     parser.add_argument("--show-inputs", default = 0, type = int, help = "每种语言打印前几条样本展开前的输入文本")
+    parser.add_argument(
+        "--prompt-format",
+        default = "chat",
+        choices = PROMPT_FORMATS,
+        help = "提示格式：chat 聊天格式（音频 + 固定指令），cpt 只有音频标记（纯续写格式训练的模型），与训练时相同",
+    )
     return parser.parse_args(argv)
 
 
@@ -325,11 +396,10 @@ def main(argv: list | None = None) -> int:
         rows = sorted(rows, key = lambda r: r["duration_s"])
         if args.show_inputs:
             prompts = [
-                processor.apply_chat_template(
-                    conversation = build_messages(audio_path = str(audio_root / r["audio_path"])),
-                    tokenize = False,
-                    add_generation_prompt = True,
-                    enable_thinking = False,
+                build_prompt(
+                    processor = processor,
+                    audio_path = str(audio_root / r["audio_path"]),
+                    prompt_format = args.prompt_format,
                 )
                 for r in rows[: args.show_inputs]
             ]
@@ -343,6 +413,7 @@ def main(argv: list | None = None) -> int:
                 rows = batch,
                 audio_root = audio_root,
                 max_new_tokens_cfg = token_cfg,
+                prompt_format = args.prompt_format,
             )
             audio_seconds = sum(r["duration_s"] for r in batch)
             perf.append(

@@ -3,7 +3,7 @@
 用法：
 
     python -m pipeline.train.show_batch \\
-        --model-dir <阶段 1 模型目录> --manifest <训练清单.jsonl> --target original --count 2 [--run-model]
+        --model-dir <阶段 1 模型目录> --manifest <训练清单.jsonl> --target original --count 2 [--prompt-format cpt] [--run-model]
 
 对每条样本打印：特征帧数、按音频塔规则算出的音频特征数、序列中 <|audio_pad|> 的个数；连续的
 <|audio_pad|> 合并成一项显示，其余 token 逐个列出，带 [loss] 的是计算损失的位置。
@@ -18,7 +18,7 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
     _get_feat_extract_output_lengths,
 )
 
-from pipeline.train.data import IGNORE_INDEX, TrainCollator, TranscriptionDataset, read_manifest
+from pipeline.train.data import IGNORE_INDEX, PROMPT_FORMATS, TrainCollator, TranscriptionDataset, read_manifest
 
 
 def describe_tokens(tokenizer, input_ids, labels, audio_token_id):
@@ -49,6 +49,7 @@ def main(argv = None):
     parser.add_argument("--manifest", required = True)
     parser.add_argument("--audio-root", default = None)
     parser.add_argument("--target", default = "script", choices = ("script", "original"))
+    parser.add_argument("--prompt-format", default = "chat", choices = PROMPT_FORMATS, help = "样本格式，与 train.py 相同")
     parser.add_argument("--count", type = int, default = 2)
     parser.add_argument("--sample-ids", default = None, help = "指定样本，逗号分隔")
     parser.add_argument("--run-model", action = "store_true")
@@ -75,7 +76,7 @@ def main(argv = None):
     tokenizer = processor.tokenizer
     audio_token_id = tokenizer.convert_tokens_to_ids(tokens = processor.audio_token)
     dataset = TranscriptionDataset(rows = rows, target = args.target)
-    collator = TrainCollator(processor = processor)
+    collator = TrainCollator(processor = processor, prompt_format = args.prompt_format)
     batch = collator(items = [dataset[index] for index in range(len(dataset))])
 
     feature_lens = batch["feature_attention_mask"].sum(dim = -1)

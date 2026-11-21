@@ -9,6 +9,8 @@
 #   LANGS     只评测这些语言（空格分隔，默认全部 18 种）；无人声评测集用 LANGS=zxx
 #   WORK_DIR  工作目录（含 envs/mllm-eval、envs/mllm-train、gpu.lock），默认是仓库旁边的 qwen3.5-asr-work
 #   MODEL_DIR 融合模型目录，默认 <仓库>/qwen3.5-0.8b-mllm；评测 2B、4B 的训练时设为 qwen3.5-2b-mllm、qwen3.5-4b-mllm
+#   PROMPT_FORMAT 提示格式 chat 或 cpt（run_eval.py --prompt-format），默认取这次训练的 train_config.json 中的
+#             prompt_format（train.py --prompt-format），没有这一项时为 chat
 # 全量微调的训练（train.py --train-language-model）中，选中的检查点另有 language_model.safetensors，自动一并载入。
 set -uo pipefail
 run="${1:?训练输出目录}"
@@ -20,6 +22,9 @@ work="${WORK_DIR:-$repo/../qwen3.5-asr-work}"
 cd "$repo"
 best=$("$work/envs/mllm-train/bin/python" -m pipeline.train.best_checkpoint "$run") || exit 1
 echo "选用 $best"
+format="${PROMPT_FORMAT:-$(sed -n 's/.*"prompt_format": *"\([a-z]*\)".*/\1/p' "$run/train_config.json" 2>/dev/null)}"
+format="${format:-chat}"
+echo "提示格式 $format"
 language_model=()
 [ -f "$best/language_model.safetensors" ] && language_model=(--language-model "$best/language_model.safetensors")
 flock "$work/gpu.lock" "$work/envs/mllm-eval/bin/python" -m pipeline.eval.run_eval \
@@ -27,6 +32,7 @@ flock "$work/gpu.lock" "$work/envs/mllm-eval/bin/python" -m pipeline.eval.run_ev
   --projector "$best/projector.safetensors" \
   "${language_model[@]}" \
   --manifest-dir "$manifest" \
+  --prompt-format "$format" \
   ${LANGS:+--langs $LANGS} \
   --batch-size "${BATCH_SIZE:-48}" \
   --output-dir "$out"

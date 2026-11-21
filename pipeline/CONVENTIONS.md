@@ -72,6 +72,12 @@ messages = [
 ]
 ```
 
+纯续写格式（任务 #71，`train.py --prompt-format cpt`，`run_eval.py --prompt-format cpt`）不用 chat template，没有系统、用户和助手回合：一条样本是一段音频的标记，后面直接接目标文本，以纯文本的结束标记 `<|endoftext|>` 结尾。音频标记与上面对话中音频的写法相同，由 processor 按音频长度展开 `<|audio_pad|>`。训练时 `<|audio_end|>` 之后的目标文本和 `<|endoftext|>` 计算损失（空目标样本只有 `<|endoftext|>`）；评测时提示只有音频标记，模型接着写出转写，在 `<|endoftext|>` 处停止。
+
+```text
+<|audio_start|><|audio_pad|>×N<|audio_end|>Hello world.<|endoftext|>
+```
+
 ## 模型封装的命令行接口
 
 每个 TTS、ASR 模型在 `pipeline/tts/`、`pipeline/asr/` 下有一个封装模块，在该模型自己的虚拟环境中运行，只依赖该环境中的包和标准库。

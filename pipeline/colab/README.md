@@ -257,6 +257,7 @@ pipeline/train/run.sh "$DATASET/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl" o
 - 检查点：每 2,500 步多一个 `language_model.safetensors`（bfloat16，约 3.8 GB，评测用），12 个检查点共约 46 GB；最近检查点的 `trainer_state.pt` 含主权重和 AdamW 状态，约 22.6 GB，每次保存都整个重写，旧的随即删除。删掉的文件进入 Drive 的回收站，30,000 步下来回收站中约有 270 GB 旧的 `trainer_state.pt`，需要时手动清空。
 - 这一段训练读第 0–29,999 步的数据：常驻分片 48 GB 加约 54 GB 顺序分片，单元格 6 的 `--ahead-steps 31600` 已经覆盖全程。
 - 评测在本机进行（Colab 上只建立了训练环境）：把输出目录下载到本机（`trainer_state.pt` 不需要），再运行 `MODEL_DIR=<仓库>/qwen3.5-2b-mllm pipeline/eval/run.sh <下载的输出目录> <评测清单目录> <结果目录>`。它选 dev 损失最低的检查点，并自动载入其中的 `language_model.safetensors`。
+- 纯续写格式（#71）：在训练单元格中加 `--prompt-format cpt`，样本变为音频标记后直接接转写和 `<|endoftext|>`（`pipeline/CONVENTIONS.md`「训练与评测的对话格式」），dev 损失也按这个格式计算。它不改变训练计划，现有的分片索引照常可用；它在续训核对的配置中，续训时要照样给出。`run.sh` 从训练配置读出这一项，评测时自动用同样的提示格式。
 
 **全量微调的精度（#66）。** 语言模型参数组怎样更新由四个训练参数选择（`pipeline/train/precision.py`），默认值就是上面 2B 那次训练的做法：float32 主权重、float32 梯度、float32 AdamW 状态，每个语言模型参数 18 字节。4B 的语言模型约 42.1 亿个参数，这一项约 75.7 GB，所以 4B 全量微调的小规模测试（每批 16 条、360 秒）要对 16 层做梯度检查点，峰值 88 GB。省显存的组合（全部选项、显存表和 0.8B 上的比较见 `pipeline/train/__init__.py`「全量微调」）：
 

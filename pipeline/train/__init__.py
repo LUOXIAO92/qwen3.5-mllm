@@ -5,6 +5,8 @@
 输入使用 CONVENTIONS 中「训练与评测的对话格式」：用户消息是一段音频加指令 Transcribe the audio.，
 用模型自带的 chat template 展开（add_generation_prompt = True、enable_thinking = False），助手回合
 以空思考块开头；只对空思考块之后的目标文本和结尾的 <|im_end|> 计算损失。
+--prompt-format cpt（任务 #71）改用纯续写格式：音频标记后直接接目标文本和 <|endoftext|>，不套 chat template，
+<|audio_end|> 之后的目标文本和 <|endoftext|> 计算损失（见 CONVENTIONS 和 data.py）。
 
 模块
 ====
@@ -12,7 +14,7 @@
 - data.py：读取训练清单、选择训练目标（script 朗读稿，或 original 原文，中文转简体）、按时长分组成批、
   用阶段 1 processor 做特征提取与音频标记展开，再用 mm_assistant_mask 在最终的 input_ids 上按 token 匹配助手回合生成标签。
 - check_labels.py：核对计损失的内容正好是目标文本加 <|im_end|>（空目标样本只有 <|im_end|>），提示部分与推理时一致；
-  更换模板或 processor 后运行。
+  更换模板或 processor 后运行。--prompt-format cpt 时核对纯续写格式（目标文本加 <|endoftext|>）。
 - sampling.py：按清单字段（lang、source 等）设定抽样权重，空目标样本按设定占比抽取；每轮的抽样和分批只由
   (seed, 轮次) 决定，续训时与不中断的训练一致。
 - mixing.py：在数据读取进程中给语音样本实时混入背景声，信噪比在设定范围内均匀随机，背景声可按类别加权。
@@ -44,7 +46,8 @@
 - tests/：空目标标签、混音信噪比与比例、加权抽样比例与续训一致性、分片读取与续训配置核对的单元测试，以及显存与
   速度选项与原实现一致的测试（需要 GPU，没有时跳过），以及拼接批次和 torch 交叉熵的测试（test_packing.py，GPU 部分
   还需要 flash-attn、causal-conv1d、fla），以及全量微调精度选项的测试（test_precision.py，torchao 部分没有 torchao 时跳过），
-  以及语言模型参数在主机内存中更新的测试（test_placement.py，需要 GPU 和 torchao），
+  以及语言模型参数在主机内存中更新的测试（test_placement.py，需要 GPU 和 torchao），以及纯续写格式的标签、聊天格式
+  与原实现逐位相同的测试（test_prompt_format.py，CPU），
   在仓库根目录运行 python -m unittest discover -s pipeline/train/tests -t .。
 
 训练清单

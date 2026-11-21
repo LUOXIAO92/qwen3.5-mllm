@@ -56,6 +56,11 @@
 - 检查点每次多存 language_model.safetensors（bfloat16，评测用）；主权重（没有主权重时是语言模型参数）与 AdamW 状态
   在 trainer_state.pt 中，与 projector 的续训状态一样只在最近的检查点中保留（--keep-trainer-states）。格式见 checkpoint.py。
 
+样本格式 --prompt-format（任务 #71）：chat（默认）是聊天格式，用户回合为音频加固定指令，助手回合为目标文本；cpt 是纯续写
+格式，音频标记后直接接目标文本和 <|endoftext|>，不套 chat template（data.py）。它只改变每条样本的文字，训练计划（每一步
+读哪些样本）不变，不在 PLAN_KEYS 中，按计划排列的音频分片照常可用；它改变损失的定义，在 RESUME_KEYS 中，以前的训练配置中
+没有这一项，按默认值 chat 核对。dev 损失（--eval-manifest）与训练使用同一种格式。
+
 速度选项 --loss-impl（交叉熵的实现）和 --pack-sequences（每批样本拼成一行、去掉填充）见 optimize.py（任务 #66）。
 它们不改变每步的样本和损失的定义，不在 RESUME_KEYS 中，续训时可以改变。
 
@@ -87,6 +92,7 @@ from pipeline.train.checkpoint import (
     save_checkpoint,
 )
 from pipeline.train.data import (
+    PROMPT_FORMATS,
     TARGETS,
     TrainCollator,
     TranscriptionDataset,
@@ -134,6 +140,7 @@ RESUME_KEYS = (
     "train_manifest",
     "audio_root",
     "target",
+    "prompt_format",
     "langs",
     "max_duration_s",
     "batch_size",
@@ -153,7 +160,7 @@ RESUME_KEYS = (
     # 全量微调的精度（precision.py）：决定优化器更新哪一份权重、状态以什么格式保存。
     *precision.KEYS,
 )
-# 决定训练计划（每一步读哪些样本）的配置，即 RESUME_KEYS 中混音和训练范围以外的各项。音频分片按这个计划排列。
+# 决定训练计划（每一步读哪些样本）的配置，即 RESUME_KEYS 中混音、样本格式和训练范围以外的各项。音频分片按这个计划排列。
 PLAN_KEYS = (
     "train_manifest",
     "audio_root",
@@ -206,6 +213,12 @@ def parse_args(argv = None):
         required = True,
         choices = TARGETS,
         help = "训练目标：script 朗读稿，original 原文",
+    )
+    parser.add_argument(
+        "--prompt-format",
+        choices = PROMPT_FORMATS,
+        default = "chat",
+        help = "样本格式：chat 聊天格式（音频 + 固定指令 → 助手回答），cpt 纯续写（音频标记后直接接目标文本和 <|endoftext|>）",
     )
     parser.add_argument("--output-dir", required = True, help = "检查点与日志的输出目录")
     parser.add_argument("--langs", default = None, help = "只用这些语言，逗号分隔")
@@ -851,6 +864,7 @@ def main(argv = None):
         processor = processor,
         audio_windows = (audio_config.n_window, audio_config.n_window_infer) if args.precompute_metadata else None,
         pack = args.pack_sequences,
+        prompt_format = args.prompt_format,
     )
     stream = make_batch_stream(
         args = args,
