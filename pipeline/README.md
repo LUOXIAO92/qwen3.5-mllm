@@ -112,7 +112,18 @@ python -m pipeline.eval.report --out-dir <报告目录> --nonspeech v1b-20k=<工
 
 结果目录的 summary.json 中 `nonspeech` 项即该指标；`report --nonspeech` 把多个模型并列成表。
 
-`run.sh` 取该次训练中 dev 损失最低的检查点，转写评测集并按语言打分，全量微调的检查点中的 `language_model.safetensors` 一并载入；`report` 把多次评测汇总成表格。
+`run.sh` 取该次训练中 dev 损失最低的检查点，转写评测集并按语言打分，全量微调的检查点中的 `language_model.safetensors` 一并载入；提示格式取这次训练的 `prompt_format`（纯续写格式训练的是 cpt，环境变量 `PROMPT_FORMAT` 可以改）。`report` 把多次评测汇总成表格。
+
+语音指令遵循探针（任务 #72）：同一批 FLEURS 音频（每种语言 30 条）换不同指令提问（转写及其改写、你听到了什么、翻译成英文或中文、拼接音频中某个时间段说了什么），统计照做与一律转写的比例；`--prompt-format chat cpt` 同时用纯续写格式的提示转写，`--cascade` 用参考转写代替音频，得到原始语言模型的参照。说明见 `pipeline/eval/instruct_probe.py` 开头。
+
+```bash
+flock <工作目录>/gpu.lock python -m pipeline.eval.instruct_probe \
+    --model-dir qwen3.5-2b-mllm --projector <检查点>/projector.safetensors \
+    --manifest-dir $DATASET/audio/qwen3.5-asr/fleurs --output-dir <工作目录>/data/T72/<名称>
+flock <工作目录>/gpu.lock python -m pipeline.eval.instruct_probe \
+    --model-dir qwen3.5-2b-mllm --cascade \
+    --manifest-dir $DATASET/audio/qwen3.5-asr/fleurs --output-dir <工作目录>/data/T72/2b-cascade
+```
 
 ## 8. 在 Google Colab 上训练
 
