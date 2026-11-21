@@ -41,13 +41,23 @@ MODEL = REPO / "qwen3.5-2b-mllm"
 MANIFEST = f"{DATASET}/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl"
 NOISE = f"{DATASET}/audio/qwen3.5-asr/nonspeech/v2/background.jsonl"
 FLEURS = WORK / "data" / "T02"
-STAGE = WORK / "t71"
-PROJECTOR_OUT = WORK / "runs" / "v2b-2b-cpt-projector"
-FULL_OUT = WORK / "runs" / "v2b-2b-cpt-full"
-EVAL_OUT = WORK / "eval" / "t71"
+# 同一流程可以带后缀再跑一次（T71_TAG），例如用户 2026-11-22 要求的「从临界点本身出发」：projector 每 100 步保存，
+# 取训练损失突降那一步的检查点（T71_PICK=at），只给本次的模型跑探针（T71_BASELINES=0，A 组与级联参照已在第一次跑过）。
+TAG = ENV.get("T71_TAG", "")
+PROJECTOR_NAME = "v2b-2b-cpt-projector" + TAG
+FULL_NAME = "v2b-2b-cpt-full" + TAG
+STAGE = WORK / ("t71" + TAG)
+PROJECTOR_OUT = WORK / "runs" / PROJECTOR_NAME
+FULL_OUT = WORK / "runs" / FULL_NAME
+EVAL_OUT = WORK / "eval" / ("t71" + TAG)
 A_PROJECTOR = DRIVE / "upload" / "init" / "v2b-2b-checkpoint-0005000"
 A_FULL = DRIVE / "runs" / "v2b-2b-full" / "checkpoint-0030000"
-MAX_PROJECTOR_STEPS = 15000
+MAX_PROJECTOR_STEPS = int(ENV.get("T71_MAX_PROJECTOR_STEPS", "15000"))
+PROJECTOR_SAVE_EVERY = int(ENV.get("T71_PROJECTOR_SAVE_EVERY", "2500"))
+PROJECTOR_EVAL_EVERY = int(ENV.get("T71_PROJECTOR_EVAL_EVERY", "2500"))
+# after：突降之后至少 500 步的第一个检查点（第一次的规则）；at：突降那一步（或之后最近）的检查点
+PICK = ENV.get("T71_PICK", "after")
+BASELINES = ENV.get("T71_BASELINES", "1") == "1"
 SAVE_EVERY = 2500
 STATUS = STAGE / "status.json"
 LOG = STAGE / "driver.log"
@@ -197,10 +207,11 @@ def phase_projector():
     window_proc = window(out = PROJECTOR_OUT)
     proc = background(
         command = train_command(out = PROJECTOR_OUT, extra = [
-            "--epochs", "1", "--warmup-steps", "12000", "--eval-every", str(SAVE_EVERY), "--save-every", str(SAVE_EVERY),
+            "--epochs", "1", "--warmup-steps", "12000", "--eval-every", str(PROJECTOR_EVAL_EVERY),
+            "--save-every", str(PROJECTOR_SAVE_EVERY),
             "--rows-cache-dir", str(WORK / "rows" / "v2b-2b"), "--stop-at-step", str(MAX_PROJECTOR_STEPS),
         ]),
-        log_file = WORK / "v2b-2b-cpt-projector.log",
+        log_file = WORK / f"{PROJECTOR_NAME}.log",
     )
     chosen = None
     found = None
@@ -213,7 +224,7 @@ def phase_projector():
                 log(f"训练损失在第 {found} 步突降")
                 set_status(drop_step = found)
         if found is not None and chosen is None:
-            after = [step for step in checkpoints(out = PROJECTOR_OUT) if step >= found + 500]
+            after = [step for step in checkpoints(out = PROJECTOR_OUT) if step >= found + (500 if PICK == "after" else 0)]
             if after:
                 chosen = after[0]
                 log(f"突降之后的第一个检查点是第 {chosen} 步，停止阶段 1")
@@ -222,7 +233,7 @@ def phase_projector():
                     os.kill(pid, signal.SIGTERM)
     proc.wait()
     window_proc.terminate()
-    sync(out = PROJECTOR_OUT, name = "v2b-2b-cpt-projector", with_state = True)
+    sync(out = PROJECTOR_OUT, name = PROJECTOR_NAME, with_state = True)
     rows = train_log(out = PROJECTOR_OUT)
     set_status(projector_last_step = rows[-1]["step"] if rows else 0, projector_exit = proc.returncode)
     if chosen is None:
@@ -243,7 +254,7 @@ def phase_full(init):
     FULL_OUT.mkdir(parents = True, exist_ok = True)
     window_proc = window(out = FULL_OUT)
     stop_sync = threading.Event()
-    sync_thread = threading.Thread(target = sync_and_prune, kwargs = {"out": FULL_OUT, "name": "v2b-2b-cpt-full", "stop": stop_sync},
+    sync_thread = threading.Thread(target = sync_and_prune, kwargs = {"out": FULL_OUT, "name": FULL_NAME, "stop": stop_sync},
                                    daemon = True)
     sync_thread.start()
     proc = background(
@@ -252,13 +263,13 @@ def phase_full(init):
             "--max-steps", "30000", "--eval-every", str(SAVE_EVERY), "--save-every", str(SAVE_EVERY),
             "--init-projector", str(init), "--rows-cache-dir", str(WORK / "rows" / "v2b-2b"), "--stop-after-minutes", "1260",
         ]),
-        log_file = WORK / "v2b-2b-cpt-full.log",
+        log_file = WORK / f"{FULL_NAME}.log",
     )
     proc.wait()
     stop_sync.set()
     sync_thread.join(timeout = 900)
     window_proc.terminate()
-    sync(out = FULL_OUT, name = "v2b-2b-cpt-full", with_state = True)
+    sync(out = FULL_OUT, name = FULL_NAME, with_state = True)
     progress = json.loads((FULL_OUT / "progress.json").read_text()) if (FULL_OUT / "progress.json").exists() else {}
     set_status(full_exit = proc.returncode, full_status = progress.get("status"), full_step = progress.get("step"))
     if progress.get("status") != "finished":
@@ -287,7 +298,7 @@ def phase_eval(projector_init, full_best):
     EVAL_OUT.mkdir(parents = True, exist_ok = True)
     probe = [PY, "-m", "pipeline.eval.instruct_probe", "--model-dir", str(MODEL), "--manifest-dir", str(FLEURS), "--batch-size", "16"]
     results = {}
-    full_lm = on_drive(path = full_best / "language_model.safetensors", name = "v2b-2b-cpt-full")
+    full_lm = on_drive(path = full_best / "language_model.safetensors", name = FULL_NAME)
     results["fleurs_cpt"] = run_step(name = "fleurs-b-full", command = [
         PY, "-m", "pipeline.eval.run_eval", "--model-dir", str(MODEL), "--projector", str(full_best / "projector.safetensors"),
         "--language-model", str(full_lm), "--manifest-dir", str(FLEURS), "--batch-size", "48",
@@ -296,18 +307,19 @@ def phase_eval(projector_init, full_best):
         "probe-b-projector": ["--projector", str(projector_init / "projector.safetensors"), "--prompt-format", "chat", "cpt"],
         "probe-b-full": ["--projector", str(full_best / "projector.safetensors"), "--language-model", str(full_lm),
                          "--prompt-format", "chat", "cpt"],
-        "probe-a-projector": ["--projector", str(A_PROJECTOR / "projector.safetensors")],
-        "probe-a-full": ["--projector", str(A_FULL / "projector.safetensors"), "--language-model",
-                         str(A_FULL / "language_model.safetensors")],
-        "probe-cascade": ["--cascade"],
     }
+    if BASELINES:
+        targets["probe-a-projector"] = ["--projector", str(A_PROJECTOR / "projector.safetensors")]
+        targets["probe-a-full"] = ["--projector", str(A_FULL / "projector.safetensors"), "--language-model",
+                                   str(A_FULL / "language_model.safetensors")]
+        targets["probe-cascade"] = ["--cascade"]
     for name, extra in targets.items():
         results[name] = run_step(name = name, command = probe + extra + ["--output-dir", str(EVAL_OUT / name)])
         set_status(eval_results = results)
     results["lm_ppl"] = run_step(name = "lm-ppl", command = [PY, "-c", LM_PPL, str(FLEURS), str(MODEL), str(EVAL_OUT / "lm_ppl_b_full.json"),
                                                              str(full_lm)])
     set_status(eval_results = results)
-    target = DRIVE / "runs" / "v2b-2b-cpt-full" / "eval"
+    target = DRIVE / "runs" / FULL_NAME / "eval"
     target.mkdir(parents = True, exist_ok = True)
     subprocess.run(["rsync", "-a", f"{EVAL_OUT}/", f"{target}/"], check = False)
 
@@ -363,10 +375,11 @@ def main():
         return 1
     finally:
         subprocess.run(["pkill", "-f", "pipeline.colab.shard_window run"], check = False)
-        (DRIVE / "runs" / "t71-status").mkdir(parents = True, exist_ok = True)
+        status_dir = DRIVE / "runs" / ("t71-status" + TAG)
+        status_dir.mkdir(parents = True, exist_ok = True)
         for path in (STATUS, LOG):
             if path.exists():
-                shutil.copy2(src = path, dst = DRIVE / "runs" / "t71-status" / path.name)
+                shutil.copy2(src = path, dst = status_dir / path.name)
 
 
 if __name__ == "__main__":
