@@ -93,6 +93,24 @@ def diversity(rows, raw_dir, budget = 200_000, opening = 8):
     }
 
 
+def retokenized_ratio(rows, nll_rows, group):
+    """重新分词后的 token 数 / 采样时的 token 数（同一批样本的主体部分），整体与按语言给出。
+
+    两者不同说明分词器对模型自己写出的文本给出了另一种切分；比值明显大于 1 时，训练写法 NLL 按 token 平均会偏高。
+    """
+    main = "assistant" if group in ("free_chat", "cont_chat") else "generated"
+    sampled = {row["sample_id"]: [p for p in row["pieces"] if "gen" in p][-1]["keep"] for row in rows}
+    language = {row["sample_id"]: row.get("doc_lang") or row.get("lang") for row in rows}
+    totals = defaultdict(lambda: [0, 0])
+    for row in nll_rows:
+        if row["sample_id"] not in sampled:
+            continue
+        for key in ("all", language[row["sample_id"]]):
+            totals[key][0] += row[f"{main}_tokens"]
+            totals[key][1] += sampled[row["sample_id"]]
+    return {key: round(value[0] / max(value[1], 1), 4) for key, value in sorted(totals.items())}
+
+
 def nll_summary(rows, group):
     if not rows:
         return None
@@ -167,7 +185,10 @@ def split_summary(replay_dir, group, split):
         summary["throughput"] = {"runs": len(runs), "gen_tokens": tokens, "seconds": round(seconds, 1), "tokens_per_second": round(tokens / max(seconds, 1e-9), 1)}
     summary["gen_nll"] = gen_nll(rows = kept, raw_dir = split_dir / "raw")
     summary["diversity"] = diversity(rows = kept, raw_dir = split_dir / "raw")
-    summary["nll"] = nll_summary(rows = read_jsonl(split_dir / "nll.jsonl"), group = group)
+    nll_rows = read_jsonl(split_dir / "nll.jsonl")
+    summary["nll"] = nll_summary(rows = nll_rows, group = group)
+    if nll_rows:
+        summary["nll"]["retokenized_ratio"] = retokenized_ratio(rows = kept, nll_rows = nll_rows, group = group)
     return summary
 
 
@@ -208,6 +229,10 @@ def markdown(summary):
                     lines.append(f"- 训练写法 NLL（{part}）：{nll[part]['nll']}，{nll[part]['tokens']:,} token")
             if "by_doc_lang" in nll:
                 lines.append("- 按文档语言的 NLL：" + "，".join(f"{lang} {value['nll']}" for lang, value in nll["by_doc_lang"].items()))
+            if "retokenized_ratio" in nll:
+                ratios = nll["retokenized_ratio"]
+                high = {lang: ratio for lang, ratio in ratios.items() if lang != "all" and ratio > 1.05}
+                lines.append(f"- 重新分词 / 采样 token 数：{ratios['all']}；超过 1.05 的语言：{high or '无'}")
         lines.append("")
     return "\n".join(lines) + "\n"
 

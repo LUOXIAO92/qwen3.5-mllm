@@ -39,6 +39,8 @@ from pipeline.replay.degeneration import degeneration_onset
 from pipeline.replay.store import TOP_K, ShardWriter, read_all_records, repair
 
 MAX_NEW_TOKENS = 16384
+# 估计平均保留 token 数时的先验：相当于 20 条各 1000 token 的样本
+PRIOR_SAMPLES = 20
 
 
 def parse_plan(plan):
@@ -162,7 +164,7 @@ class Generator:
         writer = None
         streams = {}
         counters = {"samples": 0, "gen_tokens": 0, "loop_aborts": 0}
-        mean_kept = (kept_total / len(records)) if records else 1000.0
+        mean_kept = (kept_total + 1000.0 * PRIOR_SAMPLES) / (len(records) + PRIOR_SAMPLES)
         finished_samples = len(records)
         exhausted = False
         t_start = time.time()
@@ -226,7 +228,8 @@ class Generator:
             kept_total += kept
             counters["samples"] += 1
             finished_samples += 1
-            mean_kept = 0.9 * mean_kept + 0.1 * kept if finished_samples > 1 else float(kept)
+            # 按全部已完成样本的平均值估计在途样本；短样本先完成，滑动平均会偏低，导致投放过多
+            mean_kept = (kept_total + 1000.0 * PRIOR_SAMPLES) / (finished_samples + PRIOR_SAMPLES)
 
         def piece_done(request_id, finish_reason):
             """请求结束（正常停止、达到上限或因循环中止）后的处理：free_chat 用户消息正常结束时接着生成回答，否则样本完成。"""
@@ -251,8 +254,12 @@ class Generator:
             finish_sample(state = state, status = "ok", kept = kept)
 
         while True:
-            active = len({stream.state["row"]["prompt_index"] for stream in streams.values()})
-            projected = kept_total + active * mean_kept
+            # 在途样本的保留 token 估计：已生成的长度与平均值中较大的一个（free_chat 两段按同一条样本计）
+            lengths = {}
+            for stream in streams.values():
+                index = stream.state["row"]["prompt_index"]
+                lengths[index] = max(lengths.get(index, 0), stream.state.get("used", 0) + stream.length)
+            projected = kept_total + sum(max(length, mean_kept) for length in lengths.values())
             feeding = time.time() < deadline and projected < target and not exhausted
             while feeding and len(streams) < args.max_inflight:
                 row = next(pending, None)

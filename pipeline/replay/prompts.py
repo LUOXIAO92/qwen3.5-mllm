@@ -145,6 +145,7 @@ def main():
     segments = chat_segments(tokenizer = tokenizer)
     free_count = {key: int(value) for key, value in (item.split("=") for item in args.free_count.split(","))}
     templates_path = replay_dir / "templates.json"
+    cuts = {}
     templates = json.loads(templates_path.read_text(encoding = "utf-8")) if templates_path.exists() else {}
 
     for group in args.groups:
@@ -181,7 +182,11 @@ def main():
                 skipped = 0
                 for prefix in prefixes:
                     target = random.Random(f"{args.seed}-{prefix['prefix_id']}").randint(MIN_PREFIX_TOKENS, MAX_PREFIX_TOKENS)
-                    prefix_text = cut_prefix(tokenizer = tokenizer, text = prefix["text"], target = target)
+                    # cont_raw 与 cont_chat 用同一段开头，切分结果只算一次
+                    key = (split, prefix["prefix_id"])
+                    if key not in cuts:
+                        cuts[key] = cut_prefix(tokenizer = tokenizer, text = prefix["text"], target = target)
+                    prefix_text = cuts[key]
                     if prefix_text is None:
                         skipped += 1
                         continue

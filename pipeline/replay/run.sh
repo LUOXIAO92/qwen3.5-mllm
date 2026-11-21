@@ -56,8 +56,9 @@ step_prefixes() {
 }
 
 step_prompts() {
-    # free_raw 的第一个 token 要用参考模型前向一次（first_token.py），短暂占用 GPU
-    run_on_gpu "$EVAL_ENV" -m pipeline.replay.prompts --model "$REF" --replay-dir "$REPLAY" --free-raw-start "$FREE_RAW_START"
+    # free_raw 的第一个 token 要用参考模型前向一次（first_token.py），只有这一组占用 GPU
+    run_on_gpu "$EVAL_ENV" -m pipeline.replay.prompts --model "$REF" --replay-dir "$REPLAY" --free-raw-start "$FREE_RAW_START" --groups free_raw
+    "$EVAL_ENV" -m pipeline.replay.prompts --groups free_chat cont_raw cont_chat --model "$REF" --replay-dir "$REPLAY" --free-raw-start "$FREE_RAW_START"
 }
 
 step_generate() {
