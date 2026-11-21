@@ -143,3 +143,5 @@ WORK_DIR=<工作目录> DATASET=$DATASET MLLM=<2B 融合模型目录> ORIGINAL=<
 四组回放文本是 free_raw（从一个换行开始自由生成，不加模板）、free_chat（从用户轮开头开始，模型自己写用户消息和助手回答）、cont_raw（续写文档开头）、cont_chat（文档开头放进用户轮并加续写指令，助手续写）。带模板的两组与 ASR 训练用同一套 chat template 设置。每组分为训练用的 `train` 和只作评测的 `eval`，两者的文档互不重叠。数据放在 `$DATASET/text/qwen3.5-asr/replay/<组>/<划分>/`，存放格式见 `pipeline/replay/store.py`，每个样本的字段见 `finalize.py`。
 
 `generate` 生成时每 256 个 token 检查一次循环，发现循环后再多生成 1,024 个 token 就中止这条样本，最终在循环起点截断（规则见 `degeneration.py`）；无模板两组的样本有一半左右会陷入循环，不提前中止时大部分算力花在循环上。vLLM 0.28 对只有一个 token 的提示有状态残留的问题（见 `first_token.py`），所以 free_raw 的第一个生成 token 由 `prompts` 用 transformers 按参考模型的分布抽好，vLLM 从两个 token 的提示接着生成。`generate` 每次持有 GPU 锁约 12 分钟（`TIME_BUDGET`），时间用完就释放锁，下次从断点续跑；每次占用 GPU 之前先看 `nvidia-smi`，有其他进程占着显存时等待。
+
+训练时建议直接使用保存的 token id（提示片段的 `ids` 加生成片段的 `[offset, offset + keep)`），不要把文本解码后重新分词。transformers 5.16.1 加载 Qwen3.5 分词器时会换掉 `tokenizer.json` 中的预切分规则（原规则 `[\p{L}\p{M}]+` 变成 `\p{L}+`），泰语的元音、声调符号和阿拉伯语的元音符号都会把词切开：模型自己写出的泰语文本重新分词后 token 数是采样时的 1.1–1.8 倍。free_chat 约 2% 的助手回答在空思考块之后又写了一段思考（含 `</think>`），按聊天模板重新渲染时会被拆成思考与回答两部分，用 token id 训练不受影响。

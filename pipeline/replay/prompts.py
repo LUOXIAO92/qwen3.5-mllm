@@ -11,6 +11,10 @@
 | cont_raw | 文档开头（64–256 token），不加模板 |
 | cont_chat | 用户轮内容为续写指令加空行加同一段文档开头，助手轮开头和空的思考块之后由模型续写 |
 
+free_raw 默认用换行开头。试运行中两种开头各采样 600 条：换行开头 58% 的样本出现循环，前 20 万 token 中不同 4-gram
+的比例为 0.66，开头 8 个 token 与其他样本相同的占 2.5%，一半像代码；随机 token 开头分别为 51%、0.61、0%，四分之一像代码。
+两者的重复程度相近，随机开头没有更少重复，所以保留换行开头。
+
 聊天模板与 ASR 训练相同：`pipeline/train/data.py` 的 `build_training_text` 用 `apply_chat_template`，
 `add_generation_prompt = False`、`enable_thinking = False`，没有系统消息，渲染结果是
 `<|im_start|>user\\n{用户}<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n{助手}<|im_end|>\\n`。
