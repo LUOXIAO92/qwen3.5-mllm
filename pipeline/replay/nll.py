@@ -89,7 +89,12 @@ def main():
 
     from pipeline.train.model import load_model
 
-    model, processor = load_model(model_dir = args.mllm, device = "cuda", dtype = torch.bfloat16, attn_implementation = "sdpa")
+    model, processor = load_model(
+        model_dir = args.mllm,
+        device = "cuda",
+        dtype = torch.bfloat16,
+        attn_implementation = "sdpa",
+    )
     _processor = processor
     _tokenizer = processor.tokenizer
     for group in args.groups:

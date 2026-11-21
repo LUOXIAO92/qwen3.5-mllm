@@ -211,7 +211,12 @@ class Generator:
                 if "gen" in piece:
                     sampled, sampled_lp, topk_ids, topk_lp = state["arrays"][gen_index]
                     gen_index += 1
-                    offset = writer.add_gen(ids = sampled, lp = sampled_lp, topk_ids = topk_ids, topk_lp = topk_lp)
+                    offset = writer.add_gen(
+                        ids = sampled,
+                        lp = sampled_lp,
+                        topk_ids = topk_ids,
+                        topk_lp = topk_lp,
+                    )
                     piece = dict(piece, offset = offset)
                 pieces.append(piece)
             row = state["row"]
@@ -246,7 +251,13 @@ class Generator:
                     state["pieces"].append({"ids": between_ids})
                     state["used"] = used
                     prompt_ids = state["row"]["prompt_ids"] + ids.tolist() + between_ids
-                    submit(state = state, phase = 2, prompt_ids = prompt_ids, max_tokens = args.max_new_tokens - used, role = "assistant")
+                    submit(
+                        state = state,
+                        phase = 2,
+                        prompt_ids = prompt_ids,
+                        max_tokens = args.max_new_tokens - used,
+                        role = "assistant",
+                    )
                     return
                 finish_sample(state = state, status = "no_user_end", kept = 0)
                 return
@@ -373,7 +384,12 @@ def main():
         if time.time() >= deadline:
             all_done = False
             break
-        finished = generator.run_split(group = group, split = split, target = targets[split], deadline = deadline)
+        finished = generator.run_split(
+            group = group,
+            split = split,
+            target = targets[split],
+            deadline = deadline,
+        )
         all_done = all_done and finished
     print("全部完成" if all_done else "时间用完，下次运行续跑", flush = True)
     # 退出码：0 全部完成，3 还有剩余（run.sh 据此释放 GPU 锁后续跑）

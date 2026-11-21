@@ -202,7 +202,13 @@ def main():
     args = parser.parse_args()
     for group in args.groups:
         for split in args.splits:
-            finalize_split(replay_dir = args.replay_dir, group = group, split = split, model_dir = args.model, jobs = args.jobs)
+            finalize_split(
+                replay_dir = args.replay_dir,
+                group = group,
+                split = split,
+                model_dir = args.model,
+                jobs = args.jobs,
+            )
 
 
 if __name__ == "__main__":
