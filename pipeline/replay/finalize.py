@@ -9,7 +9,8 @@
 
 `--drop-loops`（丢弃循环的回放目录 `replay-noloop/`）时同样不截断：生成时已经整条丢弃的样本（索引状态 `loop`，只有
 元数据）写成 `keep` 为假、`drop_reason` 为 `loop` 的行，`loop_onset` 取自生成时的记录，`n_gen` 是花掉的生成 token 数；
-其余样本按同一套规则再完整检查一次，仍发现循环的也整条不用（正常情况下为 0 条）。
+其余样本按同一套规则再完整检查一次，仍发现循环的也整条不用（正常情况下为 0 条）。free_chat_think 中没有写出 `</think>`
+的样本（含用户消息没有正常结束、没有助手回答的）同样整条不用，`drop_reason` 为 `think_unclosed`，token 仍留在 `raw/` 中。
 
 在 `envs/mllm-eval` 中运行（只用 CPU）。二进制数组不复制也不改写：`samples.jsonl` 中每个生成片段的 `keep`
 给出截断后保留的 token 数，读取时取 `[offset, offset + keep)`。每行字段：
@@ -198,6 +199,11 @@ def process(job):
             row["reasoning_tokens"] = close if close is not None else len(answer_ids)
             row["answer_tokens"] = len(answer_ids) - close - 1 if close is not None else 0
             row["answer_text"] = content(ids = answer_ids[close + 1:]) if close is not None else ""
+        elif group == "free_chat_think":
+            row["think_closed"] = False  # 用户消息没有正常结束，没有助手回答
+        if group == "free_chat_think" and drop_loops and row["keep"] and not row["think_closed"]:
+            # 没有写出 </think> 的样本（含没有助手回答的）整条不用，不截断（用户 2026-11-22 决定）；token 仍留在 raw 中
+            row.update(keep = False, drop_reason = "think_unclosed")
     prompt_meta(row = row, prompt = prompt, group = group)
     row.update(
         pieces = pieces,

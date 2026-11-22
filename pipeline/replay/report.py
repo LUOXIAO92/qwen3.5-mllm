@@ -226,6 +226,11 @@ def split_summary(replay_dir, group, split):
         summary["dropped_loop_onset"] = percentiles(values = [row["loop_onset"]["position"] for row in dropped if row.get("loop_onset")])
         summary["imported_samples"] = sum(bool(row.get("origin")) for row in rows)
         summary["kept_hit_cap"] = sum(row["finish_reason"] == "length" for row in kept)
+        unclosed = [row for row in rows if row["drop_reason"] == "think_unclosed"]
+        if unclosed:
+            summary["dropped_think_unclosed_samples"] = len(unclosed)
+            summary["dropped_think_unclosed_tokens"] = sum(row["n_gen"] for row in unclosed)
+            summary["generated_tokens"] += summary["dropped_think_unclosed_tokens"]
     if not noloop and any("pre_loop_tokens" in row for row in kept):
         # 不筛选：循环只是元数据
         summary["unfiltered"] = True
@@ -241,7 +246,8 @@ def split_summary(replay_dir, group, split):
         tokens_by_lang[row.get("lang", "?")] += row["n_kept"]
     summary["lang_tokens"] = dict(tokens_by_lang.most_common())
     if group == "free_chat_think":
-        answered = [row for row in kept if "think_closed" in row]
+        # 写出率按没有循环的全部样本计（没有写出 </think> 的样本在丢弃循环的目录中整条不用）
+        answered = [row for row in rows if "think_closed" in row and row["drop_reason"] in (None, "think_unclosed")]
         closed = [row for row in answered if row["think_closed"]]
         summary["think"] = {
             "samples_with_assistant": len(answered),
@@ -251,10 +257,10 @@ def split_summary(replay_dir, group, split):
             "reasoning_tokens": percentiles(values = [row["reasoning_tokens"] for row in closed]),
             "answer_tokens": percentiles(values = [row["answer_tokens"] for row in closed]),
             "reasoning_tokens_not_closed": percentiles(values = [row["reasoning_tokens"] for row in answered if not row["think_closed"]]),
-            "kept_tokens_closed": sum(row["n_kept"] for row in closed),
-            "kept_tokens_not_closed": sum(row["n_kept"] for row in kept if not row.get("think_closed")),
-            "kept_samples_not_closed": sum(not row.get("think_closed") for row in kept),
-            "not_closed_hit_cap": sum(not row.get("think_closed") and row["finish_reason"] == "length" for row in kept),
+            "tokens_closed": sum(row["n_gen"] for row in closed),
+            "tokens_not_closed": sum(row["n_gen"] for row in answered if not row["think_closed"]),
+            "samples_not_closed": sum(not row["think_closed"] for row in answered),
+            "not_closed_hit_cap": sum(not row["think_closed"] and row["finish_reason"] == "length" for row in answered),
         }
     if group in SELF_USER_GROUPS:
         summary["user_lang_samples"] = dict(Counter(row.get("user_lang", "?") for row in kept).most_common())
@@ -368,8 +374,8 @@ def markdown(summary):
                     f"没有写出 </think> 的样本的思考长度 {think['reasoning_tokens_not_closed']}"
                 )
                 lines.append(
-                    f"- 保留 token：写出 </think> 的样本 {think['kept_tokens_closed']:,}，没有写出的样本 {think['kept_tokens_not_closed']:,}"
-                    f"（{think['kept_samples_not_closed']} 条，其中 {think['not_closed_hit_cap']} 条达到 16k 上限）"
+                    f"- 生成 token：写出 </think> 的样本 {think['tokens_closed']:,}，没有写出的样本 {think['tokens_not_closed']:,}"
+                    f"（{think['samples_not_closed']} 条，其中 {think['not_closed_hit_cap']} 条达到 16k 上限；丢弃循环的目录中这些样本整条不用）"
                 )
             if "prompt_lang_samples" in item:
                 lines.append(f"- 提问语言（保留样本数）：{item['prompt_lang_samples']}；回答与提问语言相同的比例：{item['same_lang_as_prompt']}")
