@@ -807,7 +807,8 @@ def check_inputs():
             FLEURS / "zh" / "test.jsonl",
             Path(REPLAY_DIR) / "templates.json",
         )
-        if not path.exists()
+        # 只训练时不用 FLEURS test（评测才用）
+        if not path.exists() and not (TRAIN_ONLY and path == FLEURS / "zh" / "test.jsonl")
     ]
     for group in ("free_raw", "free_chat", "cont_raw", "cont_chat", "free_chat_think"):
         for split in ("train", "eval"):
