@@ -2,11 +2,15 @@
 
     python -m pipeline.replay.report --replay-dir <回放目录> --out-dir <输出目录>
 
-读取 finalize、langid、nll 的结果和 shard 二进制中的对数概率，只用 CPU。两种 NLL：
+读取 finalize、langid、nll、teacher 的结果和 shard 二进制中的对数概率，只用 CPU。三种 NLL：
 
-- 训练写法 NLL（`nll`）：nll 一步按训练的渲染与分词重新前向得到，是以后比较「当前模型 − 参考模型」的基线；
-- 采样时 NLL（`gen_nll`）：生成时记录的采样 token 自身的对数概率取负，按保留的生成 token 平均，
-  分词就是采样到的 token 序列。两者相差很小，说明重新分词与 vLLM 数值都没有引入明显偏差。
+- 训练写法 NLL（`nll`，筛选的回放目录）：nll 一步按训练的渲染与分词重新前向得到，是以后比较「当前模型 − 参考模型」的基线；
+- 参考 NLL（`teacher_nll`，不筛选的回放目录）：teacher 一步用保存的 token id 整条前向（与按 token id 训练时的输入相同），
+  生成 token 的对数概率取负后按 token 平均，同样作为「当前模型 − 参考模型」的基线；同时给出 top-32 之外的尾部概率；
+- 采样时 NLL（`gen_nll`）：生成时 vLLM 记录的采样 token 自身的对数概率取负，按保留的生成 token 平均。
+
+不筛选的回放目录另外统计循环：`loop_samples` 是出现循环（按 finalize 的规则）的样本数，`tokens_after_loop_onset` 是
+循环起点之后的生成 token 数（筛选模式会截掉的部分）。
 """
 
 import argparse
@@ -18,6 +22,7 @@ import numpy as np
 
 from pipeline.replay.prompts import GROUPS, SPLITS
 from pipeline.replay.store import ShardReader
+from pipeline.replay.teacher import Teacher
 
 LENGTH_BINS = [(0, 64), (64, 256), (256, 1024), (1024, 4096), (4096, 16384), (16384, 10**9)]
 
@@ -131,6 +136,49 @@ def nll_summary(rows, group):
     return result
 
 
+def teacher_summary(rows, split_dir, group):
+    """参考 NLL 与 top-32 之外的尾部概率，取自 teacher 的输出；按部分（角色）给出，主体部分再按语言分开。"""
+    teacher_dir = Path(split_dir) / "teacher"
+    done = set()
+    progress = teacher_dir / "progress.jsonl"
+    if not progress.exists():
+        return None
+    with open(progress, encoding = "utf-8") as handle:
+        for line in handle:
+            done.update(json.loads(line)["sample_ids"])
+    rows = [row for row in rows if row["sample_id"] in done]
+    if not rows:
+        return None
+    shards = {}
+    sums = defaultdict(float)
+    counts = Counter()
+    by_lang = defaultdict(lambda: [0.0, 0])
+    tails = []
+    key = "doc_lang" if group.startswith("cont") else "lang"
+    for row in rows:
+        if row["shard"] not in shards:
+            shards[row["shard"]] = Teacher.stored(teacher_dir = teacher_dir, number = row["shard"])
+        arrays = shards[row["shard"]]
+        gen_pieces = [piece for piece in row["pieces"] if "gen" in piece]
+        for piece in gen_pieces:
+            span = slice(piece["offset"], piece["offset"] + piece["keep"])
+            nll = float(-np.asarray(arrays["lp"][span], dtype = np.float64).sum())
+            sums[piece["gen"]] += nll
+            counts[piece["gen"]] += piece["keep"]
+            if piece["gen"] != "user":
+                by_lang[row.get(key) or "?"][0] += nll
+                by_lang[row.get(key) or "?"][1] += piece["keep"]
+            top = np.exp(np.asarray(arrays["top_lp"][span], dtype = np.float32)).sum(axis = 1)
+            tails.append(np.clip(1.0 - top, 0.0, 1.0))
+    tail = np.concatenate(tails) if tails else np.zeros(0)
+    result = {"samples": len(rows)}
+    for role in counts:
+        result[role] = {"tokens": counts[role], "nll": round(sums[role] / max(counts[role], 1), 4)}
+    result[f"by_{key}"] = {lang: {"tokens": value[1], "nll": round(value[0] / max(value[1], 1), 4)} for lang, value in sorted(by_lang.items())}
+    result["top32_tail_mass"] = percentiles(values = tail.tolist()) if len(tail) < 2_000_000 else percentiles(values = tail[:: len(tail) // 1_000_000].tolist())
+    return result
+
+
 def split_summary(replay_dir, group, split):
     split_dir = Path(replay_dir) / group / split
     rows = read_jsonl(split_dir / "samples.jsonl")
@@ -162,6 +210,16 @@ def split_summary(replay_dir, group, split):
         "gen_nll_over_4": sum((row.get("gen_nll") or 0) > 4 for row in kept),
         "lang_samples": dict(Counter(row.get("lang", "?") for row in kept).most_common()),
     }
+    if any("pre_loop_tokens" in row for row in kept):
+        # 不筛选：循环只是元数据
+        summary["unfiltered"] = True
+        summary["status"] = dict(Counter(row.get("status") for row in kept))
+        summary["loop_samples"] = sum(row["loop_onset"] is not None for row in kept)
+        summary["loop_share"] = round(summary["loop_samples"] / max(len(kept), 1), 4)
+        summary["loop_kind"] = dict(Counter(row["loop_onset"]["kind"] for row in kept if row["loop_onset"]))
+        summary["tokens_after_loop_onset"] = sum(row["n_gen"] - row["pre_loop_tokens"] for row in kept)
+        summary["tokens_after_loop_onset_share"] = round(summary["tokens_after_loop_onset"] / max(summary["kept_tokens"], 1), 4)
+        summary["cap_samples_with_loop"] = sum(row["finish_reason"] == "length" and row["loop_onset"] is not None for row in kept)
     tokens_by_lang = Counter()
     for row in kept:
         tokens_by_lang[row.get("lang", "?")] += row["n_kept"]
@@ -181,10 +239,14 @@ def split_summary(replay_dir, group, split):
         summary["prefix_tokens"] = percentiles(values = [row["prefix_tokens"] for row in kept])
     if runs:
         seconds = sum(run["seconds"] for run in runs)
-        tokens = sum(run["gen_tokens"] for run in runs)
+        # 中途暂停的样本在下次运行才写完，按每次实际解码的 token 计吞吐（旧记录没有这一项时用写完的样本的 token）
+        tokens = sum(run.get("decoded_tokens", run["gen_tokens"]) for run in runs)
         summary["throughput"] = {"runs": len(runs), "gen_tokens": tokens, "seconds": round(seconds, 1), "tokens_per_second": round(tokens / max(seconds, 1e-9), 1)}
     summary["gen_nll"] = gen_nll(rows = kept, raw_dir = split_dir / "raw")
     summary["diversity"] = diversity(rows = kept, raw_dir = split_dir / "raw")
+    teacher = teacher_summary(rows = kept, split_dir = split_dir, group = group)
+    if teacher:
+        summary["teacher_nll"] = teacher
     nll_rows = read_jsonl(split_dir / "nll.jsonl")
     summary["nll"] = nll_summary(rows = nll_rows, group = group)
     if nll_rows:
@@ -192,8 +254,57 @@ def split_summary(replay_dir, group, split):
     return summary
 
 
+def unfiltered_table(summary):
+    lines = [
+        "| 组 | 划分 | 样本 | 生成 token | 长度中位数 | 长度 p90 | 达到 16k 上限 | 有循环的样本 | 循环起点之后的 token | gzip 压缩率中位数 | 参考 NLL | 采样时 NLL | top-32 之外概率均值 |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for key, item in summary.items():
+        group, split = key.split("/")
+        main = "assistant" if group.endswith("chat") else "text"
+        teacher = item.get("teacher_nll") or {}
+        nll_text = f"{teacher[main]['nll']:.4f}" if main in teacher else ""
+        tail_text = f"{teacher['top32_tail_mass']['mean']:.4f}" if teacher.get("top32_tail_mass") else ""
+        lines.append(
+            f"| {group} | {split} | {item['samples']:,} | {item['kept_tokens']:,} | {item['length'].get('p50', 0):.0f} | "
+            f"{item['length'].get('p90', 0):.0f} | {item['hit_length_cap']:,}（{item['hit_length_cap'] / max(item['samples'], 1):.1%}） | "
+            f"{item['loop_samples']:,}（{item['loop_share']:.1%}） | {item['tokens_after_loop_onset_share']:.1%} | "
+            f"{item['gzip_ratio'].get('p50', 0):.3f} | {nll_text} | {item['gen_nll'].get('main', float('nan')):.4f} | {tail_text} |"
+        )
+    return lines
+
+
 def markdown(summary):
     lines = ["# 回放文本汇总", ""]
+    if any(item.get("unfiltered") for item in summary.values()):
+        lines = ["# 不筛选的回放文本汇总", ""]
+        lines.extend(unfiltered_table(summary = summary))
+        lines.append("")
+        for key, item in summary.items():
+            lines.append(f"## {key}")
+            lines.append("")
+            lines.append(f"- 长度分档（生成 token）：{item['length_bins']}；长度分位数：{item['length']}")
+            lines.append(f"- 结束方式：{item['finish']}；状态：{item['status']}；达到上限且有循环：{item['cap_samples_with_loop']}；循环种类：{item['loop_kind']}")
+            lines.append(f"- 语言（样本数）：{item['lang_samples']}")
+            lines.append(f"- 语言（token 数）：{item['lang_tokens']}")
+            lines.append(f"- 像代码的样本：{item['code_like']}；平均 NLL 超过 4 的样本：{item['gen_nll_over_4']}；多样性：{item['diversity']}")
+            if "doc_lang_samples" in item:
+                lines.append(f"- 续写语言与文档语言相同的比例：{item['same_lang_as_doc']}；文档语言（样本数）：{item['doc_lang_samples']}")
+                lines.append(f"- 来源：{item['source_samples']}；文档开头 token 数：{item['prefix_tokens']}")
+            if "user_lang_samples" in item:
+                lines.append(f"- 用户消息语言：{item['user_lang_samples']}；用户消息 token 数：{item['user_tokens']}")
+            if "throughput" in item:
+                lines.append(f"- 吞吐：{item['throughput']['tokens_per_second']} token/s（{item['throughput']['runs']} 次运行，{item['throughput']['seconds']:.0f} 秒）")
+            teacher = item.get("teacher_nll")
+            if teacher:
+                for part in ("user", "assistant", "text"):
+                    if part in teacher:
+                        lines.append(f"- 参考 NLL（{part}）：{teacher[part]['nll']}，{teacher[part]['tokens']:,} token")
+                by_key = "by_doc_lang" if "by_doc_lang" in teacher else "by_lang"
+                lines.append(f"- 参考 NLL（主体，{by_key}）：" + "，".join(f"{lang} {value['nll']}" for lang, value in teacher[by_key].items()))
+                lines.append(f"- top-32 之外的概率：{teacher['top32_tail_mass']}")
+            lines.append("")
+        return "\n".join(lines) + "\n"
     lines.append("| 组 | 划分 | 样本 | 保留 | 保留 token | 截断 | 截断损失 token | 丢弃 | 长度中位数 | 达到上限 | gzip 压缩率中位数 | 训练写法 NLL | 采样时 NLL |")
     lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |")
     for key, item in summary.items():

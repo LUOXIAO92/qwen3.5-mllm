@@ -4,9 +4,14 @@
 #   WORK_DIR=<工作目录> DATASET=<数据集目录> MLLM=<阶段 1 的 2B 融合模型目录> ORIGINAL=<原始 Qwen3.5-2B 目录> \
 #       bash pipeline/replay/run.sh [步骤 ...]
 #
-# 步骤依次为 export prefixes prompts generate finalize langid nll report，不给参数时全部执行。
-# 每一步都可以单独重跑；generate 每次持有 GPU 锁约 TIME_BUDGET 秒加收尾，没有完成就释放锁再续跑。
-# 每次占用 GPU 之前检查 nvidia-smi：有其他进程占着显存（例如 ComfyUI）就等待，不结束别人的进程。
+# 筛选模式（默认，FILTER=1，写入 $DATASET/text/qwen3.5-asr/replay）的步骤依次为
+# export prefixes prompts generate finalize langid nll report。
+# 不筛选模式（FILTER=0，写入 $DATASET/text/qwen3.5-asr/replay-unfiltered）的步骤依次为
+# export prompts generate finalize langid estimate teacher verify report：沿用筛选目录的文档开头和自由生成两组的提示，
+# 续写两组的提示用修正后的分词器重新写出；生成时不检查循环、不保存 top-20；生成完成后统计 token 数与磁盘需求，
+# 再用参考模型前向一遍，保存每个生成位置的 top-32 分布。
+# 不给参数时执行当前模式的全部步骤。每一步都可以单独重跑；generate 与 teacher 每次持有 GPU 锁约 TIME_BUDGET 秒，
+# 没有完成就释放锁再续跑。每次占用 GPU 之前检查 nvidia-smi：有其他进程占着显存（例如 ComfyUI）就等待，不结束别人的进程。
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -14,14 +19,35 @@ WORK_DIR="${WORK_DIR:-$REPO_DIR/../qwen3.5-asr-work}"
 DATASET="${DATASET:?需要设置 DATASET}"
 MLLM="${MLLM:?需要设置 MLLM（阶段 1 的 2B 融合模型目录）}"
 ORIGINAL="${ORIGINAL:?需要设置 ORIGINAL（原始 Qwen3.5-2B 目录）}"
-REPLAY="${REPLAY:-$DATASET/text/qwen3.5-asr/replay}"
-OUT="${OUT:-$WORK_DIR/data/T70}"
-REF="$OUT/ref-lm"
+FILTER="${FILTER:-1}"
+FILTERED_REPLAY="$DATASET/text/qwen3.5-asr/replay"
+if [ "$FILTER" = 1 ]; then
+    REPLAY="${REPLAY:-$FILTERED_REPLAY}"
+    OUT="${OUT:-$WORK_DIR/data/T70}"
+    TARGET="${TARGET:-eval=1000000,train=12000000}"
+    PRIOR_MEAN="${PRIOR_MEAN:-1000}"
+    MAX_INFLIGHT="${MAX_INFLIGHT:-0}"
+    GEN_FLAGS=()
+    DEFAULT_STEPS=(export prefixes prompts generate finalize langid nll report)
+else
+    REPLAY="${REPLAY:-$DATASET/text/qwen3.5-asr/replay-unfiltered}"
+    OUT="${OUT:-$WORK_DIR/data/T70/unfiltered}"
+    TARGET="${TARGET:-eval=1000000,train=30000000}"
+    # 每条样本的平均长度：由筛选目录估计（出现循环的样本按 16,384 计），在途样本都要写完，先验过低会多投放
+    PRIOR_MEAN="${PRIOR_MEAN:-free_raw=10000,free_chat=850,cont_raw=8000,cont_chat=1200}"
+    # 无模板两组的样本大多写到 16k 上限：在途 144 条时 KV 缓存平均约用七成，256 条会超出容量、反复抢占重算
+    MAX_INFLIGHT="${MAX_INFLIGHT:-free_raw=144,cont_raw=144,free_chat=384,cont_chat=384}"
+    GEN_FLAGS=(--no-filter --topk 0)
+    DEFAULT_STEPS=(export prompts generate finalize langid estimate teacher verify report)
+fi
+# 文档开头（prefixes 的输出）与自由生成两组提示的来源：两种模式共用筛选目录中的
+PREFIXES="${PREFIXES:-$FILTERED_REPLAY/prefixes}"
+REF="${REF:-$WORK_DIR/data/T70/ref-lm}"
 EXCLUSION="${EXCLUSION:-$WORK_DIR/data/T02/exclusion.jsonl}"
 LANGID_MODEL="${LANGID_MODEL:-$WORK_DIR/tmp/T03/glotlid/model_v3.bin}"
 PLAN="${PLAN:-free_raw:eval,free_chat:eval,cont_raw:eval,cont_chat:eval,free_raw:train,free_chat:train,cont_raw:train,cont_chat:train}"
-TARGET="${TARGET:-eval=1000000,train=12000000}"
 TIME_BUDGET="${TIME_BUDGET:-720}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 FREE_RAW_START="${FREE_RAW_START:-newline}"
 EVAL_ENV="$WORK_DIR/envs/mllm-eval/bin/python"
 TRAIN_ENV="$WORK_DIR/envs/mllm-train/bin/python"
@@ -46,40 +72,68 @@ run_on_gpu() {
     flock "$GPU_LOCK" bash -c 'if [ -n "$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader)" ]; then exit 75; fi; exec "$@"' _ "$@"
 }
 
+# 反复在 GPU 上运行一个可续跑的命令（退出码 0 完成，3 时间用完待续跑），直到完成
+run_resumable() {
+    local log="$1"
+    shift
+    local status
+    while true; do
+        set +e
+        run_on_gpu "$@" >> "$log" 2>&1
+        status=$?
+        set -e
+        case "$status" in
+            0) echo "$(date '+%F %T') 全部完成"; return 0 ;;
+            3) echo "$(date '+%F %T') 本次时间用完，释放 GPU 锁后续跑"; sleep 20 ;;
+            75) echo "$(date '+%F %T') 拿到锁时 GPU 被占用，稍后重试"; sleep 300 ;;
+            *) echo "$(date '+%F %T') 出错（退出码 $status），见 $log"; return "$status" ;;
+        esac
+    done
+}
+
 step_export() {
+    if [ -f "$REF/model.safetensors" ]; then
+        echo "参考模型已导出：$REF"
+        return 0
+    fi
     "$EVAL_ENV" -m pipeline.replay.export_lm --mllm "$MLLM" --original "$ORIGINAL" --out "$REF"
 }
 
 step_prefixes() {
     "$TEXT_ENV" -m pipeline.replay.prefixes --raw-root "$DATASET/text" --exclusion "$EXCLUSION" \
-        --out-dir "$REPLAY/prefixes" --eval-per-lang 250 --train-per-lang 3000 --jobs 10
+        --out-dir "$PREFIXES" --eval-per-lang 250 --train-per-lang 3000 --jobs 10
 }
 
 step_prompts() {
-    # free_raw 的第一个 token 要用参考模型前向一次（first_token.py），只有这一组占用 GPU
-    run_on_gpu "$EVAL_ENV" -m pipeline.replay.prompts --model "$REF" --replay-dir "$REPLAY" --free-raw-start "$FREE_RAW_START" --groups free_raw
-    "$EVAL_ENV" -m pipeline.replay.prompts --groups free_chat cont_raw cont_chat --model "$REF" --replay-dir "$REPLAY" --free-raw-start "$FREE_RAW_START"
+    if [ "$FILTER" = 1 ]; then
+        # free_raw 的第一个 token 要用参考模型前向一次（first_token.py），只有这一组占用 GPU
+        run_on_gpu "$EVAL_ENV" -m pipeline.replay.prompts --model "$REF" --replay-dir "$REPLAY" --free-raw-start "$FREE_RAW_START" --groups free_raw
+        "$EVAL_ENV" -m pipeline.replay.prompts --groups free_chat cont_raw cont_chat --model "$REF" --replay-dir "$REPLAY" \
+            --free-raw-start "$FREE_RAW_START" --prefixes-dir "$PREFIXES"
+        return 0
+    fi
+    # 自由生成两组的提示只含换行与聊天模板的特殊 token，不受分词器问题（#77）影响，直接沿用筛选目录的文件
+    local group split
+    cp "$FILTERED_REPLAY/templates.json" "$REPLAY/templates.json"
+    for group in free_raw free_chat; do
+        for split in eval train; do
+            mkdir -p "$REPLAY/$group/$split"
+            cp "$FILTERED_REPLAY/$group/$split/prompts.jsonl" "$REPLAY/$group/$split/prompts.jsonl"
+        done
+    done
+    "$EVAL_ENV" -m pipeline.replay.prompts --groups cont_raw cont_chat --model "$REF" --replay-dir "$REPLAY" --prefixes-dir "$PREFIXES"
 }
 
 step_generate() {
-    local status
-    while true; do
-        set +e
-        run_on_gpu "$EVAL_ENV" -m pipeline.replay.generate --model "$REF" --replay-dir "$REPLAY" \
-            --plan "$PLAN" --target "$TARGET" --time-budget "$TIME_BUDGET" >> "$OUT/logs/generate.log" 2>&1
-        status=$?
-        set -e
-        case "$status" in
-            0) echo "$(date '+%F %T') 生成全部完成"; return 0 ;;
-            3) echo "$(date '+%F %T') 本次时间用完，释放 GPU 锁后续跑"; sleep 20 ;;
-            75) echo "$(date '+%F %T') 拿到锁时 GPU 被占用，稍后重试"; sleep 300 ;;
-            *) echo "$(date '+%F %T') 生成出错（退出码 $status），见 $OUT/logs/generate.log"; return "$status" ;;
-        esac
-    done
+    run_resumable "$OUT/logs/generate.log" "$EVAL_ENV" -m pipeline.replay.generate --model "$REF" --replay-dir "$REPLAY" \
+        --plan "$PLAN" --target "$TARGET" --time-budget "$TIME_BUDGET" --max-num-seqs "$MAX_NUM_SEQS" --prior-mean "$PRIOR_MEAN" \
+        --max-inflight "$MAX_INFLIGHT" "${GEN_FLAGS[@]}"
 }
 
 step_finalize() {
-    "$EVAL_ENV" -m pipeline.replay.finalize --model "$REF" --replay-dir "$REPLAY"
+    local flags=()
+    [ "$FILTER" = 1 ] || flags=(--no-filter)
+    "$EVAL_ENV" -m pipeline.replay.finalize --model "$REF" --replay-dir "$REPLAY" "${flags[@]}"
 }
 
 step_langid() {
@@ -90,6 +144,19 @@ step_nll() {
     run_on_gpu "$TRAIN_ENV" -m pipeline.replay.nll --mllm "$MLLM" --replay-dir "$REPLAY" --split eval
 }
 
+step_estimate() {
+    "$TRAIN_ENV" -m pipeline.replay.teacher --mllm "$MLLM" --replay-dir "$REPLAY" --plan "$PLAN" --estimate | tee "$OUT/estimate.txt"
+}
+
+step_teacher() {
+    run_resumable "$OUT/logs/teacher.log" "$TRAIN_ENV" -m pipeline.replay.teacher --mllm "$MLLM" --replay-dir "$REPLAY" \
+        --plan "$PLAN" --time-budget "$TIME_BUDGET"
+}
+
+step_verify() {
+    run_on_gpu "$TRAIN_ENV" -m pipeline.replay.teacher --mllm "$MLLM" --replay-dir "$REPLAY" --plan "$PLAN" --verify 4
+}
+
 step_report() {
     "$EVAL_ENV" -m pipeline.replay.report --replay-dir "$REPLAY" --out-dir "$OUT"
     cp "$OUT/summary.json" "$OUT/summary.md" "$REPLAY/"
@@ -97,7 +164,7 @@ step_report() {
 
 STEPS=("$@")
 if [ "${#STEPS[@]}" -eq 0 ]; then
-    STEPS=(export prefixes prompts generate finalize langid nll report)
+    STEPS=("${DEFAULT_STEPS[@]}")
 fi
 for step in "${STEPS[@]}"; do
     echo "$(date '+%F %T') ===== $step"

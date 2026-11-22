@@ -24,6 +24,11 @@ free_raw 默认用换行开头。试运行中两种开头各采样 600 条：换
 文档开头的长度：每篇文档先在 [64, 256] 中均匀抽一个目标 token 数，再在不超过目标的位置中选最靠后的句末或行末
 （没有时退到词边界），切下的文本去掉结尾空白后重新分词。至少 64 token 才能定下语言、话题和文体；
 至多 256 token 让人写的前缀只占样本的一小部分，样本的主体是参考模型自己写的续写。
+
+分词器（#77）：加载参考模型目录的分词器后用 `pipeline.tokenizer_fix.check_tokenizer` 检查切法与原始 Qwen3.5 的
+`tokenizer.json` 相同。#70 的筛选回放目录 `replay/` 的续写提示是修正之前写出的（泰语、阿拉伯语、波斯语的部分文档开头
+切法不同），不筛选的回放目录 `replay-unfiltered/` 用修正后的分词器重新写出。自由生成两组的提示只有换行和聊天模板的
+特殊 token，修正前后相同。
 """
 
 import argparse
@@ -138,7 +143,8 @@ def write_jsonl(path, rows):
 def main():
     parser = argparse.ArgumentParser(description = __doc__, formatter_class = argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required = True, help = "参考模型目录（取分词器与 chat template）")
-    parser.add_argument("--replay-dir", required = True, help = "回放目录；续写组读取其中的 prefixes/<划分>.jsonl")
+    parser.add_argument("--replay-dir", required = True, help = "回放目录；续写组默认读取其中的 prefixes/<划分>.jsonl")
+    parser.add_argument("--prefixes-dir", default = None, help = "文档开头目录（prefixes 的输出），默认为 <回放目录>/prefixes")
     parser.add_argument("--groups", nargs = "+", default = list(GROUPS))
     parser.add_argument("--free-count", default = "eval=8000,train=60000", help = "自由生成两组每个划分的提示条数（生成在达到 token 目标时停止）")
     parser.add_argument("--free-raw-start", choices = ["newline", "random"], default = "newline")
@@ -149,6 +155,7 @@ def main():
     # 文档开头按原始 Qwen3.5 的规则分词（#77）
     check_tokenizer(tokenizer = tokenizer, source = args.model)
     replay_dir = Path(args.replay_dir)
+    prefixes_dir = Path(args.prefixes_dir) if args.prefixes_dir else replay_dir / "prefixes"
     segments = chat_segments(tokenizer = tokenizer)
     free_count = {key: int(value) for key, value in (item.split("=") for item in args.free_count.split(","))}
     templates_path = replay_dir / "templates.json"
@@ -184,7 +191,7 @@ def main():
                     "template": "apply_chat_template(add_generation_prompt = False, enable_thinking = False)，无系统消息",
                 }
             else:
-                with open(replay_dir / "prefixes" / f"{split}.jsonl", encoding = "utf-8") as handle:
+                with open(prefixes_dir / f"{split}.jsonl", encoding = "utf-8") as handle:
                     prefixes = [json.loads(line) for line in handle]
                 skipped = 0
                 for prefix in prefixes:

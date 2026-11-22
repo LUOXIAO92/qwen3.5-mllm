@@ -8,9 +8,12 @@
     raw/shard-<编号>.lp.f32        # 每个生成 token 自身的对数概率（float32）
     raw/shard-<编号>.topk_ids.i32  # 每个生成 token 位置上参考模型概率最高的 20 个 token id（int32，每行 20 个）
     raw/shard-<编号>.topk_lp.f16   # 对应的 20 个对数概率（float16）
+    raw/inflight.pkl               # 上次运行到时间时还没写完的样本（见 generate.py），下次运行先接着生成
     samples.jsonl                  # finalize 写出的最终索引：截断位置、文本、语言、退化统计
+    teacher/                       # 参考模型 top-32 分布（teacher.py 写出，只有不筛选的回放目录有）
 
 四个二进制文件按生成 token 平铺，第 i 个生成 token 的数据在各文件的第 i 个位置（top-20 两个文件的第 i 行）。
+生成时不保存 top-20（`generate --topk 0`，不筛选的回放目录）时没有 top-20 两个文件，只有 token id 与它自身的对数概率。
 索引中每个样本由若干片段（`pieces`）依次拼成：`{"ids": [...]}` 是直接给定的 token（提示、聊天模板），
 `{"gen": 角色, "offset": o, "length": n, ...}` 是模型生成的 token，位于本 shard 二进制数组的 [o, o + n)。
 对数概率是参考模型在温度 1 下的原始对数概率（log softmax），与采样分布一致。
@@ -93,25 +96,27 @@ def read_all_records(raw_dir):
 
 
 class ShardWriter:
-    """追加写一个新 shard。"""
+    """追加写一个新 shard；topk 为假时只写 token id 与它自身的对数概率。"""
 
-    def __init__(self, raw_dir):
+    def __init__(self, raw_dir, topk = True):
         raw_dir = Path(raw_dir)
         raw_dir.mkdir(parents = True, exist_ok = True)
         existing = list_shards(raw_dir = raw_dir)
         self.number = (existing[-1] + 1) if existing else 0
         self.index_path, paths = shard_paths(raw_dir = raw_dir, number = self.number)
-        self.handles = {name: open(path, "ab") for name, path in paths.items()}
+        names = ("ids", "lp", "topk_ids", "topk_lp") if topk else ("ids", "lp")
+        self.handles = {name: open(paths[name], "ab") for name in names}
         self.index = open(self.index_path, "a", encoding = "utf-8")
         self.n_tokens = 0
 
-    def add_gen(self, ids, lp, topk_ids, topk_lp):
+    def add_gen(self, ids, lp, topk_ids = None, topk_lp = None):
         """写入一段生成 token，返回它在本 shard 中的起点。"""
         offset = self.n_tokens
         np.asarray(ids, dtype = np.int32).tofile(self.handles["ids"])
         np.asarray(lp, dtype = np.float32).tofile(self.handles["lp"])
-        np.asarray(topk_ids, dtype = np.int32).reshape(-1, TOP_K).tofile(self.handles["topk_ids"])
-        np.asarray(topk_lp, dtype = np.float16).reshape(-1, TOP_K).tofile(self.handles["topk_lp"])
+        if "topk_ids" in self.handles:
+            np.asarray(topk_ids, dtype = np.int32).reshape(-1, TOP_K).tofile(self.handles["topk_ids"])
+            np.asarray(topk_lp, dtype = np.float16).reshape(-1, TOP_K).tofile(self.handles["topk_lp"])
         self.n_tokens += len(ids)
         return offset
 
@@ -139,6 +144,8 @@ class ShardReader:
             _, paths = shard_paths(raw_dir = self.raw_dir, number = number)
             arrays = {}
             for name, path in paths.items():
+                if not path.exists():
+                    continue  # 没有保存 top-20 的 shard
                 _, dtype, width = SUFFIXES[name]
                 data = np.memmap(path, dtype = dtype, mode = "r") if path.stat().st_size else np.zeros(0, dtype = dtype)
                 arrays[name] = data.reshape(-1, width) if width > 1 else data

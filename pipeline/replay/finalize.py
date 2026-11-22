@@ -1,12 +1,17 @@
 """整理生成结果：在循环（原样或近似，见 `degeneration.py`）起点截断、解码文本、计算退化统计，写出每个划分的最终索引 `samples.jsonl`。
 
-    python -m pipeline.replay.finalize --model <参考模型目录> --replay-dir <回放目录>
+    python -m pipeline.replay.finalize --model <参考模型目录> --replay-dir <回放目录> [--no-filter]
+
+`--no-filter`（不筛选的回放目录）时不截断、不丢弃，每条样本按生成结果完整保留（`keep` 都为真，生成片段的 `keep` 等于
+`length`）；循环起点照常计算，只作为元数据：`loop_onset` 记录第一个出现循环的片段、位置和种类，`pre_loop_tokens` 是
+循环起点之前的生成 token 数（即筛选模式会保留的数量），`status` 保留生成时的状态（free_chat 用户消息没有正常结束时为
+`no_user_end`）。
 
 在 `envs/mllm-eval` 中运行（只用 CPU）。二进制数组不复制也不改写：`samples.jsonl` 中每个生成片段的 `keep`
 给出截断后保留的 token 数，读取时取 `[offset, offset + keep)`。每行字段：
 
 - `sample_id`、`prompt_index`、`shard`、`pieces`（同 shard 索引，生成片段多一个 `keep`）
-- `keep`（是否作为回放样本使用）、`drop_reason`（`no_user_end` 用户消息没有正常结束；`user_loop` 用户消息中出现循环；
+- `keep`（是否作为回放样本使用，不筛选时都为真）、`drop_reason`（`no_user_end` 用户消息没有正常结束；`user_loop` 用户消息中出现循环；
   `empty` 截断后没有剩下生成 token）
 - `n_gen`、`n_kept`（生成 token 数与截断后保留数）、`truncated`、`ended`（最后保留的 token 是结束符）
 - `gzip_ratio`、`rep4`（4-gram 重复率）、`window_repeat`（256 token 窗口内复制前文的最大比例），都在保留的生成 token 上计算
@@ -67,6 +72,7 @@ def init_worker(model_dir):
 def process(job):
     """一个样本：截断、解码、统计。"""
     record, prompt, group, raw_dir, stop_ids = job["record"], job["prompt"], job["group"], job["raw_dir"], set(job["stop_ids"])
+    no_filter = job["no_filter"]
     reader = ShardReader(raw_dir = raw_dir)
     row = {
         "sample_id": record["sample_id"],
@@ -80,6 +86,7 @@ def process(job):
     keeps = []
     truncated = False
     onset_at = None
+    pre_loop = 0
     stop = False
     for piece, ids in zip(gen_pieces, arrays):
         if stop:
@@ -88,13 +95,21 @@ def process(job):
         exact, near = loop_onset(ids = ids), near_loop_onset(ids = ids)
         if exact is None and near is None:
             keeps.append(len(ids))
+            pre_loop += len(ids)
             continue
         onset = min(position for position in (exact, near) if position is not None)
         truncated = True
         onset_at = {"role": piece["gen"], "position": onset, "kind": "exact" if onset == exact else "near"}
         keeps.append(onset)
+        pre_loop += onset
         stop = True
-    if record["status"] != "ok":
+    if no_filter:
+        # 不筛选：循环只作为元数据，所有生成 token 都保留
+        keeps = [len(ids) for ids in arrays]
+        truncated = False
+        row["status"] = record["status"]
+        row["pre_loop_tokens"] = pre_loop
+    elif record["status"] != "ok":
         row.update(keep = False, drop_reason = record["status"])
     elif truncated and onset_at["role"] == "user":
         row.update(keep = False, drop_reason = "user_loop")
@@ -154,7 +169,7 @@ def process(job):
     return row
 
 
-def finalize_split(replay_dir, group, split, model_dir, jobs):
+def finalize_split(replay_dir, group, split, model_dir, jobs, no_filter = False):
     split_dir = Path(replay_dir) / group / split
     raw_dir = split_dir / "raw"
     if not raw_dir.exists():
@@ -168,7 +183,14 @@ def finalize_split(replay_dir, group, split, model_dir, jobs):
     check_tokenizer(tokenizer = tokenizer, source = model_dir)
     stop_ids = [tokenizer.convert_tokens_to_ids("<|im_end|>"), tokenizer.convert_tokens_to_ids("<|endoftext|>")]
     tasks = [
-        {"record": record, "prompt": prompts[record["prompt_index"]], "group": group, "raw_dir": str(raw_dir), "stop_ids": stop_ids}
+        {
+            "record": record,
+            "prompt": prompts[record["prompt_index"]],
+            "group": group,
+            "raw_dir": str(raw_dir),
+            "stop_ids": stop_ids,
+            "no_filter": no_filter,
+        }
         for record in records
     ]
     with get_context("spawn").Pool(processes = jobs, initializer = init_worker, initargs = (model_dir,)) as pool:
@@ -187,6 +209,7 @@ def finalize_split(replay_dir, group, split, model_dir, jobs):
         "kept": len(kept),
         "dropped": dict(Counter(row["drop_reason"] for row in rows if not row["keep"])),
         "truncated": sum(row["truncated"] for row in kept),
+        "with_loop": sum(row["loop_onset"] is not None for row in kept),
         "gen_tokens": sum(row["n_gen"] for row in rows),
         "kept_tokens": sum(row["n_kept"] for row in kept),
     }
@@ -201,6 +224,7 @@ def main():
     parser.add_argument("--groups", nargs = "+", default = list(GROUPS))
     parser.add_argument("--splits", nargs = "+", default = list(SPLITS))
     parser.add_argument("--jobs", type = int, default = 8)
+    parser.add_argument("--no-filter", action = "store_true", help = "不截断、不丢弃，循环只作为元数据")
     args = parser.parse_args()
     for group in args.groups:
         for split in args.splits:
@@ -210,6 +234,7 @@ def main():
                 split = split,
                 model_dir = args.model,
                 jobs = args.jobs,
+                no_filter = args.no_filter,
             )
 
 
