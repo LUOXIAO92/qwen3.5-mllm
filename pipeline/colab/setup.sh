@@ -110,6 +110,16 @@ if ! done_before model; then
   mark model
 fi
 
+# 7. 分词器（#77）：修正之前上传到 Drive 的融合模型目录，tokenizer_config.json 写的分词器类是 Qwen2Tokenizer，
+#    tokenizer.json 的预分词规则把泰语、阿拉伯语等的组合用符号单独切开。每次运行都检查仓库根目录下的融合模型目录，
+#    改正复制到本地的文件（已经正确时不改动），再用 transformers 加载核对；Drive 上的文件不变，不需要重新上传。
+for dir in "$repo"/qwen3.5-*-mllm; do
+  if [ -f "$dir/tokenizer_config.json" ]; then
+    step "检查分词器 $(basename "$dir")"
+    (cd "$repo" && "$venv/bin/python" -m pipeline.tokenizer_fix "$dir" --verify)
+  fi
+done
+
 step "完成"
 "$venv/bin/python" - <<'PY'
 import sys

@@ -10,7 +10,7 @@
 | --- | --- |
 | `pack_shards.py` | 本机：按训练计划生成索引、分批打包分片、核对、列出分片文件名 |
 | `bundle.py` | 本机：把背景声列表、dev 清单连同音频打成 tar，在 Colab 上解开后路径仍然有效 |
-| `setup.sh`、`requirements-train.txt` | Colab：建立训练环境，放回训练清单、背景声、dev 清单和模型 |
+| `setup.sh`、`requirements-train.txt` | Colab：建立训练环境，放回训练清单、背景声、dev 清单和模型，修正模型目录的分词器文件（#77） |
 | `shard_window.py` | Colab：开始训练前复制常驻分片和起点附近的顺序分片，训练期间在后台维护窗口 |
 | `bench_storage.py` | Colab：比较 Drive、存储桶和本地磁盘的顺序复制与随机读取速度 |
 
@@ -151,6 +151,8 @@ git clone -b exp/v2 https://github.com/LUOXIAO92/qwen3.5-mllm "$REPO"
 ```
 
 **单元格 4：建立环境，放回训练要读的小文件。** `setup.sh` 用 Colab 的 Python 3.13 在 `$WORK_DIR/envs/mllm-train` 建立虚拟环境（`run.sh` 固定使用这个位置），按 `requirements-train.txt` 安装与本机相同版本的包；第一次运行时把安装包缓存到 `$DRIVE_DIR/wheels/`，以后从缓存安装。缓存的标记 `wheels/.complete` 记着生成它的 `requirements-train.txt` 的 SHA-256，需求改了（例如 #66 加入的 torchao）就再运行一次 `pip wheel`，缓存中已有的安装包不再下载，只补缺少的；同一个会话中已经建好的虚拟环境也按新的需求补装。接着解压训练清单、解开背景声和 dev 清单、复制模型。每一步完成后留下标记，同一个会话中重复运行会跳过已完成的步骤。
+
+最后一步检查仓库根目录下每个融合模型目录的分词器（#77），每次运行都做。修正之前上传到 Drive 的模型目录里，`tokenizer_config.json` 写的分词器类是 `Qwen2Tokenizer`，`tokenizer.json` 的预分词规则把泰语的元音与声调符号、阿拉伯语和波斯语的元音符号等组合用符号从字母上切下来，与原始 Qwen3.5 的切法不同。`setup.sh` 用 `python -m pipeline.tokenizer_fix <模型目录> --verify` 改正复制到本地的这两个文件（类名改为 `Qwen3_5Tokenizer`，预分词规则恢复原始写法；已经正确时不改动），再用 transformers 加载核对。Drive 上的文件保持原样，不需要重新上传。训练和评测加载模型时也做同样的检查，分词规则不对就停下并给出修正命令。修正之前开始的训练在修正之后续训，从续训的那一步起，泰语和带元音符号的阿拉伯语等的训练目标按原始规则分词。
 
 ```bash
 %%bash
