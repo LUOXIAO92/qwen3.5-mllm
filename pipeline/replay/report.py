@@ -251,6 +251,10 @@ def split_summary(replay_dir, group, split):
             "reasoning_tokens": percentiles(values = [row["reasoning_tokens"] for row in closed]),
             "answer_tokens": percentiles(values = [row["answer_tokens"] for row in closed]),
             "reasoning_tokens_not_closed": percentiles(values = [row["reasoning_tokens"] for row in answered if not row["think_closed"]]),
+            "kept_tokens_closed": sum(row["n_kept"] for row in closed),
+            "kept_tokens_not_closed": sum(row["n_kept"] for row in kept if not row.get("think_closed")),
+            "kept_samples_not_closed": sum(not row.get("think_closed") for row in kept),
+            "not_closed_hit_cap": sum(not row.get("think_closed") and row["finish_reason"] == "length" for row in kept),
         }
     if group in SELF_USER_GROUPS:
         summary["user_lang_samples"] = dict(Counter(row.get("user_lang", "?") for row in kept).most_common())
@@ -362,6 +366,10 @@ def markdown(summary):
                     f"- 思考模式：有助手回答的样本 {think['samples_with_assistant']}，写出 </think> 的 {think['closed']}（{think['close_rate']:.1%}），"
                     f"没有写出的 {think['not_closed']}；思考 token 数 {think['reasoning_tokens']}；回答 token 数 {think['answer_tokens']}；"
                     f"没有写出 </think> 的样本的思考长度 {think['reasoning_tokens_not_closed']}"
+                )
+                lines.append(
+                    f"- 保留 token：写出 </think> 的样本 {think['kept_tokens_closed']:,}，没有写出的样本 {think['kept_tokens_not_closed']:,}"
+                    f"（{think['kept_samples_not_closed']} 条，其中 {think['not_closed_hit_cap']} 条达到 16k 上限）"
                 )
             if "prompt_lang_samples" in item:
                 lines.append(f"- 提问语言（保留样本数）：{item['prompt_lang_samples']}；回答与提问语言相同的比例：{item['same_lang_as_prompt']}")

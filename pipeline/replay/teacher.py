@@ -80,6 +80,10 @@ def build_sequence(record, reader):
     return ids, pieces
 
 
+# 为真时 free_chat_think 中没有写出 </think> 的样本（samples.jsonl 的 think_closed 不为真）也不算（--exclude-unclosed-think）
+EXCLUDE_UNCLOSED_THINK = False
+
+
 def kept_records(split_dir):
     """要计算 top-32 的样本：有生成片段，并且 finalize 写出的 samples.jsonl 中 keep 为真（丢弃循环的目录中有循环的样本不算）。"""
     split_dir = Path(split_dir)
@@ -90,8 +94,9 @@ def kept_records(split_dir):
     samples_path = split_dir / "samples.jsonl"
     if not samples_path.exists():
         raise SystemExit(f"{split_dir} 还没有 samples.jsonl，先运行 finalize")
+    exclude_unclosed = EXCLUDE_UNCLOSED_THINK and split_dir.parent.name == "free_chat_think"
     with open(samples_path, encoding = "utf-8") as handle:
-        keep = {row["sample_id"]: row["keep"] for row in map(json.loads, handle)}
+        keep = {row["sample_id"]: row["keep"] and (not exclude_unclosed or row.get("think_closed") is True) for row in map(json.loads, handle)}
     missing = [record["sample_id"] for record in records if record["sample_id"] not in keep]
     if missing:
         raise SystemExit(f"{split_dir} 的 samples.jsonl 比生成结果旧（缺 {len(missing)} 条），先重新运行 finalize")
@@ -394,10 +399,13 @@ def main():
     parser.add_argument("--max-batch-tokens", type = int, default = 65536, help = "一批填充后的 token 数上限")
     parser.add_argument("--head-chunk", type = int, default = 4096, help = "输出层每次计算的位置数（float32 logits 约 4 GB）")
     parser.add_argument("--min-free-gb", type = float, default = 100, help = "写完后数据盘至少剩余的空间")
+    parser.add_argument("--exclude-unclosed-think", action = "store_true", help = "free_chat_think 中没有写出 </think> 的样本不计算")
     parser.add_argument("--log-every", type = float, default = 60)
     args = parser.parse_args()
     # 计划中的「部分」只用于生成，这里按（组, 划分）去重
     plan = list(dict.fromkeys((group, split) for group, split, _ in parse_plan(plan = args.plan)))
+    global EXCLUDE_UNCLOSED_THINK
+    EXCLUDE_UNCLOSED_THINK = args.exclude_unclosed_think
 
     if args.estimate:
         total = 0
