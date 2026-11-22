@@ -637,6 +637,23 @@ def final_checkpoint(name):
     raise Blocked(f"找不到 {name} 第 {FULL_STEPS} 步的 language_model.safetensors")
 
 
+def free_local(name):
+    """训练完成、Drive 上已有同样大小的副本后，删掉本地最后检查点的 trainer_state.pt（约 26 GB）；只训练时
+    language_model.safetensors 也删（评测时从 Drive 取）。六个运行的这些文件都留在本地会写满 Colab 的磁盘。"""
+    out = WORK / "runs" / name
+    latest_file = out / "latest"
+    if not latest_file.exists():
+        return
+    latest = latest_file.read_text().strip()
+    names = ["trainer_state.pt"] + (["language_model.safetensors"] if TRAIN_ONLY else [])
+    for file_name in names:
+        local = out / latest / file_name
+        remote = DRIVE / "runs" / name / latest / file_name
+        if local.exists() and remote.exists() and remote.stat().st_size == local.stat().st_size:
+            local.unlink()
+            log(f"已删除本地的 {local}（Drive 上有同样大小的副本）")
+
+
 def phase_train(key):
     name = run_name(key = key)
     init = read_status()["projector_init"]
@@ -648,6 +665,7 @@ def phase_train(key):
     runs[key] = {"name": name, "status": state.get("status"), "exit_code": state.get("exit_code"), **stats}
     set_status(runs = runs)
     if state.get("status") == "finished":
+        free_local(name = name)
         mark_done(f"train:{key}")
         log(f"{key} 训练完成：{json.dumps(obj = stats, ensure_ascii = False)}")
         return
