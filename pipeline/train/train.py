@@ -73,6 +73,16 @@
 （流式加载可训练的层，参数在主机内存中更新）和 --offload-optimizer（梯度、主权重与 AdamW 状态放到主机内存）见
 optimize.py 和 placement.py（任务 #66）。它们只改变数据放在哪里，续训状态的格式不变，不在 RESUME_KEYS 中，续训时可以
 打开或关闭；打开后两项时续训状态读到 CPU 上（torch.load 的 map_location）。
+
+自生成回放（任务 #71 C 组，replay.py）：--replay-dir <回放目录> --replay-groups free_raw=1,... 在每一步的 ASR 批次之外按
+比例 --replay-ratio 混入参考模型自己生成的文本，ASR 批次、训练计划和步数都不变。需要 --train-language-model 和
+--pack-sequences。--replay-loss ntp（默认）或 kl32（--replay-kl-tail 加尾部项），--replay-norm 选择一步损失的分母。
+这几项和 --replay-split 改变损失，在 RESUME_KEYS 中（以前的配置按默认值「不回放」核对）；--replay-inline-max-tokens、
+--replay-micro-batch-tokens 只决定样本放在哪个微批，不改变一步的损失，不在其中。抽样器的状态随检查点保存在
+trainer_state.pt 的 replay 项中，续训后取到的样本与不中断时相同。开启回放时训练日志的 loss、token_acc 只统计 ASR 的
+token，另有 objective（一步实际优化的损失）、replay_loss、replay_nll、各组的 replay_groups 和实际比例；每次取样记在
+<输出目录>/replay_log.jsonl。--replay-probe-longest（冒烟测试用）在这段运行的第一步另加一个只含最长回放样本的微批，
+看峰值显存。
 """
 
 import argparse
@@ -127,9 +137,23 @@ from pipeline.train.model import (
     language_model_parameters,
     load_model,
     load_projector,
+    mixed_token_losses,
     move_batch,
     projector_parameters,
     token_losses,
+)
+from pipeline.train.replay import (
+    ASR_SOURCE,
+    DEFAULT_INLINE_MAX_TOKENS,
+    DEFAULT_MICRO_BATCH_TOKENS,
+    GROUP_CODES,
+    LOG_FILE as REPLAY_LOG_FILE,
+    REPLAY_LOSSES,
+    REPLAY_NORMS,
+    REPLAY_SPLITS,
+    SOURCE_COUNT,
+    Replay,
+    parse_groups,
 )
 
 EXIT_STOPPED = 75
@@ -166,6 +190,8 @@ RESUME_KEYS = (
     *precision.KEYS,
     # 优化器（muon.py）：AdamW 还是 Muon 加 AdamW，Muon 动量的存储精度。
     *muon.KEYS,
+    # 自生成回放（replay.py）：混入哪些文本、多少、什么损失、怎样归一化。
+    *("replay_dir", "replay_groups", "replay_ratio", "replay_loss", "replay_kl_tail", "replay_split", "replay_norm"),
 )
 # 决定训练计划（每一步读哪些样本）的配置，即 RESUME_KEYS 中混音、样本格式和训练范围以外的各项。音频分片按这个计划排列。
 PLAN_KEYS = (
@@ -182,12 +208,72 @@ PLAN_KEYS = (
     "sample_weight",
     "empty_target_share",
 )
-# 不写入训练配置的选项：它们只控制这一段运行何时停止。
-RUN_ONLY_KEYS = ("resume", "stop_after_minutes", "stop_at_step")
+# 不写入训练配置的选项：它们只控制这一段运行何时停止，或只在这一段运行中做一次检查（--replay-probe-longest）。
+RUN_ONLY_KEYS = ("resume", "stop_after_minutes", "stop_at_step", "replay_probe_longest")
 # 数据读取进程的启动方式。Python 3.14 在 Linux 上默认 forkserver，本机的训练和测量都是这样运行的；Colab 的
 # Python 3.13 默认 fork，读取进程会继承主进程中几百万行清单字典，垃圾回收一碰就逐页复制，内存成倍增长。
 # 显式指定 forkserver，两边行为一致，读取进程只收到 PackedRows 等对象序列化后的少量状态。
 WORKER_START_METHOD = "forkserver"
+
+
+def add_replay_arguments(parser):
+    """自生成回放的选项（任务 #71，replay.py）。"""
+    parser.add_argument(
+        "--replay-dir",
+        default = None,
+        help = "回放数据目录（例如 $DATASET/text/qwen3.5-asr/replay-noloop），给出时开启回放",
+    )
+    parser.add_argument(
+        "--replay-groups",
+        default = None,
+        help = "回放的组与按 token 数混合的权重，例如 free_raw=1 或 free_raw=1,free_chat=1,cont_raw=1,cont_chat=1,free_chat_think=1",
+    )
+    parser.add_argument(
+        "--replay-ratio",
+        type = float,
+        default = None,
+        help = "回放损失 token 数与 ASR 损失 token 数之比 r（长期平均）",
+    )
+    parser.add_argument(
+        "--replay-loss",
+        choices = REPLAY_LOSSES,
+        default = "ntp",
+        help = "回放的损失：ntp 对采样 token 的交叉熵，kl32 对参考模型 top-32 的截断前向 KL",
+    )
+    parser.add_argument(
+        "--replay-kl-tail",
+        action = "store_true",
+        help = "kl32 另加尾部项 p_tail,ref (log p_tail,ref − log p_tail,θ)",
+    )
+    parser.add_argument(
+        "--replay-split",
+        choices = REPLAY_SPLITS,
+        default = "train",
+        help = "用回放数据的哪个划分（训练用 train，eval 只作评测）",
+    )
+    parser.add_argument(
+        "--replay-norm",
+        choices = REPLAY_NORMS,
+        default = "step",
+        help = "一步损失的分母：step 为这一步全部损失 token 数（ASR 加回放），asr 为 (1 + r) × ASR 损失 token 数",
+    )
+    parser.add_argument(
+        "--replay-inline-max-tokens",
+        type = int,
+        default = DEFAULT_INLINE_MAX_TOKENS,
+        help = "整条长度不超过它的回放样本接在 ASR 拼接行后面，更长的另成纯文本微批",
+    )
+    parser.add_argument(
+        "--replay-micro-batch-tokens",
+        type = int,
+        default = DEFAULT_MICRO_BATCH_TOKENS,
+        help = "纯文本微批的总长上限（单条更长的样本自己成一个微批，不截断）",
+    )
+    parser.add_argument(
+        "--replay-probe-longest",
+        action = "store_true",
+        help = "冒烟测试用：这段运行的第一步另加一个只含最长回放样本的微批，看峰值显存",
+    )
 
 
 def parse_args(argv = None):
@@ -397,6 +483,7 @@ def parse_args(argv = None):
     )
     parser.add_argument("--no-frozen-check", action = "store_true", help = "跳过冻结参数前后一致的检查")
     parser.add_argument("--deterministic", action = "store_true", help = "使用确定性算法，同样的配置逐位复现")
+    add_replay_arguments(parser = parser)
     precision.add_arguments(parser = parser)
     muon.add_arguments(parser = parser)
     add_optimize_arguments(parser = parser)
@@ -711,6 +798,136 @@ def check_language_model_args(args):
         raise SystemExit(str(error)) from error
 
 
+def check_replay_args(args):
+    """回放选项的组合：开启回放（--replay-dir）时要有组和比例，只在全量微调、拼接批次时可用；没开时其余回放选项不起作用，
+    给出了就报错，避免以为开了回放。"""
+    if args.replay_dir is None:
+        given = [
+            name for name, value in (
+                ("--replay-groups", args.replay_groups),
+                ("--replay-ratio", args.replay_ratio),
+                ("--replay-probe-longest", args.replay_probe_longest or None),
+                ("--replay-kl-tail", args.replay_kl_tail or None),
+            )
+            if value is not None
+        ]
+        if given or args.replay_loss != "ntp":
+            raise SystemExit(f"{given or ['--replay-loss']} 只在开启回放（--replay-dir）时使用。")
+        return
+    if not args.replay_groups or args.replay_ratio is None:
+        raise SystemExit("开启回放需要同时给出 --replay-groups 和 --replay-ratio。")
+    try:
+        parse_groups(spec = args.replay_groups)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    if not args.replay_ratio > 0:
+        raise SystemExit(f"--replay-ratio 应大于 0：{args.replay_ratio}")
+    if not args.train_language_model:
+        raise SystemExit("回放只用于全量微调（--train-language-model）：只训练 projector 时文本样本不产生梯度。")
+    if not args.pack_sequences:
+        raise SystemExit("回放需要拼接批次（--pack-sequences）：短样本接在 ASR 拼接行后面，长样本另成拼接的纯文本微批。")
+    if args.replay_kl_tail and args.replay_loss != "kl32":
+        raise SystemExit("--replay-kl-tail 只用于 --replay-loss kl32。")
+    if args.replay_inline_max_tokens < 0 or args.replay_micro_batch_tokens <= 0:
+        raise SystemExit("--replay-inline-max-tokens 不能为负，--replay-micro-batch-tokens 应大于 0。")
+    if host_placement(args = args):
+        raise SystemExit(
+            "回放的长样本另成微批，一步之内有多次反传；语言模型参数在主机内存中更新（--offload-optimizer、"
+            "--lm-blocks-to-swap）时梯度不在主机上累加，不能与回放同时使用。"
+        )
+
+
+def replay_host_problem(args):
+    """开启回放时，语言模型参数不能在主机内存中更新的原因（交给 optimize.apply，显存不足时也不退到流式加载语言模型的层）。"""
+    if args.replay_dir is None:
+        return None
+    return "回放的长样本另成微批，一步之内有多次反传，主机内存中的更新要求每步只反传一次"
+
+
+def replay_forward_backward(
+    model,
+    micro_batches,
+    n_tokens,
+    device,
+    feature_dtype,
+    forward_context,
+    loss_impl = "chunked",
+    kl_tail = False,
+):
+    """开启回放时一步内各微批的前向与反传（ASR 微批接上了短样本，另有纯文本微批），梯度累积在可训练参数上。
+
+    每个微批的损失之和除以整步的分母 n_tokens（Replay.normalizer）再反传。返回这一步的统计（都已取回 CPU）：
+    loss（按来源的损失之和，长度 SOURCE_COUNT，0 是 ASR）、nll（对实际 token 的负对数似然之和）、correct（预测正确数）、
+    empty_loss、empty_correct（空目标样本，只在 ASR 中）、objective（全部损失之和）。
+    """
+    loss_sum = torch.zeros(size = (SOURCE_COUNT,), device = device)
+    nll_sum = torch.zeros(size = (SOURCE_COUNT,), device = device)
+    correct_sum = torch.zeros(size = (SOURCE_COUNT,), device = device, dtype = torch.long)
+    empty_loss_total = torch.zeros(size = (), device = device)
+    empty_correct_total = torch.zeros(size = (), device = device, dtype = torch.long)
+    for batch in micro_batches:
+        inputs = move_batch(batch = batch, device = device, feature_dtype = feature_dtype)
+        with forward_context():
+            losses, correct, nll = mixed_token_losses(
+                model = model,
+                inputs = inputs,
+                loss_impl = loss_impl,
+                kl_tail = kl_tail,
+            )
+        (losses.sum() / n_tokens).backward()
+        sources = inputs["loss_source"]
+        loss_sum.scatter_add_(dim = 0, index = sources, src = losses.detach())
+        nll_sum.scatter_add_(dim = 0, index = sources, src = nll)
+        correct_sum.scatter_add_(dim = 0, index = sources, src = correct.long())
+        on_empty = batch["empty_rows"].to(device = device)[inputs["loss_rows"]]
+        empty_loss_total += (losses.detach() * on_empty).sum()
+        empty_correct_total += (correct & on_empty).sum()
+    loss_values = loss_sum.tolist()
+    return {
+        "loss": loss_values,
+        "nll": nll_sum.tolist(),
+        "correct": correct_sum.tolist(),
+        "empty_loss": float(empty_loss_total),
+        "empty_correct": int(empty_correct_total),
+        "objective": sum(loss_values),
+    }
+
+
+def replay_record(window, replay, args):
+    """开启回放时日志窗口中与回放有关的各项；loss、token_acc 另由调用者按 ASR 的 token 计算。"""
+    replay_tokens = window["replay_tokens"]
+    names = {code: name for name, code in GROUP_CODES.items()}
+    groups = {}
+    for code in range(1, SOURCE_COUNT):
+        tokens = window["source_tokens"][code]
+        if tokens:
+            groups[names[code]] = {
+                "loss": round(number = window["source_loss"][code] / tokens, ndigits = 5),
+                "nll": round(number = window["source_nll"][code] / tokens, ndigits = 5),
+                "tokens": tokens,
+            }
+    state = replay.sampler.state
+    return {
+        # 一步实际优化的损失（全部损失之和除以各步的分母），与 C0 的 loss 不能直接比较。
+        "objective": round(number = window["objective"] / window["normalizer"], ndigits = 5),
+        "replay_loss": round(number = sum(window["source_loss"][1:]) / replay_tokens, ndigits = 5) if replay_tokens else None,
+        "replay_nll": round(number = sum(window["source_nll"][1:]) / replay_tokens, ndigits = 5) if replay_tokens else None,
+        "replay_acc": round(number = sum(window["source_correct"][1:]) / replay_tokens, ndigits = 4) if replay_tokens else None,
+        "replay_groups": groups,
+        "asr_tokens": window["tokens"],
+        "replay_tokens": replay_tokens,
+        "replay_context_tokens": window["replay_context"],
+        "replay_samples": window["replay_samples"],
+        "replay_micro_batches": window["replay_micro_batches"],
+        # 这一段中回放与 ASR 损失 token 数之比，以及从开始训练到现在的累计比例（抽样器的状态）。
+        "replay_ratio": round(number = replay_tokens / max(1, window["tokens"]), ndigits = 4),
+        "replay_ratio_total": round(number = state["replay_tokens"] / max(1, state["asr_tokens"]), ndigits = 4),
+        # 回放在各步梯度总量中实际所占的份额，与 r / (1 + r) 对照（replay.py「损失归一化与实际权重」）。
+        "replay_grad_share": round(number = window["replay_mass"] / max(1e-12, window["total_mass"]), ndigits = 4),
+        "replay_target_share": round(number = args.replay_ratio / (1 + args.replay_ratio), ndigits = 4),
+    }
+
+
 def make_optimizer(args, params, language, muon_settings = None):
     """AdamW：只训练 projector 时一个参数组；训练语言模型时 projector 与语言模型各一组（--lr、--language-model-lr），
     实现与语言模型组的精度见 precision.make_optimizer，参数放在哪里更新见 placement.py。
@@ -750,6 +967,7 @@ def host_placement(args):
 def main(argv = None):
     args = parse_args(argv = argv)
     check_language_model_args(args = args)
+    check_replay_args(args = args)
     os.environ.setdefault(key = "TOKENIZERS_PARALLELISM", value = "false")
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -827,7 +1045,7 @@ def main(argv = None):
         host_problem = precision.host_problem(
             options = precision.options_from_args(args = args),
             grad_accum = args.grad_accum,
-        ),
+        ) or replay_host_problem(args = args),
         # Muon 的参数要在显存中正交化，全量微调时不能流式加载语言模型的层（muon.stream_problem）。
         stream_problem = muon.stream_problem(optimizer = args.optimizer, train_language_model = args.train_language_model),
     )
@@ -937,6 +1155,21 @@ def main(argv = None):
         ),
     )
 
+    replay = None
+    if args.replay_dir is not None:
+        replay = Replay(
+            root = args.replay_dir,
+            weights = parse_groups(spec = args.replay_groups),
+            ratio = args.replay_ratio,
+            seed = args.seed,
+            loss = args.replay_loss,
+            split = args.replay_split,
+            norm = args.replay_norm,
+            inline_max_tokens = args.replay_inline_max_tokens,
+            micro_batch_tokens = args.replay_micro_batch_tokens,
+            log_path = output_dir / REPLAY_LOG_FILE,
+        )
+
     step = 0
     if trainer_state is not None:
         load_projector(model = model, state = read_projector(path = resume_dir))
@@ -950,6 +1183,10 @@ def main(argv = None):
         stream.epoch = trainer_state["epoch"]
         stream.offset = trainer_state["offset"]
         print(f"从 {resume_dir.name} 续训：第 {step} 步，第 {stream.epoch} 轮第 {stream.offset} 个微批。")
+        if replay is not None:
+            if "replay" not in trainer_state:
+                raise SystemExit(f"{resume_dir / STATE_FILE} 中没有回放抽样器的状态，无法续训。")
+            replay.load_state_dict(state = trainer_state["replay"])
         # 学习率调度器的状态带着各组的峰值学习率（base_lrs），续训按它继续，命令行的 --lr 等不起作用。
         requested = peak_lrs(args = args, muon_settings = muon_settings)
         if [float(value) for value in scheduler.base_lrs] != requested:
@@ -964,6 +1201,10 @@ def main(argv = None):
             data = json.dumps(obj = config, ensure_ascii = False, indent = 2) + "\n",
             encoding = "utf-8",
         )
+
+    if replay is not None:
+        # 续训时去掉回放日志中续训起点之后的行；新开始时（step 为 0）清掉以前留下的日志。
+        replay.truncate_log(step = step)
 
     if shard_header is not None and shard_header["order"] == "plan":
         check_shard_plan(
@@ -1040,6 +1281,7 @@ def main(argv = None):
             if muon_settings is not None else None
         ),
         "language_model_placement": language.describe() if language is not None else None,
+        "replay": replay.describe() if replay is not None else None,
     }, ensure_ascii = False))
 
     before = None
@@ -1070,6 +1312,26 @@ def main(argv = None):
         "steps": 0,
         "grad_norm": 0.0,
     }
+
+    def empty_replay_window():
+        """开启回放时日志窗口中另外累计的量：按来源（0 是 ASR，回放各组从 1 开始）的损失、负对数似然、正确数和 token 数。"""
+        return {
+            "source_loss": [0.0] * SOURCE_COUNT,
+            "source_nll": [0.0] * SOURCE_COUNT,
+            "source_correct": [0] * SOURCE_COUNT,
+            "source_tokens": [0] * SOURCE_COUNT,
+            "objective": 0.0,
+            "normalizer": 0.0,
+            "replay_tokens": 0,
+            "replay_context": 0,
+            "replay_samples": 0,
+            "replay_micro_batches": 0,
+            "replay_mass": 0.0,
+            "total_mass": 0.0,
+        }
+
+    replay_window = empty_replay_window()
+    probe_pending = replay is not None and args.replay_probe_longest
     window_start = time.perf_counter()
     run_start = time.perf_counter()
     progress = Progress(
@@ -1118,6 +1380,9 @@ def main(argv = None):
             state[language.STATE_KEY] = language.weights_state()
             # 主机内存中随机舍入用的随机数状态（placement.HostContext），只在显存中训练时用不到，照样保存。
             state["rng"][HOST_RNG_KEY] = language.context.rng
+        if replay is not None:
+            # 回放抽样器的状态（预算、各组已取 token 数、轮次与位置），续训后取到的样本与不中断时相同。
+            state["replay"] = replay.state_dict()
         directory = save_checkpoint(
             output_dir = output_dir,
             step = step,
@@ -1188,9 +1453,33 @@ def main(argv = None):
         while step < total_steps:
             micro_batches = [stream.next() for _ in range(args.grad_accum)]
             n_tokens = sum(int((batch["labels"][:, 1:] != -100).sum()) for batch in micro_batches)
+            asr_tokens = n_tokens
+            step_replay = None
+            if replay is not None:
+                # ASR 微批原样不动，回放样本按比例取出后接在后面或另成纯文本微批（replay.py），分母按 --replay-norm 算。
+                micro_batches, step_replay = replay.extend(
+                    micro_batches = micro_batches,
+                    asr_tokens = asr_tokens,
+                    step = step + 1,
+                    probe = probe_pending,
+                )
+                probe_pending = False
+                n_tokens = replay.normalizer(asr_tokens = asr_tokens, replay_tokens = step_replay["replay_tokens"])
             while True:
                 try:
-                    totals = forward_backward(micro_batches = micro_batches, n_tokens = n_tokens)
+                    if replay is None:
+                        totals = forward_backward(micro_batches = micro_batches, n_tokens = n_tokens)
+                    else:
+                        totals = replay_forward_backward(
+                            model = model,
+                            micro_batches = micro_batches,
+                            n_tokens = n_tokens,
+                            device = device,
+                            feature_dtype = feature_dtype,
+                            forward_context = optimized.forward_context,
+                            loss_impl = args.loss_impl,
+                            kl_tail = args.replay_kl_tail,
+                        )
                 except torch.OutOfMemoryError:
                     totals = None
                 if totals is not None:
@@ -1209,7 +1498,16 @@ def main(argv = None):
                     language.rebuild()
                 config["optimize_degraded"] = optimized.describe()
                 print(f"第 {step + 1} 步显存不足，改为 {change}，重试同一批。", flush = True)
-            step_loss, step_correct, empty_loss_total, empty_correct_total = totals
+            if replay is None:
+                step_loss, step_correct, empty_loss_total, empty_correct_total = totals
+                objective = step_loss
+            else:
+                # loss、token_acc 只统计 ASR；是否为有限值按这一步实际优化的全部损失判断。
+                step_loss = totals["loss"][ASR_SOURCE]
+                step_correct = totals["correct"][ASR_SOURCE]
+                empty_loss_total = totals["empty_loss"]
+                empty_correct_total = totals["empty_correct"]
+                objective = totals["objective"]
 
             if not checked_grads:
                 trainable_names = set(expected)
@@ -1229,10 +1527,11 @@ def main(argv = None):
                 grad_norm = language.clip_grad_norm(max_norm = args.max_grad_norm)
             else:
                 grad_norm = torch.nn.utils.clip_grad_norm_(parameters = params, max_norm = args.max_grad_norm)
-            if not math.isfinite(step_loss) or not torch.isfinite(input = grad_norm):
+            if not math.isfinite(objective) or not torch.isfinite(input = grad_norm):
                 optimizer.zero_grad(set_to_none = True)
                 skipped_steps += 1
                 ids = [sample_id for batch in micro_batches for sample_id in batch["sample_ids"]]
+                ids += [sample_id for batch in micro_batches for sample_id in batch.get("replay_ids", [])]
                 print(f"第 {step + 1} 步损失或梯度不是有限值，跳过。样本：{ids[:8]}", flush = True)
                 if skipped_steps >= 10:
                     raise RuntimeError("连续多步出现非有限值，停止训练。")
@@ -1246,8 +1545,24 @@ def main(argv = None):
             step += 1
 
             window["loss"] += step_loss
-            window["tokens"] += n_tokens
+            window["tokens"] += asr_tokens
             window["correct"] += step_correct
+            if replay is not None:
+                for key in ("loss", "nll", "correct"):
+                    for code, value in enumerate(totals[key]):
+                        replay_window[f"source_{key}"][code] += value
+                for batch in micro_batches:
+                    for code, count in enumerate(batch["source_tokens"]):
+                        replay_window["source_tokens"][code] += count
+                replay_window["objective"] += objective
+                replay_window["normalizer"] += n_tokens
+                replay_window["replay_tokens"] += step_replay["replay_tokens"]
+                replay_window["replay_context"] += step_replay["context_tokens"]
+                replay_window["replay_samples"] += step_replay["samples"]
+                replay_window["replay_micro_batches"] += step_replay["long_batches"]
+                # 这一步梯度总量中回放与全部所占的量（各 token 权重为 1 / 分母）。
+                replay_window["replay_mass"] += step_replay["replay_tokens"] / n_tokens
+                replay_window["total_mass"] += (asr_tokens + step_replay["replay_tokens"]) / n_tokens
             window["samples"] += sum(len(batch["sample_ids"]) for batch in micro_batches)
             window["empty"] += sum(batch["n_empty"] for batch in micro_batches)
             window["empty_loss"] += float(empty_loss_total)
@@ -1310,6 +1625,9 @@ def main(argv = None):
                     labels = muon.lr_labels(train_language_model = args.train_language_model, optimizer = args.optimizer)
                     for label, value in zip(labels, scheduler.get_last_lr(), strict = True):
                         record.setdefault(label, float(value))
+                if replay is not None:
+                    record.update(replay_record(window = {**window, **replay_window}, replay = replay, args = args))
+                    replay_window = empty_replay_window()
                 append_jsonl(path = log_path, record = record)
                 print(progress.line(record = record), flush = True)
                 progress.write(

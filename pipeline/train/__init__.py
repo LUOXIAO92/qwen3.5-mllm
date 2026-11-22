@@ -29,6 +29,9 @@
 - placement.py：全量微调时语言模型参数在显存还是主机内存中更新：流式加载的层、卸载优化器（torchao 的
   CPUOffloadOptimizer）、CPU 上的 AdamW、合并成同一格式的续训状态（任务 #66，见下文「把语言模型参数放到主机内存」）。
 - train.py：训练入口，梯度累积、线性预热加余弦退火、定期 dev 损失、检查点与断点续训。
+- replay.py：全量微调时混入参考模型的自生成回放（任务 #71 C 组）：读回放数据（保存的 token id，按组区分计损失的部分）、
+  按比例 r 整条取样的抽样器（状态随检查点保存）、短样本接在 ASR 拼接行后面、长样本另成纯文本微批，回放日志的核对；
+  kl32 损失的实现在 model.py 的 LinearTopKL。做法、实际权重和选项见 replay.py 开头。
 - check_packing.py：在真实模型和真实训练批次上核对拼接批次（任务 #66）：损失与梯度、样本之间有无串扰、用的内核。
 - optimize.py：显存与速度选项（任务 T59），每项单独开关，不改变数据、损失和学习率：语言模型的梯度检查点、
   冻结层的块流式加载、激活值卸载、冻结权重 fp8、torch.compile、音频塔的变长注意力、显存上限；任务 #66 加了
@@ -50,7 +53,8 @@
   还需要 flash-attn、causal-conv1d、fla），以及全量微调精度选项的测试（test_precision.py，torchao 部分没有 torchao 时跳过），
   以及语言模型参数在主机内存中更新的测试（test_placement.py，需要 GPU 和 torchao），以及纯续写格式的标签、聊天格式
   与原实现逐位相同的测试（test_prompt_format.py，CPU），以及 Muon 的分组、计算与续训的测试（test_muon.py，CPU；
-  卸载优化器的部分需要 GPU），
+  卸载优化器的部分需要 GPU），以及回放的计损失范围、抽样比例与续训、长样本分批、混合拼接、kl32 与全词表直接计算一致的
+  测试（test_replay.py，CPU；拼接内核的部分需要 GPU 和 flash-attn、causal-conv1d、fla），
   在仓库根目录运行 python -m unittest discover -s pipeline/train/tests -t .。
 
 训练清单

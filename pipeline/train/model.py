@@ -48,6 +48,9 @@ METADATA_KEYS = (
 # data.pack_batch 给出的样本边界（--pack-sequences）：各条样本在拼接后的一行中的起点（最后一项是总长度）和每个
 # token 属于第几条样本，搬到 GPU；最长一条的长度 max_length_q 是 Python 整数，原样传给 FlashAttention。
 PACK_KEYS = ("cu_seq_lens_q", "seq_idx")
+# 自生成回放（任务 #71，replay.py）加入的张量：每个计损失位置的来源（0 是 ASR，回放各组从 1 开始），kl32 时回放位置上
+# 参考模型的 top-32 token 与对数概率。kl_start（Python 整数，kl32 时从这个位置起是回放）原样传入。
+REPLAY_KEYS = ("loss_source", "teacher_ids", "teacher_lp")
 # 拼接批次时语言模型全注意力层的实现。音频塔用自己的变长注意力（optimize.py），视觉塔不使用，都保持 sdpa。
 PACKED_ATTENTION = {
     "": "sdpa",
@@ -164,22 +167,28 @@ def move_batch(batch, device, feature_dtype):
     """把模型输入搬到 GPU；梅尔特征转成音频塔的精度。
 
     有预先算好的元数据时，音频塔直接用分好块的特征 audio_padded_feature，整段特征 input_features 不再上传。
+    回放的纯文本微批（replay.text_batch）没有音频的各项，跳过；回放加入的 REPLAY_KEYS 和 kl_start 有则一并搬过去。
     """
     precomputed = "position_ids" in batch
     packed = "cu_seq_lens_q" in batch
+    text_only = precomputed and "audio_padded_feature" not in batch
     moved = {}
-    for key in MODEL_INPUT_KEYS + (METADATA_KEYS if precomputed else ()) + (PACK_KEYS if packed else ()):
+    for key in MODEL_INPUT_KEYS + (METADATA_KEYS if precomputed else ()) + (PACK_KEYS if packed else ()) + REPLAY_KEYS:
         if precomputed and key == "input_features":
+            continue
+        if key not in batch and (key in REPLAY_KEYS or text_only):
             continue
         tensor = batch[key].to(device = device, non_blocking = True)
         if key in ("input_features", "audio_padded_feature"):
             tensor = tensor.to(dtype = feature_dtype)
         moved[key] = tensor
     moved["labels"] = batch["labels"].to(device = device, non_blocking = True)
-    if precomputed:
+    if precomputed and "audio_max_seqlen" in batch:
         moved["audio_max_seqlen"] = batch["audio_max_seqlen"]
     if packed:
         moved["max_length_q"] = batch["max_length_q"]
+    if "kl_start" in batch:
+        moved["kl_start"] = batch["kl_start"]
     return moved
 
 
@@ -353,6 +362,133 @@ def linear_cross_entropy(
     raise ValueError(f"未知的损失实现：{impl}，可选 {LOSS_IMPLS}")
 
 
+class LinearTopKL(torch.autograd.Function):
+    """回放的 kl32 损失（任务 #71）：词表投影与「对参考模型 top-32 的有偏截断前向 KL」合在一起分块计算。
+
+    每个位置给出参考模型概率最高的 32 个 token S（top_ids）和它们的对数概率 top_lp（logit − log-sum-exp，回放数据的
+    teacher/top_lp.f16），p_ref,i = exp(top_lp_i)。学生的对数概率 log p_θ,i = z_i − lse(z)，z 是这一位置的分数。
+
+        KL_head = Σ_{i∈S} p_ref,i (log p_ref,i − log p_θ,i)
+        tail 为真时再加  p_tail,ref (log p_tail,ref − log p_tail,θ)，
+        p_tail,ref = max(0, 1 − Σ_{i∈S} p_ref,i)，p_tail,θ = 1 − Σ_{i∈S} p_θ,i
+
+    log p_tail,θ 按 lse(z 中去掉 S 的部分) − lse(z) 计算，与 log(1 − Σ p_θ,i) 相等，尾部很小时不会因相减失去精度。
+    不加尾部时损失的最小点是把 S 上的参考分布重新归一化（学生在 S 之外的概率为 0）；加上尾部时最小点是学生在 S 上
+    等于参考分布、S 之外的总量等于 p_tail,ref。p_ref,i log p_ref,i 用 xlogy 计算，概率为 0 时为 0。
+
+    对分数的梯度（乘以传回的系数）：不加尾部时 g_j = P_S q_j − p_ref,j [j∈S]，P_S = Σ_{i∈S} p_ref,i，q = softmax(z)；
+    加上尾部时 S 内 g_j = q_j − p_ref,j，S 外 g_j = q_j − p_tail,ref q_j / T，T = Σ_{j∉S} q_j（即 S 外按学生自己的
+    尾部分布分摊 p_tail,ref 的交叉熵）。与 LinearCrossEntropy 的权重可训练时一样，前向只记下每个位置的 log-sum-exp
+    （加尾部时再记 S 外的 log-sum-exp），反传时逐块重算分数，同时求隐状态和输出层权重的梯度，不留整块的分数。
+
+    另外返回每个位置对实际 token（targets，回放中保存的采样 token）的负对数似然和预测是否正确，只用于日志，不求梯度。
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        hidden_states,
+        weight,
+        top_ids,
+        top_lp,
+        targets,
+        tail,
+        chunk_size,
+    ):
+        count = hidden_states.shape[0]
+        device = hidden_states.device
+        losses = torch.empty(size = (count,), device = device, dtype = torch.float32)
+        nll = torch.empty(size = (count,), device = device, dtype = torch.float32)
+        correct = torch.empty(size = (count,), device = device, dtype = torch.bool)
+        normalizers = torch.empty(size = (count,), device = device, dtype = torch.float32)
+        tail_normalizers = torch.empty(size = (count,), device = device, dtype = torch.float32) if tail else None
+        ref_lp = top_lp.float()
+        ref_p = ref_lp.exp()
+        ref_mass = ref_p.sum(dim = -1)
+        tail_mass = (1 - ref_mass).clamp(min = 0) if tail else None
+        entropy_part = torch.special.xlogy(ref_p, ref_p).sum(dim = -1)
+        for start in range(0, count, chunk_size):
+            end = min(start + chunk_size, count)
+            logits = F.linear(input = hidden_states[start:end], weight = weight).float()
+            ids = top_ids[start:end]
+            target = targets[start:end]
+            log_normalizer = torch.logsumexp(input = logits, dim = -1)
+            log_q = logits.gather(dim = -1, index = ids) - log_normalizer[:, None]
+            loss = entropy_part[start:end] - (ref_p[start:end] * log_q).sum(dim = -1)
+            nll[start:end] = log_normalizer - logits.gather(dim = -1, index = target[:, None]).squeeze(dim = -1)
+            correct[start:end] = logits.argmax(dim = -1) == target
+            normalizers[start:end] = log_normalizer
+            if tail:
+                logits.scatter_(dim = -1, index = ids, value = float("-inf"))
+                tail_normalizer = torch.logsumexp(input = logits, dim = -1)
+                mass = tail_mass[start:end]
+                log_tail = tail_normalizer - log_normalizer
+                loss = loss + torch.special.xlogy(mass, mass) - mass * log_tail
+                tail_normalizers[start:end] = tail_normalizer
+            losses[start:end] = loss
+        ctx.tail = tail
+        ctx.chunk_size = chunk_size
+        if tail:
+            ctx.save_for_backward(hidden_states, weight, top_ids, ref_p, normalizers, tail_normalizers, tail_mass)
+        else:
+            ctx.save_for_backward(hidden_states, weight, top_ids, ref_p, normalizers, ref_mass)
+        ctx.mark_non_differentiable(nll, correct)
+        return losses, nll, correct
+
+    @staticmethod
+    def backward(ctx, grad_losses, grad_nll, grad_correct):
+        if ctx.tail:
+            hidden_states, weight, top_ids, ref_p, normalizers, tail_normalizers, tail_mass = ctx.saved_tensors
+        else:
+            hidden_states, weight, top_ids, ref_p, normalizers, ref_mass = ctx.saved_tensors
+        count = hidden_states.shape[0]
+        grad_hidden = torch.empty_like(input = hidden_states) if ctx.needs_input_grad[0] else None
+        grad_weight = None
+        for start in range(0, count, ctx.chunk_size):
+            end = min(start + ctx.chunk_size, count)
+            chunk = hidden_states[start:end]
+            ids = top_ids[start:end]
+            logits = F.linear(input = chunk, weight = weight).float()
+            log_normalizer = normalizers[start:end, None]
+            if ctx.tail:
+                q_top = (logits.gather(dim = -1, index = ids) - log_normalizer).exp()
+                tail_normalizer = tail_normalizers[start:end, None]
+                # S 外：q_j − p_tail q_j / T = (q_j / T)(T − p_tail)，q_j / T = exp(z_j − lse_tail)；S 内另外写入。
+                logits.scatter_(dim = -1, index = ids, value = float("-inf"))
+                grads = logits.sub_(other = tail_normalizer).exp_()
+                tail_share = (tail_normalizer - log_normalizer).exp()
+                grads.mul_(other = tail_share - tail_mass[start:end, None])
+                grads.scatter_(dim = -1, index = ids, src = q_top - ref_p[start:end])
+            else:
+                grads = logits.sub_(other = log_normalizer).exp_()
+                q_top = grads.gather(dim = -1, index = ids)
+                mass = ref_mass[start:end, None]
+                grads.mul_(other = mass)
+                grads.scatter_(dim = -1, index = ids, src = mass * q_top - ref_p[start:end])
+            scaled = grads.mul_(other = grad_losses[start:end, None]).to(dtype = weight.dtype)
+            if grad_hidden is not None:
+                grad_hidden[start:end] = scaled @ weight
+            if ctx.needs_input_grad[1]:
+                if grad_weight is None:
+                    grad_weight = scaled.t() @ chunk
+                else:
+                    grad_weight.addmm_(mat1 = scaled.t(), mat2 = chunk)
+        return grad_hidden, grad_weight, None, None, None, None, None
+
+
+def linear_top_kl(
+    hidden_states,
+    weight,
+    top_ids,
+    top_lp,
+    targets,
+    tail = False,
+    chunk_size = 1024,
+):
+    """回放位置的 kl32 损失，返回 (每个位置的 KL float32, 对实际 token 的负对数似然, 预测是否正确)，见 LinearTopKL。"""
+    return LinearTopKL.apply(hidden_states, weight, top_ids, top_lp, targets, tail, chunk_size)
+
+
 def hidden_states_precomputed(model, inputs):
     """语言模型最后一层的隐状态（形状同 input_ids 加隐藏维度），使用 data.batch_metadata 预先算好的位置与索引。
 
@@ -365,6 +501,8 @@ def hidden_states_precomputed(model, inputs):
     transformers 无填充训练的约定（DataCollatorWithFlattening(return_flash_attn_kwargs = True, return_seq_idx = True)
     给出的几项）传给语言模型：全注意力层（flash_attention_2）按 cu_seq_lens_q/k、max_length_q/k 分段计算，
     线性注意力层的递推（fla）取 cu_seq_lens_q 作 cu_seqlens，短卷积（causal_conv1d）按 seq_idx 分段。
+
+    回放的纯文本微批（replay.text_batch，没有 audio_padded_feature）不经过音频塔和 projector，只有文字嵌入。
     """
     from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
 
@@ -394,21 +532,22 @@ def hidden_states_precomputed(model, inputs):
             "full_attention": create_causal_mask(**mask_arguments),
             "linear_attention": create_recurrent_attention_mask(**mask_arguments),
         }
-    audio = inner.audio_tower(
-        input_features = None,
-        feature_lens = None,
-        padded_feature = inputs["audio_padded_feature"],
-        chunk_lengths = inputs["audio_chunk_lengths"],
-        valid_indices = inputs["audio_valid_indices"],
-        cu_seqlens = inputs["audio_cu_seqlens"],
-        max_seqlen = inputs["audio_max_seqlen"],
-    )
-    projector_weight = inner.audio_projector.linear_1.weight
-    features = inner.audio_projector(audio_features = audio.last_hidden_state.to(dtype = projector_weight.dtype))
-    embeds = embeds.masked_scatter(
-        mask = inputs["audio_mask"].unsqueeze(dim = -1),
-        source = features.to(dtype = embeds.dtype),
-    )
+    if "audio_padded_feature" in inputs:
+        audio = inner.audio_tower(
+            input_features = None,
+            feature_lens = None,
+            padded_feature = inputs["audio_padded_feature"],
+            chunk_lengths = inputs["audio_chunk_lengths"],
+            valid_indices = inputs["audio_valid_indices"],
+            cu_seqlens = inputs["audio_cu_seqlens"],
+            max_seqlen = inputs["audio_max_seqlen"],
+        )
+        projector_weight = inner.audio_projector.linear_1.weight
+        features = inner.audio_projector(audio_features = audio.last_hidden_state.to(dtype = projector_weight.dtype))
+        embeds = embeds.masked_scatter(
+            mask = inputs["audio_mask"].unsqueeze(dim = -1),
+            source = features.to(dtype = embeds.dtype),
+        )
     outputs = inner.language_model(
         input_ids = None,
         position_ids = inputs["position_ids"],
@@ -485,6 +624,59 @@ def token_losses(
     )
     rows = loss_mask.nonzero()[:, 0]
     return losses, correct, rows
+
+
+def mixed_token_losses(
+    model,
+    inputs,
+    chunk_size = 1024,
+    loss_impl = "chunked",
+    kl_tail = False,
+):
+    """带回放的拼接批次（replay.append_samples、replay.text_batch）的损失，返回 (损失, 是否预测正确, 负对数似然)，
+    三者都按计损失的位置排列，顺序与 inputs["loss_source"] 相同。
+
+    没有 kl_start 时（--replay-loss ntp，或 kl32 时这一批没有回放样本）全部位置都是交叉熵，负对数似然就是损失本身。
+    有 kl_start 时，前 kl_start 个位置（ASR）是交叉熵，之后的位置（回放）是 linear_top_kl 的 kl32 损失，负对数似然
+    另外算出，只用于日志。两部分都在同一次语言模型前向的隐状态上计算。
+    """
+    hidden_states = hidden_states_precomputed(model = model, inputs = inputs)
+    flat = hidden_states.reshape(shape = (-1, hidden_states.shape[-1])).index_select(dim = 0, index = inputs["loss_index"])
+    targets = inputs["loss_targets"]
+    weight = model.lm_head.weight
+    kl_start = inputs.get("kl_start")
+    if kl_start is None:
+        losses, correct = linear_cross_entropy(
+            hidden_states = flat,
+            weight = weight,
+            targets = targets,
+            chunk_size = chunk_size,
+            impl = loss_impl,
+        )
+        return losses, correct, losses.detach()
+    parts = []
+    if kl_start > 0:
+        ce_losses, ce_correct = linear_cross_entropy(
+            hidden_states = flat[:kl_start],
+            weight = weight,
+            targets = targets[:kl_start],
+            chunk_size = chunk_size,
+            impl = loss_impl,
+        )
+        parts.append((ce_losses, ce_correct, ce_losses.detach()))
+    kl_losses, kl_nll, kl_correct = linear_top_kl(
+        hidden_states = flat[kl_start:],
+        weight = weight,
+        top_ids = inputs["teacher_ids"],
+        top_lp = inputs["teacher_lp"],
+        targets = targets[kl_start:],
+        tail = kl_tail,
+        chunk_size = chunk_size,
+    )
+    parts.append((kl_losses, kl_correct, kl_nll))
+    if len(parts) == 1:
+        return parts[0]
+    return tuple(torch.cat(tensors = [part[index] for part in parts]) for index in range(3))
 
 
 def target_loss(model, inputs, loss_impl = "chunked"):

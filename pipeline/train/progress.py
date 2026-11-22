@@ -95,10 +95,14 @@ class Progress:
     def line(self, record):
         """日志窗口的一行文字。"""
         eta = format_duration(seconds = record["eta_s"]) if record["eta_s"] is not None else "-"
+        # 开启回放（任务 #71）时 loss 只是 ASR 的，另打出回放的损失和这一段的实际比例。
+        replay = ""
+        if record.get("replay_loss") is not None:
+            replay = f" | 回放 {record['replay_loss']:.4f}（比例 {record['replay_ratio']:.2f}）"
         return (
             f"[步 {record['step']}/{record['total_steps']} {100 * record['step'] / record['total_steps']:.1f}%]"
             f" {record['it_per_s']:.2f} it/s | {record['samples_per_s']:.1f} 样本/s"
-            f" | {record['audio_h_per_h']:.0f} 音频h/h | loss {record['loss']:.4f}"
+            f" | {record['audio_h_per_h']:.0f} 音频h/h | loss {record['loss']:.4f}{replay}"
             f" | lr {record['lr']:.2e} | 显存 {record['mem_gb']:.1f} GB"
             f" | 已用 {format_duration(seconds = record['elapsed_s'])} | 剩余 {eta}"
         )
