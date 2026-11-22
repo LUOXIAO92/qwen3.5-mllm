@@ -135,7 +135,7 @@ def add_arguments(parser):
         "--optimizer",
         default = DEFAULTS["optimizer"],
         choices = OPTIMIZERS,
-        help = "adamw：全部可训练参数用 AdamW（默认）；muon：二维隐藏层权重矩阵用 Muon，其余用 AdamW",
+        help = "adamw：全部可训练参数用 AdamW（默认）；muon（实验选项，未在 GPU 上验证）：二维隐藏层权重矩阵用 Muon，其余用 AdamW",
     )
     group.add_argument(
         "--muon-lr",

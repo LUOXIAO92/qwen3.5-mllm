@@ -335,7 +335,7 @@ Muon 优化器（任务 #78）
 ======================
 
 --optimizer muon 让二维隐藏层权重矩阵改用 Muon（PyTorch 2.13 自带的 torch.optim.Muon），其余参数仍用 AdamW；默认的
---optimizer adamw 与以前完全相同。Muon 的计算、各项选项、精度组合和续训格式见 muon.py 的说明，参数放在哪里更新见 placement.py。
+--optimizer adamw 与以前完全相同。Muon 是实验选项：只做了 CPU 测试，没有在 GPU 上做过训练对比，正式实验仍用 AdamW。Muon 的计算、各项选项、精度组合和续训格式见 muon.py 的说明，参数放在哪里更新见 placement.py。
 
 用途。Muon 把动量近似正交化后再更新矩阵，在从头预训练语言模型时比 AdamW 用更少的计算达到同样的损失（下面的文献）。本项目的
 projector 从随机初始化开始训练，与这种情形接近；全量微调时语言模型来自已经预训练好的 Qwen3.5，Moonshot 的实验中用 AdamW
