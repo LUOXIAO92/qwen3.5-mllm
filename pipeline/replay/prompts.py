@@ -36,6 +36,7 @@ import numpy as np
 from transformers import AutoTokenizer
 
 from pipeline.replay.first_token import first_token_logprobs, sample_first
+from pipeline.tokenizer_fix import check_tokenizer
 
 GROUPS = ("free_raw", "free_chat", "cont_raw", "cont_chat")
 SPLITS = ("eval", "train")
@@ -145,6 +146,8 @@ def main():
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
+    # 文档开头按原始 Qwen3.5 的规则分词（#77）
+    check_tokenizer(tokenizer = tokenizer, source = args.model)
     replay_dir = Path(args.replay_dir)
     segments = chat_segments(tokenizer = tokenizer)
     free_count = {key: int(value) for key, value in (item.split("=") for item in args.free_count.split(","))}

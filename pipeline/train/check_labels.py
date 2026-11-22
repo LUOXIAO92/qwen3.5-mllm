@@ -50,10 +50,13 @@ def main() -> int:
 
     from transformers import AutoProcessor
 
+    from pipeline.tokenizer_fix import check_tokenizer
+
     processor = AutoProcessor.from_pretrained(
         pretrained_model_name_or_path = str(args.model_dir),
         trust_remote_code = True,
     )
+    check_tokenizer(tokenizer = processor, source = args.model_dir)
     rows = read_manifest(path = args.manifest)
     by_lang = {}
     for row in rows:

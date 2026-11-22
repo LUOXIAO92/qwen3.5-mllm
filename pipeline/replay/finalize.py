@@ -31,6 +31,7 @@ import numpy as np
 from pipeline.replay.degeneration import gzip_ratio, loop_onset, max_window_repeat, near_loop_onset, ngram_repeat_rate
 from pipeline.replay.prompts import GROUPS, SPLITS
 from pipeline.replay.store import ShardReader, read_all_records
+from pipeline.tokenizer_fix import check_tokenizer
 
 _CODE_SYMBOLS = set("{}[]();=<>_/\\|$#")
 _tokenizer = None
@@ -164,6 +165,7 @@ def finalize_split(replay_dir, group, split, model_dir, jobs):
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    check_tokenizer(tokenizer = tokenizer, source = model_dir)
     stop_ids = [tokenizer.convert_tokens_to_ids("<|im_end|>"), tokenizer.convert_tokens_to_ids("<|endoftext|>")]
     tasks = [
         {"record": record, "prompt": prompts[record["prompt_index"]], "group": group, "raw_dir": str(raw_dir), "stop_ids": stop_ids}

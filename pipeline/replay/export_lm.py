@@ -7,8 +7,10 @@
 bfloat16。ASR 训练从融合模型出发，所以回放文本和它的对数概率都用融合模型里的这一份权重生成。
 
 输出目录包含：融合模型中 `model.language_model.*` 的全部张量（`model.safetensors`），以及原始目录的
-`config.json`、分词器文件和 chat template。vLLM 按原始架构 `Qwen3_5ForConditionalGeneration` 加载，
-开启 `language_model_only` 后不建视觉塔，因此不需要视觉权重；原始检查点中的 MTP 层也不导出。
+`config.json`、分词器文件和 chat template。原始目录的 tokenizer_config.json 写的分词器类是 Qwen2Tokenizer，
+transformers 和 vLLM 按这个类加载时把泰语、阿拉伯语等的组合用符号单独切开（#77），复制后用 `pipeline.tokenizer_fix`
+改为 Qwen3_5Tokenizer。vLLM 按原始架构 `Qwen3_5ForConditionalGeneration` 加载，开启 `language_model_only` 后
+不建视觉塔，因此不需要视觉权重；原始检查点中的 MTP 层也不导出。
 """
 
 import argparse
@@ -18,6 +20,8 @@ from pathlib import Path
 
 from safetensors import safe_open
 from safetensors.torch import save_file
+
+from pipeline.tokenizer_fix import fix_model_dir
 
 PREFIX = "model.language_model."
 # 原始目录中需要复制的小文件：模型配置、分词器、chat template、图像与视频预处理配置（vLLM 构建处理器时读取）
@@ -46,6 +50,7 @@ def export(mllm_dir, original_dir, out_dir):
         source = Path(original_dir) / name
         if source.exists():
             shutil.copy2(src = source, dst = out_dir / name)
+    fix_model_dir(model_dir = out_dir)
     # 生成配置：只声明结束符，采样参数一律由调用方显式给出
     generation_config = {"eos_token_id": [248044, 248046]}
     (out_dir / "generation_config.json").write_text(json.dumps(generation_config, indent = 2) + "\n", encoding = "utf-8")

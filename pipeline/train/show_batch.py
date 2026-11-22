@@ -68,11 +68,14 @@ def main(argv = None):
     else:
         from transformers import AutoProcessor
 
+        from pipeline.tokenizer_fix import check_tokenizer
+
         model = None
         processor = AutoProcessor.from_pretrained(
             pretrained_model_name_or_path = args.model_dir,
             trust_remote_code = True,
         )
+        check_tokenizer(tokenizer = processor, source = args.model_dir)
     tokenizer = processor.tokenizer
     audio_token_id = tokenizer.convert_tokens_to_ids(tokens = processor.audio_token)
     dataset = TranscriptionDataset(rows = rows, target = args.target)

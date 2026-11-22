@@ -15,6 +15,7 @@ import inspect
 import torch
 import torch.nn.functional as F
 
+from pipeline.tokenizer_fix import check_tokenizer
 from pipeline.train.data import IGNORE_INDEX
 
 LOSS_IMPLS = ("chunked", "torch")
@@ -77,6 +78,8 @@ def load_model(
         pretrained_model_name_or_path = str(model_dir),
         trust_remote_code = True,
     )
+    # 分词规则必须与原始 Qwen3.5 相同（#77），否则泰语、阿拉伯语等的训练目标会按另一种切法分词
+    check_tokenizer(tokenizer = processor, source = model_dir)
     model = AutoModelForImageTextToText.from_pretrained(
         pretrained_model_name_or_path = str(model_dir),
         trust_remote_code = True,

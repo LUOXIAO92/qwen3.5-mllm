@@ -60,6 +60,7 @@ import time
 from pathlib import Path
 
 from pipeline.eval.scoring import LANGS, METRIC_BY_LANG, NONSPEECH_LANG, false_output_summary, score_corpus
+from pipeline.tokenizer_fix import check_tokenizer
 
 PROMPT_TEXT = "Transcribe the audio."
 # 样本格式，与 pipeline.train.data.PROMPT_FORMATS 相同。这里不导入训练模块，评测环境不需要训练的依赖。
@@ -217,6 +218,8 @@ def load_model(
         pretrained_model_name_or_path = str(model_dir),
         trust_remote_code = True,
     )
+    # 分词规则必须与原始 Qwen3.5 相同（#77），提示中的文字（例如级联参照中的转写）才按语言模型预训练时的切法分词
+    check_tokenizer(tokenizer = processor, source = model_dir)
     processor.tokenizer.padding_side = "left"
     model = AutoModelForImageTextToText.from_pretrained(
         pretrained_model_name_or_path = str(model_dir),

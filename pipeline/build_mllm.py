@@ -6,7 +6,9 @@
 1. 从 --code-from（如 qwen3.5-0.8b-mllm）复制自定义代码文件，融合模型目录随这些 .py 一起保存，可以用 remote code 加载；
 2. 用 backbone 的配置加上音频塔的配置生成融合配置；
 3. 用 backbone 的 processor 加上音频特征提取器生成融合 processor，聊天模板加入音频分支，
-   分词器登记 <|audio_start|>、<|audio_end|>，配置记下 <|audio_pad|> 与起止 token 的编号；
+   分词器登记 <|audio_start|>、<|audio_end|>，配置记下 <|audio_pad|> 与起止 token 的编号。backbone 的
+   tokenizer_config.json 写的分词器类是 Qwen2Tokenizer，transformers 按这个类重建的分词器把泰语、阿拉伯语等的组合用
+   符号单独切开（#77），保存后用 pipeline.tokenizer_fix 把类名改为 Qwen3_5Tokenizer、预分词规则恢复原始写法；
 4. 视觉塔、语言模型与输出层取自 backbone，音频塔取自 --audio-tower，projector（Linear → SiLU → Linear）按 --seed 新初始化，
    输出维度等于 backbone 语言模型的 hidden size。权重默认以 bfloat16 保存（--save-dtype）：backbone 与音频塔的原始
    权重本来就是 bf16，存成 float32 只会让文件翻倍；训练时冻结部分按 bf16 加载、projector 转成 float32（pipeline/train/model.py）。
@@ -28,6 +30,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+from pipeline.tokenizer_fix import check_tokenizer, fix_model_dir
 
 CODE_FILES = [
     "configuration_qwen3_5_mllm.py",
@@ -134,6 +138,7 @@ def build(backbone: Path, audio_tower: Path, code_from: Path, out: Path, seed: i
         sub_config.dtype = save_dtype
     full_model.save_pretrained(save_directory = out)
     processor.save_pretrained(save_directory = out)
+    fix_model_dir(model_dir = out)
 
 
 def verify(out: Path) -> dict:
@@ -147,6 +152,7 @@ def verify(out: Path) -> dict:
         attn_implementation = "eager",
     ).eval()
     processor = AutoProcessor.from_pretrained(pretrained_model_name_or_path = out, trust_remote_code = True)
+    check_tokenizer(tokenizer = processor, source = out)
     sampling_rate = processor.feature_extractor.sampling_rate
     times = np.arange(2 * sampling_rate) / sampling_rate
     wave = (0.1 * np.sin(2 * np.pi * 440 * times)).astype(np.float32)

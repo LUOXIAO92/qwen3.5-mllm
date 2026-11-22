@@ -37,6 +37,7 @@ import numpy as np
 
 from pipeline.replay.degeneration import degeneration_onset
 from pipeline.replay.store import TOP_K, ShardWriter, read_all_records, repair
+from pipeline.tokenizer_fix import check_tokenizer
 
 MAX_NEW_TOKENS = 16384
 # 估计平均保留 token 数时的先验：相当于 20 条各 1000 token 的样本
@@ -118,6 +119,8 @@ class Generator:
         self.load_seconds = time.time() - t0
         self.engine = self.llm.llm_engine
         tokenizer = self.llm.get_tokenizer()
+        # 提示是 prompts 一步写好的 token 编号；这里确认参考模型目录的分词器也已修正（#77）
+        check_tokenizer(tokenizer = tokenizer, source = args.model)
         self.stop_ids = [tokenizer.convert_tokens_to_ids("<|im_end|>"), tokenizer.convert_tokens_to_ids("<|endoftext|>")]
         self.im_end = self.stop_ids[0]
         print(f"模型加载 {self.load_seconds:.0f} 秒，结束符 {self.stop_ids}", flush = True)
