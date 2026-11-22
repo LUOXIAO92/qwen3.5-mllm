@@ -210,7 +210,23 @@ def split_summary(replay_dir, group, split):
         "gen_nll_over_4": sum((row.get("gen_nll") or 0) > 4 for row in kept),
         "lang_samples": dict(Counter(row.get("lang", "?") for row in kept).most_common()),
     }
-    if any("pre_loop_tokens" in row for row in kept):
+    noloop = any(row.get("selection") == "noloop" for row in rows)
+    if noloop:
+        # 丢弃循环：有循环的样本整条不用，保留的样本不截断
+        dropped = [row for row in rows if row["drop_reason"] == "loop"]
+        summary["noloop"] = True
+        summary["status"] = dict(Counter(row.get("status") for row in kept))
+        summary["dropped_loop_samples"] = len(dropped)
+        summary["dropped_loop_share"] = round(len(dropped) / max(len(rows), 1), 4)
+        summary["dropped_loop_tokens"] = sum(row["n_gen"] for row in dropped)
+        summary["generated_tokens"] = summary["kept_tokens"] + summary["dropped_loop_tokens"]
+        summary["dropped_token_share"] = round(summary["dropped_loop_tokens"] / max(summary["generated_tokens"], 1), 4)
+        summary["dropped_loop_kind"] = dict(Counter(row["loop_onset"]["kind"] for row in dropped if row.get("loop_onset")))
+        summary["dropped_loop_role"] = dict(Counter(row["loop_onset"]["role"] for row in dropped if row.get("loop_onset")))
+        summary["dropped_loop_onset"] = percentiles(values = [row["loop_onset"]["position"] for row in dropped if row.get("loop_onset")])
+        summary["imported_samples"] = sum(bool(row.get("origin")) for row in rows)
+        summary["kept_hit_cap"] = sum(row["finish_reason"] == "length" for row in kept)
+    if not noloop and any("pre_loop_tokens" in row for row in kept):
         # 不筛选：循环只是元数据
         summary["unfiltered"] = True
         summary["status"] = dict(Counter(row.get("status") for row in kept))
@@ -274,8 +290,60 @@ def unfiltered_table(summary):
     return lines
 
 
+def noloop_table(summary):
+    lines = [
+        "| 组 | 划分 | 用掉的提示 | 保留样本 | 保留 token | 有循环而丢弃的样本 | 丢弃样本花掉的 token | 保留样本长度中位数 | 长度 p90 | 保留样本达到 16k 上限 | gzip 压缩率中位数 | 参考 NLL | 采样时 NLL | top-32 之外概率均值 |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for key, item in summary.items():
+        group, split = key.split("/")
+        main = "assistant" if group.endswith("chat") else "text"
+        teacher = item.get("teacher_nll") or {}
+        nll_text = f"{teacher[main]['nll']:.4f}" if main in teacher else ""
+        tail_text = f"{teacher['top32_tail_mass']['mean']:.4f}" if teacher.get("top32_tail_mass") else ""
+        lines.append(
+            f"| {group} | {split} | {item['samples']:,} | {item['kept_samples']:,} | {item['kept_tokens']:,} | "
+            f"{item['dropped_loop_samples']:,}（{item['dropped_loop_share']:.1%}） | {item['dropped_loop_tokens']:,}（{item['dropped_token_share']:.1%}） | "
+            f"{item['length'].get('p50', 0):.0f} | {item['length'].get('p90', 0):.0f} | {item['kept_hit_cap']:,} | "
+            f"{item['gzip_ratio'].get('p50', 0):.3f} | {nll_text} | {item['gen_nll'].get('main', float('nan')):.4f} | {tail_text} |"
+        )
+    return lines
+
+
 def markdown(summary):
     lines = ["# 回放文本汇总", ""]
+    if any(item.get("noloop") for item in summary.values()):
+        lines = ["# 丢弃循环的回放文本汇总", ""]
+        lines.extend(noloop_table(summary = summary))
+        lines.append("")
+        lines.append("保留的样本都没有循环，平均比全部生成的样本短（长样本更容易出现循环），长度分布偏向短文本。")
+        lines.append("")
+        for key, item in summary.items():
+            lines.append(f"## {key}")
+            lines.append("")
+            lines.append(f"- 保留样本长度分档（生成 token）：{item['length_bins']}；长度分位数：{item['length']}")
+            lines.append(f"- 保留样本的结束方式：{item['finish']}；状态：{item['status']}；由不筛选目录导入的样本（含丢弃的）：{item['imported_samples']}")
+            lines.append(f"- 丢弃样本的循环种类：{item['dropped_loop_kind']}；出现循环的片段：{item['dropped_loop_role']}；循环起点位置：{item['dropped_loop_onset']}")
+            lines.append(f"- 语言（保留样本数）：{item['lang_samples']}")
+            lines.append(f"- 语言（保留 token 数）：{item['lang_tokens']}")
+            lines.append(f"- 像代码的样本：{item['code_like']}；平均 NLL 超过 4 的样本：{item['gen_nll_over_4']}；多样性：{item['diversity']}")
+            if "doc_lang_samples" in item:
+                lines.append(f"- 续写语言与文档语言相同的比例：{item['same_lang_as_doc']}；文档语言（保留样本数）：{item['doc_lang_samples']}")
+                lines.append(f"- 来源：{item['source_samples']}；文档开头 token 数：{item['prefix_tokens']}")
+            if "user_lang_samples" in item:
+                lines.append(f"- 用户消息语言：{item['user_lang_samples']}；用户消息 token 数：{item['user_tokens']}")
+            if "throughput" in item:
+                lines.append(f"- 本目录中生成的吞吐：{item['throughput']['tokens_per_second']} token/s（{item['throughput']['runs']} 次运行，{item['throughput']['seconds']:.0f} 秒）")
+            teacher = item.get("teacher_nll")
+            if teacher:
+                for part in ("user", "assistant", "text"):
+                    if part in teacher:
+                        lines.append(f"- 参考 NLL（{part}）：{teacher[part]['nll']}，{teacher[part]['tokens']:,} token")
+                by_key = "by_doc_lang" if "by_doc_lang" in teacher else "by_lang"
+                lines.append(f"- 参考 NLL（主体，{by_key}）：" + "，".join(f"{lang} {value['nll']}" for lang, value in teacher[by_key].items()))
+                lines.append(f"- top-32 之外的概率：{teacher['top32_tail_mass']}")
+            lines.append("")
+        return "\n".join(lines) + "\n"
     if any(item.get("unfiltered") for item in summary.values()):
         lines = ["# 不筛选的回放文本汇总", ""]
         lines.extend(unfiltered_table(summary = summary))

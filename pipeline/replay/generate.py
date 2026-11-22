@@ -18,9 +18,13 @@ token 和它的对数概率；`--topk 20`（默认）时另存参考模型的 to
   无模板两组的大部分算力花在循环上（试运行中 cont_raw 生成的 token 只有 23% 在循环起点之前）。
 - 不筛选（`--no-filter`，`replay-unfiltered/`，按 arXiv 2605.26097 的纯自回放）：不检查循环、不提前中止，每条样本都生成
   到结束符或 16,384 个 token 的上限，全部保留。循环只在 finalize 中作为元数据记录。
+- 丢弃循环（`--drop-loops`，`replay-noloop/`）：检查方法与筛选模式相同，发现循环就立即中止，整条样本丢弃，不截断；
+  索引中只记一行元数据（状态 `loop`、循环出现的片段、位置、种类和花掉的 token 数），不写 token。没有循环的样本生成到
+  结束符或上限，原样保留；每段生成结束时再按 finalize 的规则完整检查一次。循环检测只看前文：在前缀上发现的循环，
+  在完整序列上同样存在，所以提前中止丢弃得到的保留集合与「全部生成完再丢弃有循环的样本」完全相同。
 
 `--plan` 按顺序处理各个（组, 划分）。每个划分的进度以「保留的生成 token 数」计（筛选模式为循环起点之前的生成 token，
-不筛选模式为全部生成 token），达到目标后停止投放新提示，等在途的样本全部完成。提示按 prompts.jsonl 的顺序投放，
+不筛选模式为全部生成 token，丢弃循环模式为没有循环的样本的全部生成 token），达到目标后停止投放新提示，等在途的样本全部完成。提示按 prompts.jsonl 的顺序投放，
 已完成的跳过，所以最终的样本是提示清单的前若干条，长样本与短样本一样完整保留。
 
 运行超过 `--time-budget` 秒后，在途的请求全部中止，已生成的部分存进 `raw/inflight.pkl`，进程退出；下次运行先把这些样本
@@ -47,7 +51,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pipeline.replay.degeneration import degeneration_onset
+from pipeline.replay.degeneration import degeneration_onset, loop_onset, near_loop_onset
 from pipeline.replay.store import TOP_K, ShardWriter, read_all_records, repair
 from pipeline.tokenizer_fix import check_tokenizer
 
@@ -203,7 +207,7 @@ class Generator:
 
         writer = None
         streams = {}
-        counters = {"samples": 0, "gen_tokens": 0, "decoded": 0, "loop_aborts": 0, "resumed": len(suspended), "suspended": 0}
+        counters = {"samples": 0, "gen_tokens": 0, "decoded": 0, "loop_aborts": 0, "dropped": 0, "resumed": len(suspended), "suspended": 0}
         prior = parse_targets(text = args.prior_mean).get(group, 1000) if "=" in args.prior_mean else float(args.prior_mean)
         default_inflight = int(args.max_num_seqs * 1.5)
         if "=" in args.max_inflight:
@@ -264,13 +268,14 @@ class Generator:
             counters["gen_tokens"] += len(ids)
             return ids
 
-        def finish_sample(state, status, kept):
+        def finish_sample(state, status, kept, loop = None):
+            """写出一条完成的样本。loop 不为空时（--drop-loops 发现循环）只写元数据：提示片段、循环位置与花掉的 token 数。"""
             nonlocal writer, kept_total, finished_samples, mean_kept
             if writer is None:
                 writer = ShardWriter(raw_dir = raw_dir, topk = args.topk > 0)
             pieces = []
             gen_index = 0
-            for piece in state["pieces"]:
+            for piece in state["pieces"] if loop is None else state["pieces"][:1]:
                 if "gen" in piece:
                     sampled, sampled_lp, topk_ids, topk_lp = state["arrays"][gen_index]
                     gen_index += 1
@@ -283,16 +288,18 @@ class Generator:
                     piece = dict(piece, offset = offset)
                 pieces.append(piece)
             row = state["row"]
-            writer.add_record(
-                {
-                    "sample_id": f"{group}-{split}-{row['prompt_index']:07d}",
-                    "prompt_index": row["prompt_index"],
-                    "status": status,
-                    "n_gen": int(sum(len(arrays[0]) for arrays in state["arrays"])),
-                    "kept_gen": int(kept),
-                    "pieces": pieces,
-                }
-            )
+            record = {
+                "sample_id": f"{group}-{split}-{row['prompt_index']:07d}",
+                "prompt_index": row["prompt_index"],
+                "status": status,
+                "n_gen": int(sum(len(arrays[0]) for arrays in state["arrays"])),
+                "kept_gen": int(kept),
+                "pieces": pieces,
+            }
+            if loop is not None:
+                record["loop"] = loop
+                counters["dropped"] += 1
+            writer.add_record(record)
             kept_total += kept
             counters["samples"] += 1
             finished_samples += 1
@@ -304,7 +311,15 @@ class Generator:
             stream = streams.pop(request_id)
             state = stream.state
             ids = close_piece(stream = stream, finish_reason = finish_reason)
-            onset = None if args.no_filter else degeneration_onset(ids = ids)
+            if args.drop_loops:
+                # 用 finalize 的同一套规则检查这一段；有循环（原样或近似）就整条丢弃，只记元数据
+                exact, near = loop_onset(ids = ids), near_loop_onset(ids = ids)
+                if exact is not None or near is not None:
+                    position = min(value for value in (exact, near) if value is not None)
+                    loop = {"role": stream.role, "position": int(position), "kind": "exact" if position == exact else "near", "finish_reason": finish_reason}
+                    finish_sample(state = state, status = "loop", kept = 0, loop = loop)
+                    return
+            onset = None if args.no_filter or args.drop_loops else degeneration_onset(ids = ids)
             if stream.role == "user":
                 if onset is not None:
                     finish_sample(state = state, status = "user_loop", kept = 0)
@@ -322,7 +337,7 @@ class Generator:
                         role = "assistant",
                     )
                     return
-                finish_sample(state = state, status = "no_user_end", kept = used if args.no_filter else 0)
+                finish_sample(state = state, status = "no_user_end", kept = used if args.no_filter or args.drop_loops else 0)
                 return
             kept = state.get("used", 0) + (onset if onset is not None else len(ids))
             finish_sample(state = state, status = "ok", kept = kept)
@@ -386,7 +401,10 @@ class Generator:
                     stream.next_check = stream.length + args.check_every
                     onset = degeneration_onset(ids = stream.ids())
                     if onset is not None:
-                        stream.abort_at = onset if stream.role == "user" else onset + args.loop_margin
+                        if args.drop_loops:
+                            stream.abort_at = stream.length  # 整条丢弃，立即中止
+                        else:
+                            stream.abort_at = onset if stream.role == "user" else onset + args.loop_margin
                 if stream.abort_at is not None and stream.length >= stream.abort_at:
                     to_abort.append(output.request_id)
             if to_abort:
@@ -420,6 +438,7 @@ class Generator:
                 "gen_tokens": counters["gen_tokens"],
                 "decoded_tokens": counters["decoded"],
                 "loop_aborts": counters["loop_aborts"],
+                "dropped": counters["dropped"],
                 "resumed": counters["resumed"],
                 "suspended": counters["suspended"],
                 "seconds": round(elapsed, 1),
@@ -428,6 +447,7 @@ class Generator:
                 "max_num_seqs": args.max_num_seqs,
                 "max_inflight": max_inflight,
                 "no_filter": args.no_filter,
+                "drop_loops": args.drop_loops,
                 "topk": args.topk,
                 "check_every": args.check_every,
                 "loop_margin": args.loop_margin,
@@ -451,7 +471,11 @@ def main():
     parser.add_argument("--model", required = True, help = "参考模型目录（export_lm 的输出）")
     parser.add_argument("--replay-dir", required = True)
     parser.add_argument("--plan", required = True, help = "逗号分隔的 组:划分，按顺序处理")
-    parser.add_argument("--target", default = "eval=1000000,train=12000000", help = "每个划分保留的生成 token 目标")
+    parser.add_argument(
+        "--target",
+        default = "eval=1000000,train=12000000",
+        help = "每个划分保留的生成 token 目标；可以按组覆盖，例如 eval=1000000,train=30000000,free_raw:train=10000000",
+    )
     parser.add_argument("--time-budget", type = float, default = 720, help = "秒；超过后暂停在途样本并退出，下次运行接着生成")
     parser.add_argument(
         "--prior-mean",
@@ -460,6 +484,11 @@ def main():
         "在途的样本都要写完，先验过低时开头投放过多，划分的 token 数会超出目标",
     )
     parser.add_argument("--no-filter", action = "store_true", help = "不检查循环、不提前中止，每条样本生成到结束符或上限并全部保留")
+    parser.add_argument(
+        "--drop-loops",
+        action = "store_true",
+        help = "发现循环（原样或近似）就立即中止并整条丢弃，只记元数据；其余样本生成到结束符或上限并原样保留，不截断",
+    )
     parser.add_argument("--topk", type = int, default = TOP_K, help = f"每个生成位置另存的 top-k 对数概率个数，只能取 {TOP_K} 或 0（不存）")
     parser.add_argument("--max-new-tokens", type = int, default = MAX_NEW_TOKENS)
     parser.add_argument("--max-num-seqs", type = int, default = 256, help = "并发序列数；KV 缓存约 177 万 token")
@@ -479,6 +508,8 @@ def main():
     args = parser.parse_args()
     if args.topk not in (0, TOP_K):
         parser.error(f"--topk 只能取 {TOP_K} 或 0")
+    if args.no_filter and args.drop_loops:
+        parser.error("--no-filter 与 --drop-loops 只能选一个")
     if args.seed is None:
         args.seed = int(time.time()) % 1_000_000
 
@@ -493,7 +524,7 @@ def main():
         finished = generator.run_split(
             group = group,
             split = split,
-            target = targets[split],
+            target = targets.get(f"{group}:{split}", targets.get(split)),
             deadline = deadline,
         )
         all_done = all_done and finished

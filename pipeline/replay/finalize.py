@@ -1,11 +1,15 @@
 """整理生成结果：在循环（原样或近似，见 `degeneration.py`）起点截断、解码文本、计算退化统计，写出每个划分的最终索引 `samples.jsonl`。
 
-    python -m pipeline.replay.finalize --model <参考模型目录> --replay-dir <回放目录> [--no-filter]
+    python -m pipeline.replay.finalize --model <参考模型目录> --replay-dir <回放目录> [--no-filter | --drop-loops]
 
 `--no-filter`（不筛选的回放目录）时不截断、不丢弃，每条样本按生成结果完整保留（`keep` 都为真，生成片段的 `keep` 等于
 `length`）；循环起点照常计算，只作为元数据：`loop_onset` 记录第一个出现循环的片段、位置和种类，`pre_loop_tokens` 是
 循环起点之前的生成 token 数（即筛选模式会保留的数量），`status` 保留生成时的状态（free_chat 用户消息没有正常结束时为
 `no_user_end`）。
+
+`--drop-loops`（丢弃循环的回放目录 `replay-noloop/`）时同样不截断：生成时已经整条丢弃的样本（索引状态 `loop`，只有
+元数据）写成 `keep` 为假、`drop_reason` 为 `loop` 的行，`loop_onset` 取自生成时的记录，`n_gen` 是花掉的生成 token 数；
+其余样本按同一套规则再完整检查一次，仍发现循环的也整条不用（正常情况下为 0 条）。
 
 在 `envs/mllm-eval` 中运行（只用 CPU）。二进制数组不复制也不改写：`samples.jsonl` 中每个生成片段的 `keep`
 给出截断后保留的 token 数，读取时取 `[offset, offset + keep)`。每行字段：
@@ -69,10 +73,22 @@ def init_worker(model_dir):
     _tokenizer = AutoTokenizer.from_pretrained(model_dir)
 
 
+def prompt_meta(row, prompt, group):
+    """free_raw 的开头 token，续写两组的文档开头与来源信息。"""
+    if group == "free_raw":
+        row["start_ids"] = prompt["prompt_ids"]
+        row["start_text"] = decode(ids = prompt["prompt_ids"])
+    if group in ("cont_raw", "cont_chat"):
+        for key in ("prefix_id", "source", "source_license", "source_ref", "doc_id", "prefix_text", "prefix_tokens"):
+            row[key] = prompt[key]
+        row["doc_lang"] = prompt["lang"]
+
+
 def process(job):
     """一个样本：截断、解码、统计。"""
     record, prompt, group, raw_dir, stop_ids = job["record"], job["prompt"], job["group"], job["raw_dir"], set(job["stop_ids"])
     no_filter = job["no_filter"]
+    drop_loops = job["drop_loops"]
     reader = ShardReader(raw_dir = raw_dir)
     row = {
         "sample_id": record["sample_id"],
@@ -81,6 +97,26 @@ def process(job):
         "keep": True,
         "drop_reason": None,
     }
+    if drop_loops:
+        row["selection"] = "noloop"
+        row["status"] = record["status"]
+        if record.get("origin"):
+            row["origin"] = record["origin"]
+    if record["status"] == "loop":
+        # 生成时发现循环、整条丢弃的样本（generate --drop-loops 或 noloop 导入）：只有元数据
+        row.update(
+            keep = False,
+            drop_reason = "loop",
+            pieces = record["pieces"],
+            n_gen = record["n_gen"],
+            n_kept = 0,
+            truncated = False,
+            loop_onset = record["loop"],
+            ended = False,
+            finish_reason = record["loop"].get("finish_reason"),
+        )
+        prompt_meta(row = row, prompt = prompt, group = group)
+        return row
     gen_pieces = [piece for piece in record["pieces"] if "gen" in piece]
     arrays = [np.asarray(reader.piece(number = record["shard"], piece = piece)) for piece in gen_pieces]
     keeps = []
@@ -103,12 +139,15 @@ def process(job):
         keeps.append(onset)
         pre_loop += onset
         stop = True
-    if no_filter:
-        # 不筛选：循环只作为元数据，所有生成 token 都保留
+    if no_filter or drop_loops:
+        # 不筛选、丢弃循环两种模式都不截断：所有生成 token 都保留；丢弃循环模式下再检查出循环的样本整条不用
         keeps = [len(ids) for ids in arrays]
+        loop_found = truncated
         truncated = False
         row["status"] = record["status"]
         row["pre_loop_tokens"] = pre_loop
+        if drop_loops and loop_found:
+            row.update(keep = False, drop_reason = "loop")
     elif record["status"] != "ok":
         row.update(keep = False, drop_reason = record["status"])
     elif truncated and onset_at["role"] == "user":
@@ -145,13 +184,7 @@ def process(job):
             row["user_text"] = user
         row["assistant_text"] = assistant
         stats_text = assistant
-    if group == "free_raw":
-        row["start_ids"] = prompt["prompt_ids"]
-        row["start_text"] = decode(ids = prompt["prompt_ids"])
-    if group in ("cont_raw", "cont_chat"):
-        for key in ("prefix_id", "source", "source_license", "source_ref", "doc_id", "prefix_text", "prefix_tokens"):
-            row[key] = prompt[key]
-        row["doc_lang"] = prompt["lang"]
+    prompt_meta(row = row, prompt = prompt, group = group)
     row.update(
         pieces = pieces,
         n_gen = int(sum(len(ids) for ids in arrays)),
@@ -169,7 +202,7 @@ def process(job):
     return row
 
 
-def finalize_split(replay_dir, group, split, model_dir, jobs, no_filter = False):
+def finalize_split(replay_dir, group, split, model_dir, jobs, no_filter = False, drop_loops = False):
     split_dir = Path(replay_dir) / group / split
     raw_dir = split_dir / "raw"
     if not raw_dir.exists():
@@ -190,6 +223,7 @@ def finalize_split(replay_dir, group, split, model_dir, jobs, no_filter = False)
             "raw_dir": str(raw_dir),
             "stop_ids": stop_ids,
             "no_filter": no_filter,
+            "drop_loops": drop_loops,
         }
         for record in records
     ]
@@ -210,6 +244,7 @@ def finalize_split(replay_dir, group, split, model_dir, jobs, no_filter = False)
         "dropped": dict(Counter(row["drop_reason"] for row in rows if not row["keep"])),
         "truncated": sum(row["truncated"] for row in kept),
         "with_loop": sum(row["loop_onset"] is not None for row in kept),
+        "dropped_tokens": sum(row["n_gen"] for row in rows if not row["keep"]),
         "gen_tokens": sum(row["n_gen"] for row in rows),
         "kept_tokens": sum(row["n_kept"] for row in kept),
     }
@@ -225,6 +260,7 @@ def main():
     parser.add_argument("--splits", nargs = "+", default = list(SPLITS))
     parser.add_argument("--jobs", type = int, default = 8)
     parser.add_argument("--no-filter", action = "store_true", help = "不截断、不丢弃，循环只作为元数据")
+    parser.add_argument("--drop-loops", action = "store_true", help = "不截断；有循环的样本整条不用（generate --drop-loops 的目录）")
     args = parser.parse_args()
     for group in args.groups:
         for split in args.splits:
@@ -235,6 +271,7 @@ def main():
                 model_dir = args.model,
                 jobs = args.jobs,
                 no_filter = args.no_filter,
+                drop_loops = args.drop_loops,
             )
 
 

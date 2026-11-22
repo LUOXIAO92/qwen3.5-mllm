@@ -1,4 +1,4 @@
-"""参考模型对回放文本的 top-32 分布：把每条样本（提示 + 生成，就是保存的 token id）整条送进参考模型前向一次（teacher forcing），
+"""参考模型对回放文本的 top-32 分布：把每条保留的样本（提示 + 生成，就是保存的 token id）整条送进参考模型前向一次（teacher forcing），
 在每个生成位置保存参考模型概率最高的 32 个 token、它们的对数概率和整个词表上的 log-sum-exp，供以后试 top-k 截断的近似 KL 损失。
 
     python -m pipeline.replay.teacher --mllm <阶段 1 融合模型目录> --replay-dir <回放目录> \
@@ -80,11 +80,26 @@ def build_sequence(record, reader):
     return ids, pieces
 
 
-def split_tokens(replay_dir, group, split):
-    raw_dir = Path(replay_dir) / group / split / "raw"
+def kept_records(split_dir):
+    """要计算 top-32 的样本：有生成片段，并且 finalize 写出的 samples.jsonl 中 keep 为真（丢弃循环的目录中有循环的样本不算）。"""
+    split_dir = Path(split_dir)
+    raw_dir = split_dir / "raw"
     if not raw_dir.exists():
-        return 0, 0
-    records = read_all_records(raw_dir = raw_dir)
+        return []
+    records = [record for record in read_all_records(raw_dir = raw_dir) if any("gen" in piece for piece in record["pieces"])]
+    samples_path = split_dir / "samples.jsonl"
+    if not samples_path.exists():
+        raise SystemExit(f"{split_dir} 还没有 samples.jsonl，先运行 finalize")
+    with open(samples_path, encoding = "utf-8") as handle:
+        keep = {row["sample_id"]: row["keep"] for row in map(json.loads, handle)}
+    missing = [record["sample_id"] for record in records if record["sample_id"] not in keep]
+    if missing:
+        raise SystemExit(f"{split_dir} 的 samples.jsonl 比生成结果旧（缺 {len(missing)} 条），先重新运行 finalize")
+    return [record for record in records if keep[record["sample_id"]]]
+
+
+def split_tokens(replay_dir, group, split):
+    records = kept_records(split_dir = Path(replay_dir) / group / split)
     return len(records), sum(piece["length"] for record in records for piece in record["pieces"] if "gen" in piece)
 
 
@@ -147,7 +162,7 @@ class Teacher:
         raw_dir = split_dir / "raw"
         teacher_dir = split_dir / "teacher"
         teacher_dir.mkdir(parents = True, exist_ok = True)
-        records = read_all_records(raw_dir = raw_dir)
+        records = kept_records(split_dir = split_dir)
         progress_path = teacher_dir / "progress.jsonl"
         done = set()
         if progress_path.exists():
@@ -277,7 +292,7 @@ class Teacher:
         with open(teacher_dir / "progress.jsonl", encoding = "utf-8") as handle:
             for line in handle:
                 done.update(json.loads(line)["sample_ids"])
-        records = [record for record in read_all_records(raw_dir = raw_dir) if record["sample_id"] in done]
+        records = [record for record in kept_records(split_dir = split_dir) if record["sample_id"] in done]
         rng = np.random.default_rng(seed = seed)
         picks = [records[index] for index in rng.choice(len(records), size = min(count, len(records)), replace = False)]
         reader = ShardReader(raw_dir = raw_dir)

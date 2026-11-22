@@ -10,6 +10,9 @@
 # export prompts generate finalize langid estimate teacher verify report：沿用筛选目录的文档开头和自由生成两组的提示，
 # 续写两组的提示用修正后的分词器重新写出；生成时不检查循环、不保存 top-20；生成完成后统计 token 数与磁盘需求，
 # 再用参考模型前向一遍，保存每个生成位置的 top-32 分布。
+# 丢弃循环模式（FILTER=noloop，写入 $DATASET/text/qwen3.5-asr/replay-noloop）的步骤依次为
+# import generate finalize langid estimate teacher verify report：import 把不筛选目录中没有循环的样本复制过来、有循环的
+# 只记元数据；generate 发现循环就中止并整条丢弃，其余样本原样保留，目标按保留的 token 数计；top-32 只算保留的样本。
 # 不给参数时执行当前模式的全部步骤。每一步都可以单独重跑；generate 与 teacher 每次持有 GPU 锁约 TIME_BUDGET 秒，
 # 没有完成就释放锁再续跑。每次占用 GPU 之前检查 nvidia-smi：有其他进程占着显存（例如 ComfyUI）就等待，不结束别人的进程。
 set -euo pipefail
@@ -21,6 +24,8 @@ MLLM="${MLLM:?需要设置 MLLM（阶段 1 的 2B 融合模型目录）}"
 ORIGINAL="${ORIGINAL:?需要设置 ORIGINAL（原始 Qwen3.5-2B 目录）}"
 FILTER="${FILTER:-1}"
 FILTERED_REPLAY="$DATASET/text/qwen3.5-asr/replay"
+UNFILTERED_REPLAY="$DATASET/text/qwen3.5-asr/replay-unfiltered"
+PLAN_DEFAULT="free_raw:eval,free_chat:eval,cont_raw:eval,cont_chat:eval,free_raw:train,free_chat:train,cont_raw:train,cont_chat:train"
 if [ "$FILTER" = 1 ]; then
     REPLAY="${REPLAY:-$FILTERED_REPLAY}"
     OUT="${OUT:-$WORK_DIR/data/T70}"
@@ -29,8 +34,19 @@ if [ "$FILTER" = 1 ]; then
     MAX_INFLIGHT="${MAX_INFLIGHT:-0}"
     GEN_FLAGS=()
     DEFAULT_STEPS=(export prefixes prompts generate finalize langid nll report)
+elif [ "$FILTER" = noloop ]; then
+    REPLAY="${REPLAY:-$DATASET/text/qwen3.5-asr/replay-noloop}"
+    OUT="${OUT:-$WORK_DIR/data/T70/noloop}"
+    # 无模板两组的训练用目标降为 1,000 万保留 token（用户 2026-11-22）
+    TARGET="${TARGET:-eval=1000000,train=30000000,free_raw:train=10000000,cont_raw:train=10000000}"
+    # 每条投放的提示平均保留的 token 数（有循环的样本按 0 计），由不筛选目录估计
+    PRIOR_MEAN="${PRIOR_MEAN:-free_raw=700,free_chat=750,cont_raw=800,cont_chat=400}"
+    MAX_INFLIGHT="${MAX_INFLIGHT:-0}"
+    GEN_FLAGS=(--drop-loops --topk 0)
+    PLAN_DEFAULT="cont_raw:train,cont_chat:train,free_raw:eval,free_chat:eval,cont_raw:eval,cont_chat:eval,free_chat:train,free_raw:train"
+    DEFAULT_STEPS=(import generate finalize langid estimate teacher verify report)
 else
-    REPLAY="${REPLAY:-$DATASET/text/qwen3.5-asr/replay-unfiltered}"
+    REPLAY="${REPLAY:-$UNFILTERED_REPLAY}"
     OUT="${OUT:-$WORK_DIR/data/T70/unfiltered}"
     TARGET="${TARGET:-eval=1000000,train=30000000}"
     # 每条样本的平均长度：由筛选目录估计（出现循环的样本按 16,384 计），在途样本都要写完，先验过低会多投放
@@ -45,7 +61,7 @@ PREFIXES="${PREFIXES:-$FILTERED_REPLAY/prefixes}"
 REF="${REF:-$WORK_DIR/data/T70/ref-lm}"
 EXCLUSION="${EXCLUSION:-$WORK_DIR/data/T02/exclusion.jsonl}"
 LANGID_MODEL="${LANGID_MODEL:-$WORK_DIR/tmp/T03/glotlid/model_v3.bin}"
-PLAN="${PLAN:-free_raw:eval,free_chat:eval,cont_raw:eval,cont_chat:eval,free_raw:train,free_chat:train,cont_raw:train,cont_chat:train}"
+PLAN="${PLAN:-$PLAN_DEFAULT}"
 TIME_BUDGET="${TIME_BUDGET:-720}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 FREE_RAW_START="${FREE_RAW_START:-newline}"
@@ -124,6 +140,10 @@ step_prompts() {
     "$EVAL_ENV" -m pipeline.replay.prompts --groups cont_raw cont_chat --model "$REF" --replay-dir "$REPLAY" --prefixes-dir "$PREFIXES"
 }
 
+step_import() {
+    "$EVAL_ENV" -m pipeline.replay.noloop --source "$UNFILTERED_REPLAY" --out "$REPLAY"
+}
+
 step_generate() {
     run_resumable "$OUT/logs/generate.log" "$EVAL_ENV" -m pipeline.replay.generate --model "$REF" --replay-dir "$REPLAY" \
         --plan "$PLAN" --target "$TARGET" --time-budget "$TIME_BUDGET" --max-num-seqs "$MAX_NUM_SEQS" --prior-mean "$PRIOR_MEAN" \
@@ -132,7 +152,8 @@ step_generate() {
 
 step_finalize() {
     local flags=()
-    [ "$FILTER" = 1 ] || flags=(--no-filter)
+    [ "$FILTER" = 0 ] && flags=(--no-filter)
+    [ "$FILTER" = noloop ] && flags=(--drop-loops)
     "$EVAL_ENV" -m pipeline.replay.finalize --model "$REF" --replay-dir "$REPLAY" "${flags[@]}"
 }
 
