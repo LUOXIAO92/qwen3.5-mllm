@@ -38,7 +38,7 @@
 
 环境变量（与 t71_cpt_run.py 相同）：REPO、WORK_DIR、DRIVE_DIR、DATASET、PY、INDEX、SHARDS_DRIVE、SHARDS_LOCAL；
 回放数据须已由 setup.sh 解到 $DATASET/text/qwen3.5-asr/replay-noloop，FLEURS test 已由 fleurs_prepare 准备在
-$WORK_DIR/data/T02。可选：C71_TAG（输出名后缀）、C71_RATIO（默认 0.5）、C71_REPLAY_NORM（step 或 asr，默认 step）、
+$WORK_DIR/data/T02。可选：C71_TAG（输出名后缀）、C71_RATIO（默认 0.5）、C71_REPLAY_NORM（asr 或 step，默认 asr，按 token 归一化）、
 C71_RUNS（逗号分隔，只跑这些运行，默认全部）、
 C71_SKIP_SMOKE=1、C71_THINK_MAX_NEW（默认 16384）、C71_DEADLINE_HOURS、C71_CU_PER_HOUR（默认 10，#65 实测的 G4 消耗）、
 C71_STATE_SYNC_STEPS、C71_ESTIMATE_ONLY=1（只打印估计后退出）。
@@ -79,7 +79,7 @@ DRIVE_STATUS = DRIVE / "runs" / ("c71-status" + TAG)
 EVAL_ROOT = WORK / "eval" / ("c71" + TAG)
 RATIO = ENV.get("C71_RATIO", "0.5")
 # 一步损失的分母（train.py --replay-norm）：step 是用户 2026-11-23 的决定；asr 见 pipeline/train/replay.py「损失归一化与实际权重」。
-REPLAY_NORM = ENV.get("C71_REPLAY_NORM", "step")
+REPLAY_NORM = ENV.get("C71_REPLAY_NORM", "asr")
 THINK_MAX_NEW = int(ENV.get("C71_THINK_MAX_NEW", "16384"))
 DEADLINE_HOURS = float(ENV.get("C71_DEADLINE_HOURS", "23"))
 CU_PER_HOUR = float(ENV.get("C71_CU_PER_HOUR", "10"))

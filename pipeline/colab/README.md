@@ -307,7 +307,7 @@ driver = subprocess.Popen(
 - 状态与日志：`$WORK_DIR/c71/status.json`、`driver.log`，随时复制到 `$DRIVE_DIR/runs/c71-status/`；每个训练的日志在 `$WORK_DIR/<运行名>.log`，回放的取样记录在输出目录的 `replay_log.jsonl`。运行名为 `v2b-2b-cpt77-<c0|c-free_raw|...>`，输出与评测结果在 Drive 的 `runs/<运行名>/`（评测在其中的 `eval/`），参考模型在 `runs/c71-ref/`，汇总在 `runs/c71-summary/`。
 - Drive 上每个运行的检查点只有 projector、日志和 `projector.json`；最近检查点的 `trainer_state.pt`（约 26 GB）在训练停下或结束时复制过去（只留这一份），训练完成时再复制最后检查点的 `language_model.safetensors`。训练中途也要定期保存续训状态时设 `C71_STATE_SYNC_STEPS=10000`（Drive 上删除的旧文件会进回收站、占用空间）。
 - 会话时限：默认在驱动程序启动后 23 小时内收尾（`C71_DEADLINE_HOURS`）：训练在时限前保存并停下，评测放不下时不开始，状态为 `paused`、退出码 75。新会话从单元格 1 开始，跑完单元格 4 和 FLEURS 准备后重新启动驱动程序，已完成的阶段跳过，停下的训练从 Drive 上的 `trainer_state.pt` 续训。冒烟测试失败、训练非正常退出、找不到突降点时状态为 `blocked`，停下等协调者处理。
-- 只跑其中几个运行：`C71_RUNS=c0,c-mix`；回放比例 `C71_RATIO`（默认 0.5）；一步损失的分母 `C71_REPLAY_NORM`（默认 step，即 ASR 与回放的全部损失 token 一起取平均；回放整条加入、集中在少数步里，按数据长度模拟的实际梯度份额只有 4%–20%，各组不同，asr 时约为 r / (1 + r)，见 `pipeline/train/replay.py`「损失归一化与实际权重」）；思考检查的生成上限 `C71_THINK_MAX_NEW`（默认 16384，降低可省时间，比较的各模型要用同一个上限）。
+- 只跑其中几个运行：`C71_RUNS=c0,c-mix`；回放比例 `C71_RATIO`（默认 0.5）；一步损失的分母 `C71_REPLAY_NORM`（默认 asr，按 token 归一化：分母为 (1 + r) × ASR 损失 token 数，回放的梯度份额约为 r / (1 + r)；step 为 ASR 与回放的全部损失 token 一起取平均，回放整条加入、集中在少数步里，按数据长度模拟的实际梯度份额只有 4%–20%，见 `pipeline/train/replay.py`「损失归一化与实际权重」）；思考检查的生成上限 `C71_THINK_MAX_NEW`（默认 16384，降低可省时间，比较的各模型要用同一个上限）。
 
 **单元格 8：查看进度。**
 

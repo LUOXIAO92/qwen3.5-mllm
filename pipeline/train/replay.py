@@ -9,7 +9,7 @@
 - 样本整条使用，从不截断。训练时直接用保存的 token id（提示片段的 ids 加生成片段的 [offset, offset + keep)），不重新分词。
 - 比例 r = 回放损失 token 数 / ASR 转写损失 token 数，按长期平均控制（ReplaySampler）。ASR 批次与不加回放时完全相同
   （同一批分片、同一读取顺序、同样的步数），回放额外加在同一步里。
-- 一步内全部损失 token（ASR 加回放）一起取平均（--replay-norm step），r 同时决定回放的量和权重。分开记录 ASR 与回放的
+- 按 token 归一化（--replay-norm asr，默认）：一步损失的分母为 (1 + r) × ASR 损失 token 数，每个 token 权重相同，r 同时决定回放的量和权重。分开记录 ASR 与回放的
   损失，回放再按组记录。
 - 回放损失 --replay-loss：ntp（默认，对保存的采样 token 做下一个 token 预测的交叉熵）或 kl32（对参考模型 top-32 的有偏
   截断前向 KL，见 model.LinearTopKL）。
@@ -44,7 +44,9 @@ trainer_state.pt 的 replay 项中，只由这些状态和每步的 A 决定，�
 损失归一化与实际权重
 ====================
 
---replay-norm step（用户的决定）：一步的损失 = 这一步全部损失 token 的损失之和 / 这一步的损失 token 总数。回放按整条样本
+默认用 --replay-norm asr（用户 2026-11-23 决定按 token 归一化；最初的方案 step 按下面的模拟会稀释长样本）。
+
+--replay-norm step：一步的损失 = 这一步全部损失 token 的损失之和 / 这一步的损失 token 总数。回放按整条样本
 加入，样本比一步的 ASR token 长得多时（free_raw 平均约 1,860 个损失 token，一步的 ASR 约几百个），回放集中在少数步里，
 这些步里每个回放 token 的权重被稀释，整个训练中回放梯度所占的份额低于 r / (1 + r)，样本越长的组越低。训练日志中的
 replay_grad_share 是实际份额（每步梯度总量中回放所占部分的平均），与 r / (1 + r) 对照。

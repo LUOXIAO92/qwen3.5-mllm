@@ -254,8 +254,8 @@ def add_replay_arguments(parser):
     parser.add_argument(
         "--replay-norm",
         choices = REPLAY_NORMS,
-        default = "step",
-        help = "一步损失的分母：step 为这一步全部损失 token 数（ASR 加回放），asr 为 (1 + r) × ASR 损失 token 数",
+        default = "asr",
+        help = "一步损失的分母：asr（默认，按 token 归一化）为 (1 + r) × ASR 损失 token 数，每个 token 权重相同；step 为这一步全部损失 token 数（ASR 加回放），长样本会被稀释",
     )
     parser.add_argument(
         "--replay-inline-max-tokens",
