@@ -15,6 +15,8 @@
 #   18 字节）；省显存的组合、显存表和实测见 pipeline/train/__init__.py「全量微调」（除默认外多数组合需要 torchao）。
 #   每批样本拼成一行、去掉填充加 --pack-sequences（需要 flash-attn、causal-conv1d、fla），交叉熵改用 torch 的实现加
 #   --loss-impl torch，两项都不改变批次，实测见 pipeline/train/__init__.py「交叉熵实现与拼接批次」。
+#   优化器默认 AdamW；加 --optimizer muon 时二维隐藏层权重矩阵改用 Muon、其余仍用 AdamW（任务 #78），学习率缩放、
+#   动量等选项与显存见 pipeline/train/__init__.py「Muon 优化器」。
 # 环境变量：
 #   WORK_DIR  工作目录（含 envs/mllm-train、gpu.lock、data/T10/fleurs_dev.jsonl），默认是仓库旁边的 qwen3.5-asr-work
 set -uo pipefail

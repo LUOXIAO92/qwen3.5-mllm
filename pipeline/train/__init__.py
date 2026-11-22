@@ -24,6 +24,8 @@
 - master.py：全量微调时语言模型参数的两种更新方式：float32 主权重，或直接更新 bfloat16 参数（任务 #66）。
 - precision.py：全量微调时语言模型参数组的精度选项（主权重、梯度精度、舍入、AdamW 状态格式）与优化器的选择（任务 #66）。
 - torchao_adamw.py：按参数组选择状态格式的 AdamW，计算用 torchao 的实现（任务 #66）。
+- muon.py：--optimizer muon（任务 #78）：二维隐藏层权重矩阵用 torch.optim.Muon、其余用 AdamW 的分组，Muon 的选项、精度组合
+  （GroupStateMuon）与续训格式，见下文「Muon 优化器」。
 - placement.py：全量微调时语言模型参数在显存还是主机内存中更新：流式加载的层、卸载优化器（torchao 的
   CPUOffloadOptimizer）、CPU 上的 AdamW、合并成同一格式的续训状态（任务 #66，见下文「把语言模型参数放到主机内存」）。
 - train.py：训练入口，梯度累积、线性预热加余弦退火、定期 dev 损失、检查点与断点续训。
@@ -47,7 +49,8 @@
   速度选项与原实现一致的测试（需要 GPU，没有时跳过），以及拼接批次和 torch 交叉熵的测试（test_packing.py，GPU 部分
   还需要 flash-attn、causal-conv1d、fla），以及全量微调精度选项的测试（test_precision.py，torchao 部分没有 torchao 时跳过），
   以及语言模型参数在主机内存中更新的测试（test_placement.py，需要 GPU 和 torchao），以及纯续写格式的标签、聊天格式
-  与原实现逐位相同的测试（test_prompt_format.py，CPU），
+  与原实现逐位相同的测试（test_prompt_format.py，CPU），以及 Muon 的分组、计算与续训的测试（test_muon.py，CPU；
+  卸载优化器的部分需要 GPU），
   在仓库根目录运行 python -m unittest discover -s pipeline/train/tests -t .。
 
 训练清单
@@ -327,6 +330,95 @@ trainer_state.pt 用 map_location="cpu" 读入，主机上的状态直接使用�
 速度约为 Colab G4 的八分之一，只适合试跑或很短的训练。--offload-activations 在需要省下层边界的显存时打开，保持默认的
 提前上传。CPU 上的更新是瓶颈：以后如果要在小显存上长时间训练，可以让 CPU 更新流式加载的层与下一步前向中常驻的层重叠，
 或者只把一部分常驻参数的优化器卸载到主机。
+
+Muon 优化器（任务 #78）
+======================
+
+--optimizer muon 让二维隐藏层权重矩阵改用 Muon（PyTorch 2.13 自带的 torch.optim.Muon），其余参数仍用 AdamW；默认的
+--optimizer adamw 与以前完全相同。Muon 的计算、各项选项、精度组合和续训格式见 muon.py 的说明，参数放在哪里更新见 placement.py。
+
+用途。Muon 把动量近似正交化后再更新矩阵，在从头预训练语言模型时比 AdamW 用更少的计算达到同样的损失（下面的文献）。本项目的
+projector 从随机初始化开始训练，与这种情形接近；全量微调时语言模型来自已经预训练好的 Qwen3.5，Moonshot 的实验中用 AdamW
+预训练的模型改用 Muon 做监督微调，结果与 AdamW 相当或略差。Muon 每个参数只有一个状态（动量），默认精度下 2B 全量微调语言
+模型一侧的常驻显存从 33.9 GB 降到 28.4 GB。它还没有在 GPU 上训练过，效果和速度要等冒烟测试与对比训练。
+
+分组。可训练参数中 nn.Linear 的二维权重（词嵌入和输出层除外）用 Muon，其余用 AdamW（muon.classify，规则和拼接矩阵的说明见
+muon.py）。三种尺寸的分组如下（张量个数 / 参数个数，在 meta 设备上按真实配置建出模型数得；训练开始时打印在 muon.groups 和
+muon.adamw_kinds 中）：
+
+| | 0.8B | 2B | 4B |
+| --- | --- | --- | --- |
+| projector，Muon（linear_1、linear_2 的权重） | 2 / 314.6 万 | 2 / 838.9 万 | 2 / 1,179.6 万 |
+| projector，AdamW（两个偏置） | 2 / 2,048 | 2 / 4,096 | 2 / 5,120 |
+| 语言模型，Muon（注意力、Gated DeltaNet、MLP 的线性层） | 186 / 4.98 亿 | 186 / 13.73 亿 | 248 / 35.69 亿 |
+| 语言模型，AdamW | 134 / 2.55 亿 | 134 / 5.09 亿 | 178 / 6.37 亿 |
+| 其中词嵌入兼输出层 | 1 / 2.54 亿 | 1 / 5.09 亿 | 1 / 6.36 亿 |
+| 其中一维参数（归一化层、A_log、dt_bias） | 117 / 5.8 万 | 117 / 11.0 万 | 155 / 18.0 万 |
+| 其中短卷积 conv1d 的权重（三维） | 18 / 44.2 万 | 18 / 44.2 万 | 24 / 78.6 万 |
+
+学习率与权重衰减。--muon-lr-scaling 默认 match_rms_adamw：更新按 0.2·√max(行, 列) 缩放，幅度与 AdamW 相当，Muon 两组
+沿用 --lr、--language-model-lr，也可以用 --muon-lr、--language-model-muon-lr 另给。original 是 Keller Jordan 的缩放
+√max(1, 行/列)，更新幅度约为前者的 1/(0.2·√列数)（2B 中输入为 2048 维的矩阵约 1/9），所以必须另给 Muon 的学习率。
+--muon-weight-decay 默认等于 --weight-decay（本项目默认 0）；Moonshot 发现长时间训练时 Muon 需要权重衰减（他们用 0.1），
+需要时单独给出。--muon-momentum（默认 0.95）、--muon-nesterov（默认打开）、--muon-ns-steps（默认 5）取 torch 的默认值。
+Muon 各组与 AdamW 各组按同一条预热加余弦的曲线变化，训练日志中 lr、lm_lr 是 AdamW 两组的学习率，muon_lr、lm_muon_lr 是
+Muon 两组的。
+
+与其他选项的组合：
+
+| 选项 | 与 --optimizer muon 一起 |
+| --- | --- |
+| 只训练 projector、--train-language-model | 都支持 |
+| --language-model-master-weights、--language-model-grad-dtype、--language-model-rounding | 支持，同样作用于语言模型的 Muon 组，随机舍入时 Muon 的更新也随机舍入写回 |
+| --language-model-optimizer-states | 只决定 AdamW 部分（词嵌入等）的状态，五种格式都可用 |
+| --muon-momentum-dtype fp32、bf16 | 语言模型的 Muon 组动量的精度；projector 的 Muon 组始终 fp32 |
+| --offload-optimizer | 只卸载 AdamW 部分中元素不少于 4096 个的参数（词嵌入兼输出层、短卷积），Muon 部分留在显存中 |
+| 全量微调时的 --lm-blocks-to-swap | 不支持，报错；显存不足时的退让跳过流式加载语言模型的层这一档 |
+| 梯度裁剪、--grad-accum、--stop-at-step、续训、梯度检查点、--offload-activations、--pack-sequences、--deterministic、只训练 projector 时的 --lm-blocks-to-swap | 支持，与优化器无关 |
+
+显存。语言模型每个参数常驻显存的字节数：Muon 部分为 bfloat16 权重 2、主权重 4 或 0、梯度 4 或 2、动量 4 或 2；AdamW 部分
+与上文「全量微调」的表相同。下表最后三列是语言模型一侧的总量，括号中是同样精度下全部用 AdamW 时的数值（GB，10^9 字节）：
+
+| 主权重 | 梯度 | 舍入 | AdamW 状态 | Muon 动量 | 卸载优化器 | 每参数字节（Muon / AdamW） | 0.8B | 2B | 4B |
+| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |
+| fp32 | fp32 | 就近 | fp32 | fp32（默认） | 否 | 14 / 18 | 11.6（13.5） | 28.4（33.9） | 61.4（75.7） |
+| fp32 | fp32 | 就近 | fp32 | fp32 | 是 | 14 / 2 | 7.5（1.5） | 20.2（3.8） | 51.2（8.4） |
+| fp32 | bf16 | 就近 | fp32 | bf16 | 否 | 10 / 16 | 9.1（12.0） | 21.9（30.1） | 45.9（67.3） |
+| none | bf16 | 随机 | fp32 | fp32 | 否 | 8 / 12 | 7.0（9.0） | 17.1（22.6） | 36.2（50.5） |
+| none | bf16 | 随机 | fp32 | bf16 | 否 | 6 / 12 | 6.0（9.0） | 14.3（22.6） | 29.1（50.5） |
+| none | bf16 | 随机 | 8bit | bf16 | 否 | 6 / 6.03 | 4.5（4.5） | 11.3（11.3） | 25.3（25.4） |
+
+卸载优化器时括号中是全部用 AdamW、全部卸载的数值：Muon 部分不能卸载，所以 --offload-optimizer 加 Muon 省下的只有词嵌入
+那一部分（2B 约 8 GB）。8 bit 的 AdamW 状态已经很省，Muon 在这一行几乎不再省显存。
+
+计算量。Newton–Schulz 迭代每步的浮点运算次数与批次大小无关（muon.py「计算量」）：全量微调时 0.8B、2B、4B 每步分别约 11.7、
+68.2、213.1 TFLOP（5 次迭代），只训练 projector 时 0.09、0.52、0.80 TFLOP。本项目每批 16 条、360 秒音频约八千个 token，
+语言模型 Muon 部分的线性层前向加反传约为 6 × 参数个数 × token 数，即 0.8B 约 25、2B 约 68、4B 约 177 TFLOP，所以全量微调时
+正交化的计算量与这些线性层本身的计算相当，每步会明显变慢；只训练 projector 时多出的计算不到一步的 1%。Keller Jordan 估计的
+开销不到 1%，那是每步 50 万个 token 以上的预训练。加大每步的 token 数（更大的批次、--grad-accum）或减少 --muon-ns-steps 可以
+摊薄这部分开销。
+
+正确性（单元测试 test_muon.py，CPU）。按 2B 的结构在 meta 设备上分组，每个可训练参数恰好属于一组，参数个数与上表相同；
+GroupStateMuon 在 float32 与纯 bfloat16 两种组合下与 torch.optim.Muon 逐位相同，主权重配 bfloat16 梯度时与 torch 用同一份
+梯度逐位相同，直接更新 bfloat16 参数且就近舍入时等于 float32 中算出再舍入，随机舍入的平均等于 float32 的结果；缩小的
+Qwen3.5 模型（4 层）上只训练 projector 和全量微调各训练 3 步，与直接用 torch.optim.Muon 加 AdamW 写成的参照逐位相同；
+默认精度、纯 bfloat16、fp32 主权重 + bf16 梯度 + 8bit 状态 + bf16 动量、none + 随机舍入 + bf16 动量四种设置下，第 2 步停下
+再续训到第 3 步与不中断的训练逐位相同，动量保持保存时的精度。语言模型的真实前向在本机要用 GPU 上的内核，这些测试用只依赖
+参数的损失；--offload-optimizer 加 Muon 的测试（OffloadTest）需要 GPU，还没有运行。
+
+文献（2026-11-22 查阅）：
+
+- Keller Jordan，Muon: An optimizer for hidden layers in neural networks（https://kellerjordan.github.io/posts/muon/）：
+  Muon 只用于隐藏层的二维参数，标量和向量参数以及输入层、输出层（Transformer 的词嵌入和输出层）用 AdamW；Nesterov 动量
+  在作者试过的情形中都略好；bfloat16 中 5 次 Newton–Schulz 迭代，系数 (3.4445, −4.7750, 2.0315)；开销不超过 T·m/B（T 为
+  迭代次数，m 为模型宽度，B 为每步 token 数），NanoGPT 速通中约 0.7%；对 Q、K、V 分别正交化比合在一起好；Muon 是否适用于
+  微调和强化学习，作者写明还不知道。
+- Jingyuan Liu 等（Moonshot AI），Muon is Scalable for LLM Training（arXiv 2502.16982）：大规模训练需要加权重衰减，并把更新
+  按 0.2·√max(A, B) 缩放到 AdamW 更新的均方根（通常 0.2–0.4），这样可以沿用为 AdamW 调好的学习率和权重衰减（torch 的
+  match_rms_adamw）；计算最优的预训练中约为 AdamW 两倍的计算效率；RMSNorm、输出层和词嵌入用 AdamW；Muon 只有一个动量缓冲。
+  监督微调：Muon 预训练加 Muon 微调的组合最好；用 AdamW 预训练的 Qwen2.5-7B 改用 Muon 微调，结果与 AdamW 微调相当或略差
+  （MMLU 70.8 对 71.4，GSM8K 85.8 对 89.8），作者认为 Muon 在预训练阶段比在监督微调阶段更有效，预训练与微调优化器不一致的
+  问题有待研究。
 
 进度
 ====

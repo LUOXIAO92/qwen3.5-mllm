@@ -20,6 +20,9 @@
 
 projector 参数组很小（几百万个参数），始终是 float32 权重、float32 梯度、float32 状态，不受这几项影响。
 
+--optimizer muon（任务 #78，muon.py）时语言模型的二维隐藏层权重矩阵由 Muon 更新：前三项同样作用于这些矩阵，
+--language-model-optimizer-states 只决定其余参数（AdamW 部分）的状态，Muon 动量的精度由 --muon-momentum-dtype 决定。
+
 实现。torch 的 fused AdamW 要求权重、梯度和状态是同一种精度，所以只在两种组合中使用：默认的 fp32 主权重 + fp32 梯度
 + fp32 状态（以前的做法，续训逐位不变），以及 none + bf16 梯度 + bf16 状态 + 就近舍入（纯 bfloat16 的 AdamW）。
 其余组合用 torchao（0.18.0）的 AdamW 实现（torchao_adamw.py）：每个张量在 float32 中计算，状态按格式存放，随机舍入

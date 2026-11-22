@@ -93,6 +93,8 @@ pipeline/train/run.sh $DATASET/audio/qwen3.5-asr/v1/train/manifest-r1.jsonl orig
 
 全量微调让语言模型连同 projector 一起训练，音频塔和视觉塔仍冻结：加 `--train-language-model --language-model-lr <语言模型的峰值学习率>`，projector 的峰值学习率仍由 `--lr` 给出；通常再加 `--init-projector <只训练 projector 的检查点目录>`，从已经训练过的 projector 出发。语言模型以 bfloat16 计算、优化器更新 float32 主权重，每个检查点另存一份 bfloat16 的 `language_model.safetensors`。精度、显存和检查点格式见 `pipeline/train/__init__.py`「全量微调」。
 
+优化器默认是 AdamW。加 `--optimizer muon`（#78）时，projector 的两个权重矩阵和语言模型各层的线性层（注意力、Gated DeltaNet 的投影、MLP）改用 PyTorch 自带的 Muon，词嵌入兼输出层、归一化层、偏置、`A_log`、`dt_bias`、短卷积等其余参数仍用 AdamW；2B 的语言模型中 13.73 亿个参数用 Muon、5.09 亿个（几乎全是词嵌入）用 AdamW，训练开始时打印分组。默认的 `--muon-lr-scaling match_rms_adamw` 把 Muon 的更新缩放到与 AdamW 相当的幅度，Muon 沿用 `--lr` 和 `--language-model-lr`（`--muon-lr`、`--language-model-muon-lr` 可以另给）；`original` 是 Keller Jordan 的缩放，必须另给学习率。动量、Nesterov、Newton–Schulz 迭代次数和权重衰减各有选项，语言模型 Muon 组的动量可以存为 bf16（`--muon-momentum-dtype`）。精度选项、梯度裁剪、学习率曲线、续训、`--stop-at-step` 和拼接批次照常可用；`--offload-optimizer` 只卸载 AdamW 部分，全量微调时不能用 `--lm-blocks-to-swap`。Muon 每个参数只有一个动量，默认精度下 2B 全量微调语言模型一侧常驻 28.4 GB（只用 AdamW 时 33.9 GB），但每步多出的正交化计算与语言模型线性层本身的计算相当。用途、显存表、计算量和文献见 `pipeline/train/__init__.py`「Muon 优化器」，实现见 `pipeline/train/muon.py`。
+
 ## 7. 评测
 
 ```bash

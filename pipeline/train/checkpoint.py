@@ -19,6 +19,9 @@
   语言模型参数放在主机内存中更新时（--lm-blocks-to-swap、--offload-optimizer，placement.py），主权重和 AdamW 状态
   并回同样的格式保存（主机上的那部分是 CPU 张量），rng 中另有 host_rounding（主机内存中随机舍入的随机数状态）。
 
+--optimizer muon（任务 #78，muon.py）时 trainer_state.pt 的 optimizer 为 {"adamw": AdamW 部分, "muon": Muon 部分}，
+其余各项不变。
+
 <output-dir>/latest 记录最近一个完整写出的检查点目录名。
 """
 
