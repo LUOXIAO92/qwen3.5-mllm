@@ -370,7 +370,8 @@ def markdown(summary):
             if "think" in item:
                 think = item["think"]
                 lines.append(
-                    f"- 思考模式：有助手回答的样本 {think['samples_with_assistant']}，写出 </think> 的 {think['closed']}（{think['close_rate']:.1%}），"
+                    f"- 思考模式：没有循环的样本 {think['samples_with_assistant']}（其中没有助手回答的 {think.get('no_assistant', 0)}），"
+                    f"写出 </think> 的 {think['closed']}（{think['close_rate']:.1%}），"
                     f"没有写出的 {think['not_closed']}；思考 token 数 {think['reasoning_tokens']}；回答 token 数 {think['answer_tokens']}；"
                     f"没有写出 </think> 的样本的思考长度 {think['reasoning_tokens_not_closed']}"
                 )
