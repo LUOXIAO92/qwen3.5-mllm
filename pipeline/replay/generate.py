@@ -52,7 +52,7 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.replay.degeneration import degeneration_onset, loop_onset, near_loop_onset
-from pipeline.replay.prompts import CHAT_GROUPS, SELF_USER_GROUPS
+from pipeline.replay.groups import CHAT_GROUPS, SELF_USER_GROUPS
 from pipeline.replay.store import TOP_K, ShardReader, ShardWriter, read_all_records, repair
 from pipeline.tokenizer_fix import check_tokenizer
 
