@@ -12,6 +12,8 @@
 #                   从 $DRIVE_DIR/upload/<文件名>.gz 解压
 #   NOISE_TAR       背景声 tar（bundle.py，--root $DATASET），默认 $DRIVE_DIR/upload/noise-v2.tar
 #   EVAL_TAR        dev 清单 tar（bundle.py，--root <本机工作目录>），默认 $DRIVE_DIR/upload/fleurs-dev.tar
+#   REPLAY_TEXT_TAR、REPLAY_TEACHER_TAR  #71 C 组的回放数据（路径相对 $DATASET），默认 $DRIVE_DIR/upload/ 下的
+#                   replay-noloop-text.tar、replay-noloop-teacher.tar；不存在时跳过
 #   TORCH_INDEX     PyTorch 的包索引，默认 https://download.pytorch.org/whl/cu130
 set -euo pipefail
 : "${DRIVE_DIR:?请设置 DRIVE_DIR（Google Drive 上本项目的目录）}"
@@ -24,6 +26,8 @@ model="${MODEL_NAME:-qwen3.5-4b-mllm}"
 manifest="${TRAIN_MANIFEST:-$DATASET/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl}"
 noise_tar="${NOISE_TAR:-$upload/noise-v2.tar}"
 eval_tar="${EVAL_TAR:-$upload/fleurs-dev.tar}"
+replay_text_tar="${REPLAY_TEXT_TAR:-$upload/replay-noloop-text.tar}"
+replay_teacher_tar="${REPLAY_TEACHER_TAR:-$upload/replay-noloop-teacher.tar}"
 torch_index="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
 venv="$work/envs/mllm-train"
 requirements="$repo/pipeline/colab/requirements-train.txt"
@@ -98,6 +102,20 @@ if ! done_before eval; then
   step "解开 dev 清单 $eval_tar"
   tar -C "$work" -xf "$eval_tar"
   mark eval
+fi
+
+# 5b. #71 C 组的自生成回放数据：两个 tar 中的路径相对 $DATASET（text/qwen3.5-asr/replay-noloop/...），解到与本机相同的
+#     位置，训练和评测按 $DATASET/text/qwen3.5-asr/replay-noloop 读取。文本（索引与 token）和 top-32（kl32 与回放差距评测用）
+#     分开标记，只上传了其中一个时另一个以后再补。
+if ! done_before replay-text && [ -f "$replay_text_tar" ]; then
+  step "解开回放文本 $replay_text_tar"
+  tar -C "$DATASET" -xf "$replay_text_tar"
+  mark replay-text
+fi
+if ! done_before replay-teacher && [ -f "$replay_teacher_tar" ]; then
+  step "解开回放的 top-32 $replay_teacher_tar"
+  tar -C "$DATASET" -xf "$replay_teacher_tar"
+  mark replay-teacher
 fi
 
 # 6. 融合模型（不在仓库中）复制到仓库根目录

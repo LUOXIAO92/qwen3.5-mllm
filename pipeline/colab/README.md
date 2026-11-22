@@ -93,6 +93,7 @@ Drive 上的目录（`$DRIVE_DIR` 是 Drive 上本项目的目录）：
 | `$DRIVE_DIR/upload/qwen3.5-4b-mllm/` | 融合模型目录（仓库中没有，约 9.8 GB） |
 | `$DRIVE_DIR/upload/qwen3.5-2b-mllm/` | 全量微调用的 2B 融合模型目录（约 5.7 GB），见单元格 7 的全量微调变体 |
 | `$DRIVE_DIR/upload/v2b-2b-checkpoint-0005000/` | 全量微调的起点：本机 `<工作目录>/data/T61/v2b-2b/checkpoint-0005000/` 整个目录（`projector.safetensors` 与 `projector.json`，约 34 MB） |
+| `$DRIVE_DIR/upload/replay-noloop-text.tar`、`replay-noloop-teacher.tar` | #71 C 组的自生成回放数据（文本约 1.4 GB、top-32 约 17 GB），见单元格 7 的 #71 C 组 |
 | `$DRIVE_DIR/shards/v2b-e0/` | 索引和全部分片（`$SHARDS_DRIVE`） |
 | `$DRIVE_DIR/runs/v2b-4b/` | 训练输出目录：本机训练的输出目录复制过来，不含 `dataset/` |
 | `$DRIVE_DIR/wheels/` | 安装包缓存，第一次运行 `setup.sh` 时生成 |
@@ -276,6 +277,37 @@ pipeline/train/run.sh "$DATASET/audio/qwen3.5-asr/v2/train/manifest-v2b.jsonl" o
 - 学习率：同一组 0.8B 测试中，默认精度下把语言模型峰值学习率从 1e-5 降到 2e-6，前 2,000 步的 dev 损失反而更低（1.140 对 1.269）。2B 用 1e-5 训练 3 万步效果很好，较长训练中哪个学习率更好还不知道；4B 是否降低学习率，可以先各跑一小段比较 dev 损失再决定。
 
 **把语言模型参数放到主机内存（#66）。** 显存仍然不够时，三个训练参数把语言模型的一部分放到主机内存中（做法、支持的精度组合和本机测量见 `pipeline/train/__init__.py`「把语言模型参数放到主机内存」）：`--offload-optimizer`（梯度、主权重和 AdamW 状态放主机内存，显存中只留 bfloat16 权重）、`--lm-blocks-to-swap N`（末尾 N 层连权重也放主机内存，需要梯度检查点）、`--offload-activations`（梯度检查点留下的层输入放主机内存，反传时提前一层取回）。前两项要求 fp32 的 AdamW 状态和 `--grad-accum 1`。它们不在续训核对的配置中，同一段训练可以中途打开或关闭（例如 G4 上开始的训练在小显存的机器上加 `--offload-optimizer` 续训）。代价是 CPU 上的 AdamW：本机 16 核约每秒 14–15 亿个参数，主机内存每个放到主机的参数 16 字节（无主权重时 12 字节），另加训练进程本身约 20 GB。本机 RTX 5090 32 GB 上：2B 默认精度流式加载 12 层每秒 1.53 步（显存 22.6 GB）；4B 用 `--offload-optimizer --gradient-checkpointing --offload-activations` 加无主权重、随机舍入、fp32 状态，每秒 0.29 步，显存 11.8 GB，训练进程占主机内存 75 GB。G4 的 96 GB 显存放得下 4B 的默认精度（16 层梯度检查点，每秒 2.39 步），用这些选项只会更慢；它们的用处是在显存更小的机器上训练。开始前用 `free -g` 确认主机内存够用：4B 全部放到主机时，无主权重约需 75 GB，默认的 fp32 主权重约需 92 GB。
+
+**单元格 7（#71 C 组：纯 CPT 全量微调加自生成回放）。** 第一轮的全部步骤由无人值守的驱动程序 `pipeline/colab/c_runs.py` 完成：冒烟测试（回放单元测试在 GPU 上跑一遍；C-mix 用 ntp 训练 100 步，第 1 步另加最长的回放样本看峰值显存，第 50 步停下再续训，核对续训后取到的回放样本与日志一致；C-mix 用 kl32 加尾部项训练 20 步）→ 用修正后的分词器（#77）从随机初始化重新训练 CPT 格式的 projector，取训练损失突降那一步的检查点（每 100 步保存）→ C0、C-free_raw、C-free_chat、C-cont_raw、C-cont_chat、C-mix 六个运行依次全量微调 3 万步并评测（FLEURS test、指令遵循探针、每字困惑度、回放差距、思考检查）→ 参考模型的思考检查、回放差距与困惑度 → 汇总。各阶段的设置、续跑和停下的规则见 `c_runs.py` 开头，回放本身见 `pipeline/train/replay.py`。
+
+开始前在本机把回放数据打包成两个 tar（路径相对 `$DATASET`，不含 `prompt_chat`），上传到 `$DRIVE_DIR/upload/`：
+
+```bash
+cd $DATASET
+tar -cf replay-noloop-text.tar --exclude='*/teacher' --exclude='text/qwen3.5-asr/replay-noloop/prompt_chat' text/qwen3.5-asr/replay-noloop
+tar -cf replay-noloop-teacher.tar text/qwen3.5-asr/replay-noloop/*/*/teacher
+```
+
+`setup.sh` 看到这两个文件就解到 `$DATASET` 下与本机相同的位置（文本约 1.4 GB、top-32 约 17 GB，Drive 上约 35–50 MB/s 时复制约 6–8 分钟，本地盘多占约 19 GB）；没有时跳过，不影响其他训练。单元格 4 运行 `setup.sh` 时与全量微调变体一样让它复制 2B 模型（`MODEL_NAME=qwen3.5-2b-mllm`），之后准备 FLEURS test（`python -m pipeline.eval.fleurs_prepare`，放在 `$WORK_DIR/data/T02`，同 #71 第一轮）。单元格 5、6 不用运行（驱动程序自己为每个运行准备分片窗口，领先 1 万步、预算 80 GB），在后台启动驱动程序：
+
+```python
+import os
+import subprocess
+
+driver = subprocess.Popen(
+    args = [os.environ["PY"], "-m", "pipeline.colab.c_runs"],
+    cwd = os.environ["REPO"],
+    start_new_session = True,
+    stdout = open(file = os.environ["WORK_DIR"] + "/c71-driver.out", mode = "a"),
+    stderr = subprocess.STDOUT,
+)
+```
+
+- 开始时打印并在 `status.json` 中写下估计：冒烟测试与第一次复制常驻分片约 33 分钟，projector 约 12 分钟，C0 训练约 110 分钟、加回放的运行约 127 分钟（冒烟测试后按实测速度重估），每个运行的评测约 57 分钟（其中思考检查约 18 分钟），参考模型约 27 分钟；合计约 19 小时、约 190 个计算单元（G4 约 10 单元/小时，`C71_CU_PER_HOUR` 可改）。只看估计时加 `C71_ESTIMATE_ONLY=1`。
+- 状态与日志：`$WORK_DIR/c71/status.json`、`driver.log`，随时复制到 `$DRIVE_DIR/runs/c71-status/`；每个训练的日志在 `$WORK_DIR/<运行名>.log`，回放的取样记录在输出目录的 `replay_log.jsonl`。运行名为 `v2b-2b-cpt77-<c0|c-free_raw|...>`，输出与评测结果在 Drive 的 `runs/<运行名>/`（评测在其中的 `eval/`），参考模型在 `runs/c71-ref/`，汇总在 `runs/c71-summary/`。
+- Drive 上每个运行的检查点只有 projector、日志和 `projector.json`；最近检查点的 `trainer_state.pt`（约 26 GB）在训练停下或结束时复制过去（只留这一份），训练完成时再复制最后检查点的 `language_model.safetensors`。训练中途也要定期保存续训状态时设 `C71_STATE_SYNC_STEPS=10000`（Drive 上删除的旧文件会进回收站、占用空间）。
+- 会话时限：默认在驱动程序启动后 23 小时内收尾（`C71_DEADLINE_HOURS`）：训练在时限前保存并停下，评测放不下时不开始，状态为 `paused`、退出码 75。新会话从单元格 1 开始，跑完单元格 4 和 FLEURS 准备后重新启动驱动程序，已完成的阶段跳过，停下的训练从 Drive 上的 `trainer_state.pt` 续训。冒烟测试失败、训练非正常退出、找不到突降点时状态为 `blocked`，停下等协调者处理。
+- 只跑其中几个运行：`C71_RUNS=c0,c-mix`；回放比例 `C71_RATIO`（默认 0.5）；一步损失的分母 `C71_REPLAY_NORM`（默认 step，即 ASR 与回放的全部损失 token 一起取平均；回放整条加入、集中在少数步里，按数据长度模拟的实际梯度份额只有 4%–20%，各组不同，asr 时约为 r / (1 + r)，见 `pipeline/train/replay.py`「损失归一化与实际权重」）；思考检查的生成上限 `C71_THINK_MAX_NEW`（默认 16384，降低可省时间，比较的各模型要用同一个上限）。
 
 **单元格 8：查看进度。**
 

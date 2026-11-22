@@ -95,6 +95,8 @@ pipeline/train/run.sh $DATASET/audio/qwen3.5-asr/v1/train/manifest-r1.jsonl orig
 
 优化器默认是 AdamW。`--optimizer muon`（#78）是实验选项：代码与 CPU 测试已完成，还没有在 GPU 上做过训练对比，正式实验仍用 AdamW。加上它时，projector 的两个权重矩阵和语言模型各层的线性层（注意力、Gated DeltaNet 的投影、MLP）改用 PyTorch 自带的 Muon，词嵌入兼输出层、归一化层、偏置、`A_log`、`dt_bias`、短卷积等其余参数仍用 AdamW；2B 的语言模型中 13.73 亿个参数用 Muon、5.09 亿个（几乎全是词嵌入）用 AdamW，训练开始时打印分组。默认的 `--muon-lr-scaling match_rms_adamw` 把 Muon 的更新缩放到与 AdamW 相当的幅度，Muon 沿用 `--lr` 和 `--language-model-lr`（`--muon-lr`、`--language-model-muon-lr` 可以另给）；`original` 是 Keller Jordan 的缩放，必须另给学习率。动量、Nesterov、Newton–Schulz 迭代次数和权重衰减各有选项，语言模型 Muon 组的动量可以存为 bf16（`--muon-momentum-dtype`）。精度选项、梯度裁剪、学习率曲线、续训、`--stop-at-step` 和拼接批次照常可用；`--offload-optimizer` 只卸载 AdamW 部分，全量微调时不能用 `--lm-blocks-to-swap`。Muon 每个参数只有一个动量，默认精度下 2B 全量微调语言模型一侧常驻 28.4 GB（只用 AdamW 时 33.9 GB），但每步多出的正交化计算与语言模型线性层本身的计算相当。用途、显存表、计算量和文献见 `pipeline/train/__init__.py`「Muon 优化器」，实现见 `pipeline/train/muon.py`。
 
+全量微调时可以混入自生成回放（#71 C 组，数据见第 9 节）：加 `--replay-dir $DATASET/text/qwen3.5-asr/replay-noloop --replay-groups free_raw=1 --replay-ratio 0.5`（需要 `--train-language-model` 和 `--pack-sequences`）。ASR 批次、训练计划和步数都不变，每一步按「回放损失 token 数 / ASR 损失 token 数」的长期平均为 r 整条取回放样本（从不截断），短样本接在 ASR 拼接行后面，超过 `--replay-inline-max-tokens`（默认 2,048）的长样本另成同一步内的纯文本微批。损失只算参考模型生成的部分：无模板组是全部生成 token（cont_raw 不含人写的文档开头），带模板的组只算助手轮（含结尾的 `<|im_end|>`，free_chat_think 含推理和 `</think>`），模型自己写的用户轮只作上下文。`--replay-groups` 写多组时按 token 数混合（例如五组各 `=1`）；`--replay-loss ntp`（默认）是对采样 token 的交叉熵，`kl32` 是对参考模型 top-32 的截断前向 KL（`--replay-kl-tail` 加尾部项）；`--replay-norm step`（默认）把一步内 ASR 与回放的全部损失 token 一起取平均。开启回放时训练日志的 `loss` 只统计 ASR，另有回放的总损失、各组损失和实际比例，取样记录在输出目录的 `replay_log.jsonl`，续训时抽样器从检查点恢复。做法与长样本对实际权重的影响见 `pipeline/train/replay.py` 开头，Colab 上第一轮的无人值守流程见 [colab/README.md](colab/README.md) 单元格 7 的 #71 C 组。
+
 ## 7. 评测
 
 ```bash
@@ -128,6 +130,19 @@ flock <工作目录>/gpu.lock python -m pipeline.eval.instruct_probe \
     --model-dir qwen3.5-2b-mllm --cascade \
     --manifest-dir $DATASET/audio/qwen3.5-asr/fleurs --output-dir <工作目录>/data/T72/2b-cascade
 ```
+
+全量微调后的遗忘与思考能力（#71）另有三个脚本，都用 `--model-dir <融合模型目录>` 加可选的 `--language-model <检查点>/language_model.safetensors`，不给时评测原始语言模型：
+
+```bash
+flock <工作目录>/gpu.lock python -m pipeline.eval.lm_ppl --model-dir qwen3.5-2b-mllm --language-model <检查点>/language_model.safetensors \
+    --manifest-dir $DATASET/audio/qwen3.5-asr/fleurs --output <输出目录>/lm_ppl.json
+flock <工作目录>/gpu.lock python -m pipeline.eval.replay_gap --model-dir qwen3.5-2b-mllm --language-model <检查点>/language_model.safetensors \
+    --replay-dir $DATASET/text/qwen3.5-asr/replay-noloop --output-dir <输出目录>/replay_gap
+flock <工作目录>/gpu.lock python -m pipeline.eval.think_check --model-dir qwen3.5-2b-mllm --language-model <检查点>/language_model.safetensors \
+    --replay-dir $DATASET/text/qwen3.5-asr/replay-noloop --output-dir <输出目录>/think
+```
+
+`lm_ppl` 是语言模型对 FLEURS 参考文本的每字困惑度（与 #66、#71 第一轮的计算相同）。`replay_gap` 在五组回放评测集上按训练时的损失位置算每 token 负对数似然，减去参考模型的（teacher 中的 `lp.f32`），得到前向 KL 的估计，free_chat_think 另分推理和回答。`think_check` 用 free_chat_think 评测集中参考模型自己写的 200 条提问开启思考生成（温度 1、不设 top-k / top-p，最多 16,384 个新 token），统计写完 `</think>` 的比例、推理与回答的长度和循环比例。
 
 ## 8. 在 Google Colab 上训练
 
