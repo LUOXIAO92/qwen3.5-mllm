@@ -303,3 +303,19 @@ Common Voice 和 Tatoeba 的质量因语言而异。Common Voice 的 id、ms 句
 - **波斯语**：优先使用保留 ZWNJ 的来源；网页语料可用 hazm 补全一部分 ZWNJ，并把 ي、ك 统一为 ی、ک；核对时把 ZWNJ 与空格视为等价。
 - **从右到左文本**：阿拉伯语、波斯语中删除 LRM、RLM 控制符，修正写在行首的句末标点，含拉丁字母的句子视情况丢弃。
 - **数字**：ASCII、阿拉伯-印度（٠–٩）、波斯（۰–۹）三套数字并存，先统一再转写读法；土耳其语数字后的后缀要随读法做元音和谐。
+
+## 回放文本的用户提问（#70）
+
+自生成回放的第五组 prompt_chat 用指令数据集中真人写的用户提问作用户消息，由参考模型写回答（脚本 `pipeline/replay/user_prompts.py`，用法见 `pipeline/README.md` 第 9 节）。只用提问，不用数据集中的回答。两份数据都不需要申请，2026-11-22 读取数据卡核对过许可，下载到 `$DATASET/text/<机构>/<数据集名>`。
+
+### [CohereLabs/aya_dataset](https://huggingface.co/datasets/CohereLabs/aya_dataset)
+
+- **内容**：约 20 万条人写的指令与回答，覆盖 65 种语言，字段 `inputs`（提问）、`targets`（回答）、`language`、`language_code`、`annotation_type`。
+- **用法**：只取 `inputs`；`test` 划分（1,750 条，项目语言中有阿拉伯语、土耳其语、英语、简体中文、葡萄牙语）作评测用，`train` 划分作训练用。语言按 `language_code` 对应：阿拉伯语标准语与各地方言（arb、ary、arz、ars、acq、ajp）算 ar，简体与繁体中文都算 zh，标准马来语 zsm 算 ms，Filipino 算 fil，伊朗波斯语 pes 算 fa。训练集中重复的提问较多（规范化后约 1.3 万条重复）。
+- **许可**：Apache-2.0。
+
+### [OpenAssistant/oasst2](https://huggingface.co/datasets/OpenAssistant/oasst2)
+
+- **内容**：众包的多轮对话树，按消息存放，字段含 `parent_id`、`role`、`lang`、`review_result`、`deleted`、`text`。
+- **用法**：每棵树只取第一条用户消息（`parent_id` 为空、`role` 为 prompter、`review_result` 为真、没有删除）；`validation` 划分作评测用，`train` 划分作训练用。语言取 `lang` 的主标签（pt-BR 算 pt），项目语言以英语、西班牙语、俄语、中文、德语为主。
+- **许可**：Apache-2.0。

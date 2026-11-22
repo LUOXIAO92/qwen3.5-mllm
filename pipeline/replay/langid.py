@@ -17,7 +17,7 @@ from pathlib import Path
 from pipeline.text.langid import LangIdentifier
 from pipeline.text.langs import GLOTLID_LABELS
 
-GROUPS = ("free_raw", "free_chat", "cont_raw", "cont_chat")
+GROUPS = ("free_raw", "free_chat", "cont_raw", "cont_chat", "prompt_chat")
 SPLITS = ("eval", "train")
 LABEL_TO_LANG = {label: lang for lang, labels in GLOTLID_LABELS.items() for label in labels}
 MAX_CHARS = 20000

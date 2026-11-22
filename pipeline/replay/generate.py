@@ -61,7 +61,15 @@ PRIOR_SAMPLES = 20
 
 
 def parse_plan(plan):
-    return [tuple(item.split(":")) for item in plan.split(",") if item]
+    """「组:划分」或「组:划分@部分」的列表，返回 (组, 划分, 部分或 None)。"""
+    items = []
+    for item in plan.split(","):
+        if not item:
+            continue
+        name, _, part = item.partition("@")
+        group, split = name.split(":")
+        items.append((group, split, part or None))
+    return items
 
 
 def parse_targets(text):
@@ -140,7 +148,7 @@ class Generator:
             dtype = "bfloat16",
             language_model_only = True,
             gpu_memory_utilization = args.gpu_memory_utilization,
-            max_model_len = args.max_new_tokens + 512,
+            max_model_len = args.max_model_len or args.max_new_tokens + 512,
             max_num_seqs = args.max_num_seqs,
             max_num_batched_tokens = args.max_num_batched_tokens,
             enable_prefix_caching = False,
@@ -175,16 +183,19 @@ class Generator:
             output_kind = self.delta,
         )
 
-    def run_split(self, group, split, target, deadline):
+    def run_split(self, group, split, target, deadline, part = None):
+        """生成一个（组, 划分）；part 不为空时只投放提示清单中 `part` 字段等于它的提示，进度也只计这一部分。"""
         args = self.args
         split_dir = Path(args.replay_dir) / group / split
         raw_dir = split_dir / "raw"
         raw_dir.mkdir(parents = True, exist_ok = True)
         repair(raw_dir = raw_dir)
-        records = read_all_records(raw_dir = raw_dir)
-        done = {record["prompt_index"] for record in records}
+        all_records = read_all_records(raw_dir = raw_dir)
+        done = {record["prompt_index"] for record in all_records}
+        records = [record for record in all_records if part is None or record.get("part") == part]
         kept_total = sum(record["kept_gen"] for record in records)
-        inflight_path = raw_dir / "inflight.pkl"
+        inflight_path = raw_dir / ("inflight.pkl" if part is None else f"inflight-{part}.pkl")
+        label = f"{group}/{split}" + (f"@{part}" if part else "")
         suspended = []
         if inflight_path.exists():
             with open(inflight_path, "rb") as handle:
@@ -192,18 +203,18 @@ class Generator:
                 saved = pickle.load(handle)
             suspended = [Stream.restore(fields = fields) for fields in saved if fields["state"]["row"]["prompt_index"] not in done]
         if kept_total >= target and not suspended:
-            print(f"[{group}/{split}] 已有 {kept_total} 个保留 token，达到目标 {target}，跳过", flush = True)
+            print(f"[{label}] 已有 {kept_total} 个保留 token，达到目标 {target}，跳过", flush = True)
             inflight_path.unlink(missing_ok = True)
             return True
         with open(split_dir / "prompts.jsonl", encoding = "utf-8") as handle:
             prompts = [json.loads(line) for line in handle]
         started = done | {stream.state["row"]["prompt_index"] for stream in suspended}
-        pending = (row for row in prompts if row["prompt_index"] not in started)
+        pending = (row for row in prompts if row["prompt_index"] not in started and (part is None or row.get("part") == part))
         between_ids = None
         if group == "free_chat":
             templates = json.loads((Path(args.replay_dir) / "templates.json").read_text(encoding = "utf-8"))
             between_ids = templates["free_chat"]["between_ids"]
-        main_role = "assistant" if group in ("free_chat", "cont_chat") else "text"
+        main_role = "assistant" if group in ("free_chat", "cont_chat", "prompt_chat") else "text"
 
         writer = None
         streams = {}
@@ -220,7 +231,7 @@ class Generator:
         t_start = time.time()
         t_log = t_start
         print(
-            f"[{group}/{split}] 开始：已完成 {len(records)} 条，保留 token {kept_total} / {target}，接着生成上次暂停的 {len(suspended)} 条",
+            f"[{label}] 开始：已完成 {len(records)} 条，保留 token {kept_total} / {target}，接着生成上次暂停的 {len(suspended)} 条",
             flush = True,
         )
 
@@ -291,6 +302,7 @@ class Generator:
             record = {
                 "sample_id": f"{group}-{split}-{row['prompt_index']:07d}",
                 "prompt_index": row["prompt_index"],
+                **({"part": row["part"]} if "part" in row else {}),
                 "status": status,
                 "n_gen": int(sum(len(arrays[0]) for arrays in state["arrays"])),
                 "kept_gen": int(kept),
@@ -417,7 +429,7 @@ class Generator:
                 t_log = now
                 elapsed = now - t_start
                 print(
-                    f"[{group}/{split}] {elapsed:.0f}s 完成 {counters['samples']} 条，本次解码 {counters['decoded']} token"
+                    f"[{label}] {elapsed:.0f}s 完成 {counters['samples']} 条，本次解码 {counters['decoded']} token"
                     f"（{counters['decoded'] / max(elapsed, 1e-9):.0f} tok/s），因循环中止 {counters['loop_aborts']}，"
                     f"在途 {len(streams)}，保留 {kept_total} / {target}",
                     flush = True,
@@ -434,6 +446,7 @@ class Generator:
                 "shard": shard,
                 "group": group,
                 "split": split,
+                "part": part,
                 "samples": counters["samples"],
                 "gen_tokens": counters["gen_tokens"],
                 "decoded_tokens": counters["decoded"],
@@ -458,7 +471,7 @@ class Generator:
             with open(raw_dir / "runs.jsonl", "a", encoding = "utf-8") as handle:
                 handle.write(json.dumps(run, ensure_ascii = False) + "\n")
         print(
-            f"[{group}/{split}] 本次 {elapsed:.0f}s，完成 {counters['samples']} 条，解码 {counters['decoded']} token"
+            f"[{label}] 本次 {elapsed:.0f}s，完成 {counters['samples']} 条，解码 {counters['decoded']} token"
             f"（{counters['decoded'] / max(elapsed, 1e-9):.0f} tok/s），因循环中止 {counters['loop_aborts']}，"
             f"暂停 {counters['suspended']} 条，保留累计 {kept_total} / {target}",
             flush = True,
@@ -491,6 +504,7 @@ def main():
     )
     parser.add_argument("--topk", type = int, default = TOP_K, help = f"每个生成位置另存的 top-k 对数概率个数，只能取 {TOP_K} 或 0（不存）")
     parser.add_argument("--max-new-tokens", type = int, default = MAX_NEW_TOKENS)
+    parser.add_argument("--max-model-len", type = int, default = 0, help = "提示加生成的最大长度，默认 max-new-tokens + 512；带工具调用上下文的长提示需要调大")
     parser.add_argument("--max-num-seqs", type = int, default = 256, help = "并发序列数；KV 缓存约 177 万 token")
     parser.add_argument(
         "--max-inflight",
@@ -517,15 +531,16 @@ def main():
     deadline = time.time() + args.time_budget
     targets = parse_targets(text = args.target)
     all_done = True
-    for group, split in parse_plan(plan = args.plan):
+    for group, split, part in parse_plan(plan = args.plan):
         if time.time() >= deadline:
             all_done = False
             break
         finished = generator.run_split(
             group = group,
             split = split,
-            target = targets.get(f"{group}:{split}", targets.get(split)),
+            target = targets.get(f"{group}:{split}@{part}", targets.get(f"{group}:{split}", targets.get(split))),
             deadline = deadline,
+            part = part,
         )
         all_done = all_done and finished
         if not finished:

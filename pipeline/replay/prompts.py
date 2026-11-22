@@ -44,6 +44,8 @@ from pipeline.replay.first_token import first_token_logprobs, sample_first
 from pipeline.tokenizer_fix import check_tokenizer
 
 GROUPS = ("free_raw", "free_chat", "cont_raw", "cont_chat")
+# 第五组 prompt_chat（数据集中的真人提问 + 参考模型写的回答）只在丢弃循环的回放目录中，提示由 user_prompts 写出
+ALL_GROUPS = GROUPS + ("prompt_chat",)
 SPLITS = ("eval", "train")
 CONTINUE_INSTRUCTION = "Continue writing the following text."
 MIN_PREFIX_TOKENS = 64

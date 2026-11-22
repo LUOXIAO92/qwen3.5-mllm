@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.replay.degeneration import gzip_ratio, loop_onset, max_window_repeat, near_loop_onset, ngram_repeat_rate
-from pipeline.replay.prompts import GROUPS, SPLITS
+from pipeline.replay.prompts import ALL_GROUPS, SPLITS
 from pipeline.replay.store import ShardReader, read_all_records
 from pipeline.tokenizer_fix import check_tokenizer
 
@@ -82,6 +82,11 @@ def prompt_meta(row, prompt, group):
         for key in ("prefix_id", "source", "source_license", "source_ref", "doc_id", "prefix_text", "prefix_tokens"):
             row[key] = prompt[key]
         row["doc_lang"] = prompt["lang"]
+    if group == "prompt_chat":
+        for key in ("part", "kind", "source", "source_license", "source_lang", "source_ref", "user_text", "user_tokens", "context_tokens"):
+            if key in prompt:
+                row[key] = prompt[key]
+        row["prompt_lang"] = prompt.get("lang") or "unknown"
 
 
 def process(job):
@@ -179,7 +184,7 @@ def process(job):
         stats_text = generated
     else:
         user = content(ids = kept_arrays[0]) if group == "free_chat" else None
-        assistant = content(ids = kept_arrays[-1]) if (group == "cont_chat" or len(kept_arrays) > 1) else ""
+        assistant = content(ids = kept_arrays[-1]) if (group in ("cont_chat", "prompt_chat") or len(kept_arrays) > 1) else ""
         if group == "free_chat":
             row["user_text"] = user
         row["assistant_text"] = assistant
@@ -256,7 +261,7 @@ def main():
     parser = argparse.ArgumentParser(description = __doc__, formatter_class = argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required = True, help = "参考模型目录（取分词器）")
     parser.add_argument("--replay-dir", required = True)
-    parser.add_argument("--groups", nargs = "+", default = list(GROUPS))
+    parser.add_argument("--groups", nargs = "+", default = list(ALL_GROUPS))
     parser.add_argument("--splits", nargs = "+", default = list(SPLITS))
     parser.add_argument("--jobs", type = int, default = 8)
     parser.add_argument("--no-filter", action = "store_true", help = "不截断、不丢弃，循环只作为元数据")

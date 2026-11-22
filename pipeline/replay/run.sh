@@ -7,12 +7,13 @@
 # 筛选模式（默认，FILTER=1，写入 $DATASET/text/qwen3.5-asr/replay）的步骤依次为
 # export prefixes prompts generate finalize langid nll report。
 # 不筛选模式（FILTER=0，写入 $DATASET/text/qwen3.5-asr/replay-unfiltered）的步骤依次为
-# export prompts generate finalize langid estimate teacher verify report：沿用筛选目录的文档开头和自由生成两组的提示，
-# 续写两组的提示用修正后的分词器重新写出；生成时不检查循环、不保存 top-20；生成完成后统计 token 数与磁盘需求，
-# 再用参考模型前向一遍，保存每个生成位置的 top-32 分布。
+# export prompts generate finalize langid report：沿用筛选目录的文档开头和自由生成两组的提示，续写两组的提示用修正后的
+# 分词器重新写出；生成时不检查循环、不保存 top-20，每条样本生成到结束符或上限，循环只作为元数据。
 # 丢弃循环模式（FILTER=noloop，写入 $DATASET/text/qwen3.5-asr/replay-noloop）的步骤依次为
-# import generate finalize langid estimate teacher verify report：import 把不筛选目录中没有循环的样本复制过来、有循环的
-# 只记元数据；generate 发现循环就中止并整条丢弃，其余样本原样保留，目标按保留的 token 数计；top-32 只算保留的样本。
+# import user_prompts generate finalize langid estimate teacher verify report：import 把不筛选目录中没有循环的样本复制
+# 过来、有循环的只记元数据；user_prompts 写出第五组 prompt_chat 的提示（数据集中的真人提问，AGENT_CONTEXTS 给出时
+# 另外追加工具调用与编程上下文）；generate 发现循环就中止并整条丢弃，其余样本原样保留，目标按保留的 token 数计；
+# estimate 统计保留的 token 数与磁盘需求，teacher 再用参考模型前向一遍，保存保留样本每个生成位置的 top-32 分布。
 # 不给参数时执行当前模式的全部步骤。每一步都可以单独重跑；generate 与 teacher 每次持有 GPU 锁约 TIME_BUDGET 秒，
 # 没有完成就释放锁再续跑。每次占用 GPU 之前检查 nvidia-smi：有其他进程占着显存（例如 ComfyUI）就等待，不结束别人的进程。
 set -euo pipefail
@@ -38,13 +39,20 @@ elif [ "$FILTER" = noloop ]; then
     REPLAY="${REPLAY:-$DATASET/text/qwen3.5-asr/replay-noloop}"
     OUT="${OUT:-$WORK_DIR/data/T70/noloop}"
     # 无模板两组的训练用目标降为 1,000 万保留 token（用户 2026-11-22）
-    TARGET="${TARGET:-eval=1000000,train=30000000,free_raw:train=10000000,cont_raw:train=10000000}"
+    # prompt_chat 的训练用目标分成数据集提问 2,000 万与工具调用、编程上下文 1,000 万，评测用 70 万与 30 万
+    TARGET="${TARGET:-eval=1000000,train=30000000,free_raw:train=10000000,cont_raw:train=10000000,prompt_chat:eval@instruct=700000,prompt_chat:train@instruct=20000000,prompt_chat:eval@agent=300000,prompt_chat:train@agent=10000000}"
     # 每条投放的提示平均保留的 token 数（有循环的样本按 0 计），由不筛选目录估计
-    PRIOR_MEAN="${PRIOR_MEAN:-free_raw=700,free_chat=750,cont_raw=800,cont_chat=400}"
+    PRIOR_MEAN="${PRIOR_MEAN:-free_raw=700,free_chat=750,cont_raw=800,cont_chat=400,prompt_chat=400}"
     MAX_INFLIGHT="${MAX_INFLIGHT:-0}"
-    GEN_FLAGS=(--drop-loops --topk 0)
+    # 工具调用上下文的提示最长 12,288 个 token，加上最多 16,384 个生成 token
+    MAX_MODEL_LEN="${MAX_MODEL_LEN:-28800}"
+    GEN_FLAGS=(--drop-loops --topk 0 --max-model-len "$MAX_MODEL_LEN")
     PLAN_DEFAULT="cont_raw:train,cont_chat:train,free_raw:eval,free_chat:eval,cont_raw:eval,cont_chat:eval,free_chat:train,free_raw:train"
-    DEFAULT_STEPS=(import generate finalize langid estimate teacher verify report)
+    PLAN_DEFAULT="$PLAN_DEFAULT,prompt_chat:eval@instruct,prompt_chat:train@instruct"
+    if [ -n "${AGENT_CONTEXTS:-}" ]; then
+        PLAN_DEFAULT="$PLAN_DEFAULT,prompt_chat:eval@agent,prompt_chat:train@agent"
+    fi
+    DEFAULT_STEPS=(import user_prompts generate finalize langid estimate teacher verify report)
 else
     REPLAY="${REPLAY:-$UNFILTERED_REPLAY}"
     OUT="${OUT:-$WORK_DIR/data/T70/unfiltered}"
@@ -54,7 +62,7 @@ else
     # 无模板两组的样本大多写到 16k 上限：在途 144 条时 KV 缓存平均约用七成，256 条会超出容量、反复抢占重算
     MAX_INFLIGHT="${MAX_INFLIGHT:-free_raw=144,cont_raw=144,free_chat=384,cont_chat=384}"
     GEN_FLAGS=(--no-filter --topk 0)
-    DEFAULT_STEPS=(export prompts generate finalize langid estimate teacher verify report)
+    DEFAULT_STEPS=(export prompts generate finalize langid report)
 fi
 # 文档开头（prefixes 的输出）与自由生成两组提示的来源：两种模式共用筛选目录中的
 PREFIXES="${PREFIXES:-$FILTERED_REPLAY/prefixes}"
@@ -138,6 +146,15 @@ step_prompts() {
         done
     done
     "$EVAL_ENV" -m pipeline.replay.prompts --groups cont_raw cont_chat --model "$REF" --replay-dir "$REPLAY" --prefixes-dir "$PREFIXES"
+}
+
+step_user_prompts() {
+    if [ ! -f "$REPLAY/prompt_chat/train/prompts.jsonl" ]; then
+        "$EVAL_ENV" -m pipeline.replay.user_prompts --model "$REF" --raw-root "$DATASET/text" --replay-dir "$REPLAY"
+    fi
+    if [ -n "${AGENT_CONTEXTS:-}" ]; then
+        "$EVAL_ENV" -m pipeline.replay.user_prompts --model "$REF" --replay-dir "$REPLAY" --agent "$AGENT_CONTEXTS"
+    fi
 }
 
 step_import() {

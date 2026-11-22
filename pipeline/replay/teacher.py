@@ -396,7 +396,8 @@ def main():
     parser.add_argument("--min-free-gb", type = float, default = 100, help = "写完后数据盘至少剩余的空间")
     parser.add_argument("--log-every", type = float, default = 60)
     args = parser.parse_args()
-    plan = parse_plan(plan = args.plan)
+    # 计划中的「部分」只用于生成，这里按（组, 划分）去重
+    plan = list(dict.fromkeys((group, split) for group, split, _ in parse_plan(plan = args.plan)))
 
     if args.estimate:
         total = 0

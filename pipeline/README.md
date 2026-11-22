@@ -150,18 +150,20 @@ WORK_DIR=<工作目录> DATASET=$DATASET MLLM=<2B 融合模型目录> ORIGINAL=<
 
 训练时建议直接使用保存的 token id（提示片段的 `ids` 加生成片段的 `[offset, offset + keep)`），不要把文本解码后重新分词。#77 修正之前，transformers 5.16.1 按原始目录 `tokenizer_config.json` 中的 `Qwen2Tokenizer` 加载 Qwen3.5 分词器，换掉了 `tokenizer.json` 中的预切分规则（原规则 `[\p{L}\p{M}]+` 变成 `\p{L}+`），泰语的元音、声调符号和阿拉伯语的元音符号都会把词切开：模型自己写出的泰语文本重新分词后 token 数是采样时的 1.1–1.8 倍。现在 `export` 把参考模型目录的分词器类改为 `Qwen3_5Tokenizer`，各步加载分词器后都检查切法。修正之前写出的 cont_raw、cont_chat 提示仍是旧的切法：泰语几乎全部、阿拉伯语约四成、波斯语约 6% 的文档开头与修正后的分词不同（#77）。free_chat 约 2% 的助手回答在空思考块之后又写了一段思考（含 `</think>`），按聊天模板重新渲染时会被拆成思考与回答两部分，用 token id 训练不受影响。
 
-### 不筛选的纯自回放
+### 不筛选的自回放与丢弃循环的回放
 
-按 arXiv 2605.26097 的做法，另有一份完全不筛选的回放文本，放在 `$DATASET/text/qwen3.5-asr/replay-unfiltered/<组>/<划分>/`，与上面筛选过的 `replay/` 并存，方便以后比较两者。生成的设置与筛选版相同（同一个参考模型、四组的开头与模板、温度 1、不设 top-k / top-p、每条最多 16,384 个生成 token），区别只在于：`generate --no-filter` 不检查循环、不提前中止，每条样本都生成到 `<|im_end|>` / `<|endoftext|>` 或 16,384 个 token 的上限；`finalize --no-filter` 不截断、不丢弃，全部原样保留，循环起点（`loop_onset`、`pre_loop_tokens`）、gzip 压缩率和语言只作为元数据记录；free_chat 的用户消息没有正常结束时，这条样本只有用户消息，同样保留。因为样本都要写完，长样本与短样本一样计入，每个划分的样本就是提示清单的前若干条。生成时只保存采样到的 token id 和它自身的对数概率（`--topk 0`），每个 token 8 字节。
+按 arXiv 2605.26097 的做法，先生成了一份完全不筛选的回放文本，放在 `$DATASET/text/qwen3.5-asr/replay-unfiltered/<组>/<划分>/`，与上面筛选过的 `replay/` 并存。生成的设置与筛选版相同（同一个参考模型、四组的开头与模板、温度 1、不设 top-k / top-p、每条最多 16,384 个生成 token），区别在于：`generate --no-filter` 不检查循环、不提前中止，每条样本都生成到 `<|im_end|>` / `<|endoftext|>` 或 16,384 个 token 的上限；`finalize --no-filter` 不截断、不丢弃，循环起点（`loop_onset`、`pre_loop_tokens`）、gzip 压缩率和语言只作为元数据记录。生成时只保存采样到的 token id 和它自身的对数概率（`--topk 0`），每个 token 8 字节。`prompts` 沿用 `replay/prefixes/` 中的文档开头和 free_raw、free_chat 的提示文件（这两组的提示只有换行和聊天模板的特殊 token，不受分词器问题影响），续写两组的提示按修正后的分词器（#77）重新写出，并与 tokenizers 库直接读取原始 `tokenizer.json` 的结果逐条核对过。
+
+不筛选的结果中，无模板两组约六成样本陷入循环，大多一直重复到 16k 上限，循环部分占这两组生成 token 的四分之三以上。用户据此决定（2026-11-22）：有循环（原样或近似，规则见 `degeneration.py`）的样本整条丢弃，其余样本原样保留，任何样本都不截断，避免截断的文本教会模型说到一半停下。保留下来的样本放在另一个目录 `$DATASET/text/qwen3.5-asr/replay-noloop/`，`replay-unfiltered/` 原样保留，便于以后比较：
 
 ```bash
-FILTER=0 WORK_DIR=<工作目录> DATASET=$DATASET MLLM=<2B 融合模型目录> ORIGINAL=<原始 Qwen3.5-2B 目录> \
+FILTER=noloop WORK_DIR=<工作目录> DATASET=$DATASET MLLM=<2B 融合模型目录> ORIGINAL=<原始 Qwen3.5-2B 目录> \
     bash pipeline/replay/run.sh
 ```
 
-各步依次为 `export prompts generate finalize langid estimate teacher verify report`。`prompts` 沿用 `replay/prefixes/` 中的文档开头和 free_raw、free_chat 的提示文件（这两组的提示只有换行和聊天模板的特殊 token，不受分词器问题影响），续写两组的提示按修正后的分词器（#77）重新写出，并与 tokenizers 库直接读取原始 `tokenizer.json` 的结果逐条核对过。每个划分的目标是全部生成 token 数：`eval` 约 100 万，`train` 约 3,000 万（`TARGET`）。在途的样本都要写完，所以 `generate` 按各组的平均样本长度（`PRIOR_MEAN`，由筛选版估计：无模板两组约有一半样本陷入循环、一直写到上限，平均约 8,000–10,000 token；带模板两组约 1,000 token）决定投放多少提示，避免超出目标太多。
+各步依次为 `import generate finalize langid estimate teacher verify report`。`import`（`noloop.py`）把 `replay-unfiltered/` 中已经生成完的样本逐条检查：没有循环的把 token 复制过来，有循环的只记一行元数据（状态 `loop`、出现循环的片段、起点、种类和花掉的 token 数），暂停在途的样本也一并带过来。`generate --drop-loops` 接着按提示清单的顺序生成，每 256 个 token 检查一次循环，发现就立即中止、整条丢弃，每段生成结束时再完整检查一次；循环检测只看前文，在前缀上发现的循环在完整序列上同样存在，所以提前中止得到的保留集合与「全部生成完再丢弃有循环的样本」完全相同，算力却省下大半。`finalize --drop-loops` 对保留的样本按同一套规则再检查一遍。目标按保留的 token 数计：每组 `eval` 约 100 万，free_chat、cont_chat 的 `train` 约 3,000 万，无模板两组的 `train` 约 1,000 万（用户 2026-11-22 调低）。每个划分的样本是提示清单前若干条中没有循环的全部样本；保留的样本比全部生成的样本短（长样本更容易陷入循环），长度分布偏向短文本，`summary.md` 给出两者的长度分布和丢弃比例。
 
-`estimate` 统计各划分的生成 token 数和下一步需要的磁盘空间；`teacher` 再用参考模型把每条样本（提示加生成，就是保存的 token id）整条前向一遍，在每个生成位置保存参考模型概率最高的 32 个 token，供以后试 top-k 截断的近似 KL 损失。`teacher` 用 transformers 加载融合模型（与训练同一套实现），输出层用 bfloat16 输入、float32 输出计算全部 248,320 个 logit，再取 log-sum-exp 和前 32 个；`verify` 抽几条样本单独前向，在 float64 上算整个词表的 log softmax 与保存的数对照。结果放在每个划分的 `teacher/` 目录，与 `raw/` 的 shard 一一对应，第 i 行就是 raw shard 中第 i 个生成 token 的位置：
+`estimate` 统计各划分保留的生成 token 数和下一步需要的磁盘空间；`teacher` 再用参考模型把每条保留的样本（提示加生成，就是保存的 token id）整条前向一遍，在每个生成位置保存参考模型概率最高的 32 个 token，供以后试 top-k 截断的近似 KL 损失。`teacher` 用 transformers 加载融合模型（与训练同一套实现），输出层用 bfloat16 输入、float32 输出计算全部 248,320 个 logit，再取 log-sum-exp 和前 32 个；`verify` 抽几条样本单独前向，在 float64 上算整个词表的 log softmax 与保存的数对照。结果放在每个划分的 `teacher/` 目录，与 `raw/` 的 shard 一一对应，第 i 行就是 raw shard 中第 i 个生成 token 的位置：
 
 | 文件 | 类型 | 内容 |
 | --- | --- | --- |
@@ -170,4 +172,4 @@ FILTER=0 WORK_DIR=<工作目录> DATASET=$DATASET MLLM=<2B 融合模型目录> O
 | `shard-<编号>.lse.f32` | float32 | 整个词表上的 log-sum-exp |
 | `shard-<编号>.lp.f32` | float32 | 实际生成的 token 的对数概率 |
 
-每个生成 token 占 200 字节。参考模型给前 32 个 token 的概率是 `p_i = exp(top_lp_i)`，前 32 个之外的尾部概率总量是 `1 - Σ p_i`；原始 logit 是 `top_lp_i + lse`，需要换温度时可以由它重新计算前 32 个的相对概率。对数概率用 float16 存放，概率最高的几个 token 对数概率接近 0，误差最小（绝对值小于 1 时误差不超过 0.0005）。用 top-32 近似 KL 时，常见的两种写法是只在前 32 个上把参考分布重新归一化，或者把尾部概率并成一个「其他」类别，两者都偏离完整的 KL，偏差大小取决于尾部概率，`report` 给出了它的分布。`lp.f32` 取负后的平均值就是参考模型在这些文本上的每 token 负对数似然，`report` 用它给出评测集的基线（`teacher_nll`）。汇总写在 `replay-unfiltered/summary.md`，包括各划分的样本与 token 数、长度分布、达到上限的样本数、出现循环的样本比例、语言分布和参考 NLL。
+每个生成 token 占 200 字节。参考模型给前 32 个 token 的概率是 `p_i = exp(top_lp_i)`，前 32 个之外的尾部概率总量是 `1 - Σ p_i`；原始 logit 是 `top_lp_i + lse`，需要换温度时可以由它重新计算前 32 个的相对概率。对数概率用 float16 存放，概率最高的几个 token 对数概率接近 0，误差最小（绝对值小于 1 时误差不超过 0.0005）。用 top-32 近似 KL 时，常见的两种写法是只在前 32 个上把参考分布重新归一化，或者把尾部概率并成一个「其他」类别，两者都偏离完整的 KL，偏差大小取决于尾部概率，`report` 给出了它的分布。`lp.f32` 取负后的平均值就是参考模型在这些文本上的每 token 负对数似然，`report` 用它给出评测集的基线（`teacher_nll`）。两个目录各有自己的 `summary.md`：`replay-unfiltered/` 的汇总给出全部生成样本的长度、达到上限的数量、循环比例和语言分布；`replay-noloop/` 的汇总给出保留与丢弃的样本数和 token 数、保留样本的长度分布、语言分布和参考 NLL。

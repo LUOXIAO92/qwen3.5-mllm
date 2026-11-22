@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pipeline.replay.prompts import GROUPS, SPLITS
+from pipeline.replay.prompts import ALL_GROUPS, SPLITS
 from pipeline.replay.store import ShardReader
 from pipeline.replay.teacher import Teacher
 
@@ -103,7 +103,7 @@ def retokenized_ratio(rows, nll_rows, group):
 
     两者不同说明分词器对模型自己写出的文本给出了另一种切分；比值明显大于 1 时，训练写法 NLL 按 token 平均会偏高。
     """
-    main = "assistant" if group in ("free_chat", "cont_chat") else "generated"
+    main = "assistant" if group in ("free_chat", "cont_chat", "prompt_chat") else "generated"
     sampled = {row["sample_id"]: [p for p in row["pieces"] if "gen" in p][-1]["keep"] for row in rows}
     language = {row["sample_id"]: row.get("doc_lang") or row.get("lang") for row in rows}
     totals = defaultdict(lambda: [0, 0])
@@ -154,7 +154,7 @@ def teacher_summary(rows, split_dir, group):
     counts = Counter()
     by_lang = defaultdict(lambda: [0.0, 0])
     tails = []
-    key = "doc_lang" if group.startswith("cont") else "lang"
+    key = "doc_lang" if group.startswith("cont") else ("prompt_lang" if group == "prompt_chat" else "lang")
     for row in rows:
         if row["shard"] not in shards:
             shards[row["shard"]] = Teacher.stored(teacher_dir = teacher_dir, number = row["shard"])
@@ -253,6 +253,21 @@ def split_summary(replay_dir, group, split):
         summary["same_lang_as_doc"] = round(same / max(len(kept), 1), 4)
         summary["source_samples"] = dict(Counter(row["source"] for row in kept).most_common())
         summary["prefix_tokens"] = percentiles(values = [row["prefix_tokens"] for row in kept])
+    if group == "prompt_chat":
+        summary["prompt_lang_samples"] = dict(sorted(Counter(row["prompt_lang"] for row in kept).items()))
+        tokens_by_prompt = Counter()
+        for row in kept:
+            tokens_by_prompt[row["prompt_lang"]] += row["n_kept"]
+        summary["prompt_lang_tokens"] = dict(sorted(tokens_by_prompt.items()))
+        summary["same_lang_as_prompt"] = round(sum(row.get("lang") == row["prompt_lang"] for row in kept) / max(len(kept), 1), 4)
+        summary["source_samples"] = dict(Counter(row["source"] for row in kept).most_common())
+        summary["user_tokens"] = percentiles(values = [row["user_tokens"] for row in kept if "user_tokens" in row])
+        parts = defaultdict(lambda: [0, 0])
+        for row in kept:
+            parts[row.get("part") or "instruct"][0] += 1
+            parts[row.get("part") or "instruct"][1] += row["n_kept"]
+        summary["part_samples_tokens"] = {part: {"samples": value[0], "tokens": value[1]} for part, value in sorted(parts.items())}
+        summary["kind_samples"] = dict(Counter(row["kind"] for row in kept if row.get("kind")))
     if runs:
         seconds = sum(run["seconds"] for run in runs)
         # 中途暂停的样本在下次运行才写完，按每次实际解码的 token 计吞吐（旧记录没有这一项时用写完的样本的 token）
@@ -271,21 +286,18 @@ def split_summary(replay_dir, group, split):
 
 
 def unfiltered_table(summary):
+    """不筛选目录的总表；采样时 NLL 是生成时记录的采样 token 自身的对数概率取负后的平均（这个目录不做 top-32 一步）。"""
     lines = [
-        "| 组 | 划分 | 样本 | 生成 token | 长度中位数 | 长度 p90 | 达到 16k 上限 | 有循环的样本 | 循环起点之后的 token | gzip 压缩率中位数 | 参考 NLL | 采样时 NLL | top-32 之外概率均值 |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| 组 | 划分 | 样本 | 生成 token | 长度中位数 | 长度 p90 | 达到 16k 上限 | 有循环的样本 | 循环起点之后的 token | gzip 压缩率中位数 | 采样时 NLL |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for key, item in summary.items():
         group, split = key.split("/")
-        main = "assistant" if group.endswith("chat") else "text"
-        teacher = item.get("teacher_nll") or {}
-        nll_text = f"{teacher[main]['nll']:.4f}" if main in teacher else ""
-        tail_text = f"{teacher['top32_tail_mass']['mean']:.4f}" if teacher.get("top32_tail_mass") else ""
         lines.append(
             f"| {group} | {split} | {item['samples']:,} | {item['kept_tokens']:,} | {item['length'].get('p50', 0):.0f} | "
             f"{item['length'].get('p90', 0):.0f} | {item['hit_length_cap']:,}（{item['hit_length_cap'] / max(item['samples'], 1):.1%}） | "
             f"{item['loop_samples']:,}（{item['loop_share']:.1%}） | {item['tokens_after_loop_onset_share']:.1%} | "
-            f"{item['gzip_ratio'].get('p50', 0):.3f} | {nll_text} | {item['gen_nll'].get('main', float('nan')):.4f} | {tail_text} |"
+            f"{item['gzip_ratio'].get('p50', 0):.3f} | {item['gen_nll'].get('main', float('nan')):.4f} |"
         )
     return lines
 
@@ -332,6 +344,11 @@ def markdown(summary):
                 lines.append(f"- 来源：{item['source_samples']}；文档开头 token 数：{item['prefix_tokens']}")
             if "user_lang_samples" in item:
                 lines.append(f"- 用户消息语言：{item['user_lang_samples']}；用户消息 token 数：{item['user_tokens']}")
+            if "prompt_lang_samples" in item:
+                lines.append(f"- 提问语言（保留样本数）：{item['prompt_lang_samples']}；回答与提问语言相同的比例：{item['same_lang_as_prompt']}")
+                lines.append(f"- 提问语言（保留 token 数）：{item['prompt_lang_tokens']}")
+                lines.append(f"- 来源：{item['source_samples']}；提问 token 数：{item['user_tokens']}")
+                lines.append(f"- 各部分（instruct 为数据集提问，agent 为工具调用与编程上下文）：{item['part_samples_tokens']}；agent 种类：{item['kind_samples']}")
             if "throughput" in item:
                 lines.append(f"- 本目录中生成的吞吐：{item['throughput']['tokens_per_second']} token/s（{item['throughput']['runs']} 次运行，{item['throughput']['seconds']:.0f} 秒）")
             teacher = item.get("teacher_nll")
@@ -347,6 +364,11 @@ def markdown(summary):
     if any(item.get("unfiltered") for item in summary.values()):
         lines = ["# 不筛选的回放文本汇总", ""]
         lines.extend(unfiltered_table(summary = summary))
+        lines.append("")
+        lines.append(
+            "「循环起点之后的 token」是有循环的样本在循环起点之后的生成 token 占全部生成 token 的比例。每个划分的样本是提示清单前若干条的"
+            "全部样本；改为丢弃循环（replay-noloop）后不再往这里生成，没有达到 token 目标的划分保留到停下时已经写完的样本。"
+        )
         lines.append("")
         for key, item in summary.items():
             lines.append(f"## {key}")
@@ -423,7 +445,7 @@ def main():
     args = parser.parse_args()
     summary = {}
     for split in SPLITS:
-        for group in GROUPS:
+        for group in ALL_GROUPS:
             item = split_summary(replay_dir = args.replay_dir, group = group, split = split)
             if item is not None:
                 summary[f"{group}/{split}"] = item

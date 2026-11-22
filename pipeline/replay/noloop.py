@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.replay.degeneration import loop_onset, near_loop_onset
-from pipeline.replay.prompts import GROUPS, SPLITS
+from pipeline.replay.prompts import ALL_GROUPS, SPLITS
 from pipeline.replay.store import ShardReader, ShardWriter, list_shards, read_all_records
 
 
@@ -51,6 +51,8 @@ def import_split(source, out, group, split, jobs):
     if out_raw.exists() and list_shards(raw_dir = out_raw):
         print(f"{group}/{split}: 已导入，跳过", flush = True)
         return None
+    if not (source_dir / "prompts.jsonl").exists():
+        return None  # 不筛选目录中没有的组（prompt_chat）
     out_dir.mkdir(parents = True, exist_ok = True)
     shutil.copy2(src = source_dir / "prompts.jsonl", dst = out_dir / "prompts.jsonl")
     if not source_raw.exists() or not list_shards(raw_dir = source_raw):
@@ -98,7 +100,7 @@ def main():
     parser = argparse.ArgumentParser(description = __doc__, formatter_class = argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source", required = True, help = "不筛选的回放目录")
     parser.add_argument("--out", required = True, help = "丢弃循环的回放目录")
-    parser.add_argument("--groups", nargs = "+", default = list(GROUPS))
+    parser.add_argument("--groups", nargs = "+", default = list(ALL_GROUPS))
     parser.add_argument("--splits", nargs = "+", default = list(SPLITS))
     parser.add_argument("--jobs", type = int, default = 8)
     args = parser.parse_args()
