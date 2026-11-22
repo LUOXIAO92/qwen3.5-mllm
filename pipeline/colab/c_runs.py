@@ -485,6 +485,12 @@ def train_stats(out):
     return stats
 
 
+def has_replay_loss(rows):
+    """日志中至少一行有有限的回放损失。回放按预算整条取样，某一段日志（例如 kl32 冒烟测试的第 11–20 步）可能正好没有取到回放，
+    只看最后一行会误判。"""
+    return any(row.get("replay_loss") is not None and math.isfinite(row["replay_loss"]) for row in rows)
+
+
 def phase_smoke():
     log("冒烟测试：回放单元测试（GPU）")
     smoke = STAGE / "smoke"
@@ -527,7 +533,7 @@ def phase_smoke():
     results["ntp"]["verify_log"] = verify.stdout.strip()[-500:]
     bad = (
         first != 75 or second != 0 or results["ntp"]["status"] != "finished" or verify.returncode != 0
-        or not rows or rows[-1].get("replay_loss") is None or not math.isfinite(rows[-1]["replay_loss"])
+        or not has_replay_loss(rows = rows)
     )
     # 2. C-mix kl32（加尾部项）：20 步
     out_kl = WORK / "smoke-c71" / "mix-kl"
@@ -541,9 +547,11 @@ def phase_smoke():
     window_proc.terminate()
     rows_kl = train_log(out = out_kl)
     results["kl32"] = {"exit_code": code, "status": progress(out = out_kl).get("status"), **train_stats(out = out_kl)}
-    if rows_kl:
-        results["kl32"]["replay_nll"] = rows_kl[-1].get("replay_nll")
-    bad = bad or code != 0 or not rows_kl or rows_kl[-1].get("replay_loss") is None or not math.isfinite(rows_kl[-1]["replay_loss"])
+    replay_rows = [row for row in rows_kl if row.get("replay_loss") is not None]
+    if replay_rows:
+        results["kl32"]["replay_loss"] = replay_rows[-1]["replay_loss"]
+        results["kl32"]["replay_nll"] = replay_rows[-1].get("replay_nll")
+    bad = bad or code != 0 or not has_replay_loss(rows = rows_kl)
     for directory in (out, out_kl):
         rsync(source = directory, target = DRIVE_STATUS / "smoke" / directory.name, excludes = ("trainer_state.pt", "language_model.safetensors", "dataset"))
     rsync(source = smoke, target = DRIVE_STATUS / "smoke")
