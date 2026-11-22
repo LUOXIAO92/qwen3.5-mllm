@@ -32,13 +32,18 @@ projector、语言模型两个参数组，语言模型参数按 MasterWeights / 
 step、exp_avg、exp_avg_sq；trainer_state.pt 中的 language_model_master（或 language_model_weights）含全部语言模型参数。
 所以这几个选项不是续训核对项：只在显存中训练的检查点可以打开它们续训，反过来也可以。CPU 与 GPU 上 AdamW 的舍入不同，
 换位置续训时与不换位置的训练只在舍入误差上不同；同一种设置下停下再续训（确定性模式）逐位相同。
+
+Muon（--optimizer muon，任务 #78，muon.py）。二维隐藏层权重矩阵（projector 的两个权重和语言模型各层的线性层）由 Muon 更新，
+其余参数仍按上面的方式由 AdamW 更新。显存中的优化器是 muon.MuonAdamW（AdamW 两组加 Muon 两组）。Muon 的参数始终在显存中：
+--offload-optimizer 只接管 AdamW 部分的语言模型参数（词嵌入兼输出层、短卷积的权重），流式加载可训练的层不支持（muon.stream_problem）。
+续训状态为 {"adamw": AdamW 部分的规范格式（只编号 AdamW 的参数）, "muon": Muon 的 state_dict}。
 """
 
 import contextlib
 
 import torch
 
-from pipeline.train import precision
+from pipeline.train import muon, precision
 from pipeline.train.master import DirectWeights, MasterWeights, check_state
 
 # 卸载优化器只接管元素不少于这个数的参数（torchao CPUOffloadOptimizer 的默认 minimal_size），更小的留在显存中。
@@ -279,12 +284,19 @@ class UpdateOptimizer(torch.optim.Optimizer):
         self.update.load_state_dict(state_dict = state_dict)
 
 
+def synchronize():
+    """等 GPU 上已发出的工作完成；没有 GPU 时（CPU 上的单元测试）什么也不做。"""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
 class LanguageModelUpdate:
     """全量微调时语言模型参数组的权重、优化器与它们的存放位置；接口与 master.py 的两个类相同，另有 optimizer、
     clip_grad_norm 和 rebuild。
 
     named_parameters 为全部语言模型参数 [(名称, 参数)]；applied 是 optimize.Applied（流式加载的层由它决定）；
-    state 为续训时 trainer_state.pt 中 STATE_KEY 下的 {名称: 张量}（规范格式，全部语言模型参数）。
+    state 为续训时 trainer_state.pt 中 STATE_KEY 下的 {名称: 张量}（规范格式，全部语言模型参数）；
+    muon_settings 为 muon.Settings 时二维隐藏层权重矩阵由 Muon 更新（--optimizer muon），为 None 时全部用 AdamW。
     """
 
     def __init__(
@@ -299,9 +311,17 @@ class LanguageModelUpdate:
         offload_optimizer = False,
         seed = 0,
         state = None,
+        muon_settings = None,
     ):
         self.named = list(named_parameters)
         self.projector_params = list(projector_params)
+        self.muon_settings = muon_settings
+        self.muon_names = muon_settings.names if muon_settings is not None else frozenset()
+        # AdamW 与 Muon 各自负责的 projector 参数；只用 AdamW 时 projector_adamw 就是全部 projector 参数。
+        self.projector_adamw, self.projector_muon = muon.split(
+            items = self.projector_params,
+            mask = muon_settings.projector_mask if muon_settings is not None else [False] * len(self.projector_params),
+        )
         self.options = dict(options)
         self.master = options["language_model_master_weights"] == "fp32"
         self.stochastic = options["language_model_rounding"] == "stochastic"
@@ -320,6 +340,8 @@ class LanguageModelUpdate:
             self.canonical += [name for name, parameter in self.named if parameter.dtype == torch.float32]
         else:
             self.canonical = [name for name, _ in self.named]
+        # AdamW 部分的规范顺序（只用 AdamW 时就是 canonical）；Muon 的参数始终在显存中，按 Muon 优化器自己的编号保存。
+        self.canonical_adamw = [name for name in self.canonical if name not in self.muon_names]
         self.context = HostContext(seed = seed)
         self.optimizer = UpdateOptimizer(update = self)
         if state is not None:
@@ -329,13 +351,15 @@ class LanguageModelUpdate:
     # 组建与拆除
 
     def _build(self, state):
-        torch.cuda.synchronize()
+        synchronize()
         lm = self.applied.lm if self.applied is not None else None
         streamed = {id(parameter): (host, grad) for parameter, host, grad in (lm.streamed_parameters() if lm is not None else [])}
+        if self.muon_names & {name for name, parameter in self.named if id(parameter) in streamed}:
+            raise ValueError(muon.stream_problem(optimizer = "muon", train_language_model = True))
         resident = [(name, parameter) for name, parameter in self.named if id(parameter) not in streamed]
         offloaded = [
             (name, parameter) for name, parameter in resident
-            if self.offload_optimizer and parameter.numel() >= HOST_MIN_NUMEL
+            if self.offload_optimizer and parameter.numel() >= HOST_MIN_NUMEL and name not in self.muon_names
         ]
         offloaded_ids = {id(parameter) for _, parameter in offloaded}
         gpu = [(name, parameter) for name, parameter in resident if id(parameter) not in offloaded_ids]
@@ -347,14 +371,7 @@ class LanguageModelUpdate:
             state = None if state is None else {name: state[name] for name, _ in gpu},
             grad_dtype = self.grad_dtype,
         )
-        self.gpu = precision.make_optimizer(
-            projector_params = self.projector_params,
-            language_model_params = self.weights.optimizer_params(),
-            lr = self.lr,
-            language_model_lr = self.language_model_lr,
-            weight_decay = self.weight_decay,
-            options = self.options,
-        )
+        self.gpu = self._gpu_optimizer()
         # 名称 -> (HostAdamW, 它更新的主机张量)
         self.host_entries = {}
         host_kwargs = {
@@ -418,7 +435,7 @@ class LanguageModelUpdate:
         self.offload_norms[id(parameter)] = torch.linalg.vector_norm(input = parameter.grad, dtype = torch.float32)
 
     def _teardown(self):
-        torch.cuda.synchronize()
+        synchronize()
         self.weights.remove()
         for handle in self.hook_handles:
             handle.remove()
@@ -443,6 +460,41 @@ class LanguageModelUpdate:
         del weights, optimizer_state
         torch.cuda.empty_cache()
 
+    def _gpu_optimizer(self):
+        """显存中的优化器。只用 AdamW 时与以前相同（precision.make_optimizer，projector、语言模型两组）；Muon 时为
+        muon.MuonAdamW：AdamW 两组（projector 的偏置；语言模型的词嵌入、归一化等）加 Muon 两组（二维隐藏层权重矩阵）。"""
+        if self.muon_settings is None:
+            return precision.make_optimizer(
+                projector_params = self.projector_params,
+                language_model_params = self.weights.optimizer_params(),
+                lr = self.lr,
+                language_model_lr = self.language_model_lr,
+                weight_decay = self.weight_decay,
+                options = self.options,
+            )
+        named = list(zip(self._gpu_names(), self.weights.optimizer_params(), strict = True))
+        adamw = precision.make_optimizer(
+            projector_params = self.projector_adamw,
+            language_model_params = [tensor for name, tensor in named if name not in self.muon_names],
+            lr = self.lr,
+            language_model_lr = self.language_model_lr,
+            weight_decay = self.weight_decay,
+            options = self.options,
+        )
+        return muon.MuonAdamW(
+            adamw = adamw,
+            muon = muon.make_optimizer(
+                projector_params = self.projector_muon,
+                language_model_params = [tensor for name, tensor in named if name in self.muon_names],
+                settings = self.muon_settings,
+                stochastic = self.stochastic,
+            ),
+        )
+
+    def _adamw_gpu(self):
+        """显存中优化器的 AdamW 部分。"""
+        return self.gpu if self.muon_settings is None else self.gpu.adamw
+
     # 训练循环用到的接口
 
     def _gpu_names(self):
@@ -450,6 +502,10 @@ class LanguageModelUpdate:
         if self.master:
             return self.weights.names + [name for name, _ in self.weights.direct]
         return [name for name, _ in self.weights.named]
+
+    def _gpu_adamw_names(self):
+        """显存中 AdamW 的语言模型组里参数的名称，按交给优化器的顺序（只用 AdamW 时就是 _gpu_names）。"""
+        return [name for name in self._gpu_names() if name not in self.muon_names]
 
     def step(self):
         lr = float(self.gpu.param_groups[1]["lr"])
@@ -514,13 +570,19 @@ class LanguageModelUpdate:
         return state
 
     def state_dict(self):
-        """规范格式的优化器状态（见模块说明）。"""
-        saved = self.gpu.state_dict()
+        """规范格式的优化器状态（见模块说明）；Muon 时为 {"adamw": AdamW 部分的规范格式, "muon": Muon 的 state_dict}。"""
+        adamw = self._adamw_state_dict()
+        if self.muon_settings is None:
+            return adamw
+        return {"adamw": adamw, "muon": self.gpu.muon.state_dict()}
+
+    def _adamw_state_dict(self):
+        saved = self._adamw_gpu().state_dict()
         if not self.host_entries:
             return saved
-        base = len(self.projector_params)
-        local = self._gpu_names()
-        canonical_index = {name: base + position for position, name in enumerate(self.canonical)}
+        base = len(self.projector_adamw)
+        local = self._gpu_adamw_names()
+        canonical_index = {name: base + position for position, name in enumerate(self.canonical_adamw)}
         state = {}
         for index, entry in saved["state"].items():
             state[index if index < base else canonical_index[local[index - base]]] = entry
@@ -529,33 +591,43 @@ class LanguageModelUpdate:
             if entry:
                 state[canonical_index[name]] = {key: entry[key] for key in ("step", "exp_avg", "exp_avg_sq")}
         groups = [dict(group) for group in saved["param_groups"]]
-        groups[1]["params"] = list(range(base, base + len(self.canonical)))
+        groups[1]["params"] = list(range(base, base + len(self.canonical_adamw)))
         return {"state": dict(sorted(state.items())), "param_groups": groups}
 
     def load_state_dict(self, state_dict):
-        if not self.host_entries:
-            self.gpu.load_state_dict(state_dict = state_dict)
+        if self.muon_settings is None:
+            self._load_adamw_state_dict(state_dict = state_dict)
             return
-        base = len(self.projector_params)
-        local = self._gpu_names()
+        muon.check_state_format(state_dict = state_dict)
+        self._load_adamw_state_dict(state_dict = state_dict["adamw"])
+        self.gpu.muon.load_state_dict(state_dict = state_dict["muon"])
+
+    def _load_adamw_state_dict(self, state_dict):
+        if not self.host_entries:
+            self._adamw_gpu().load_state_dict(state_dict = state_dict)
+            return
+        base = len(self.projector_adamw)
+        local = self._gpu_adamw_names()
         local_index = {name: base + position for position, name in enumerate(local)}
         state = {}
         for index, entry in state_dict["state"].items():
             if index < base:
                 state[index] = entry
                 continue
-            name = self.canonical[index - base]
+            name = self.canonical_adamw[index - base]
             if name in local_index:
                 state[local_index[name]] = entry
             else:
                 optimizer, host = self.host_entries[name]
                 optimizer.load_entry(param = host, entry = entry)
         groups = [dict(group) for group in state_dict["param_groups"]]
-        if len(groups[1]["params"]) != len(self.canonical):
-            raise ValueError(f"优化器状态中语言模型组有 {len(groups[1]['params'])} 个参数，模型中有 {len(self.canonical)} 个")
+        if len(groups[1]["params"]) != len(self.canonical_adamw):
+            raise ValueError(
+                f"优化器状态中语言模型组有 {len(groups[1]['params'])} 个参数，模型中有 {len(self.canonical_adamw)} 个"
+            )
         groups[0]["params"] = list(range(base))
         groups[1]["params"] = list(range(base, base + len(local)))
-        self.gpu.load_state_dict(state_dict = {"state": state, "param_groups": groups})
+        self._adamw_gpu().load_state_dict(state_dict = {"state": state, "param_groups": groups})
 
     def model_state(self, dtype = torch.bfloat16):
         """评测用的语言模型权重 {名称: CPU 上的 dtype 张量}，即模型中参与计算的权重（流式加载的层在主机内存中）。"""

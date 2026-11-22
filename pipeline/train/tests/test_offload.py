@@ -263,12 +263,15 @@ class FP8Test(unittest.TestCase):
         self.assertNotIsInstance(model.projector, FP8Linear)
 
 
-def tiny_model(dtype, device = "cuda"):
-    """按阶段 1 的配置缩小的随机初始化模型：语言模型 4 层（3 层线性注意力加 1 层全注意力），音频塔 4 层。"""
+def tiny_model(dtype, device = "cuda", vocab_size = None):
+    """按阶段 1 的配置缩小的随机初始化模型：语言模型 4 层（3 层线性注意力加 1 层全注意力），音频塔 4 层。
+    vocab_size 给出时把词表也缩小（只用于不做真实前向的测试，例如 test_muon.py）。"""
     from transformers import AutoConfig, AutoModelForImageTextToText
 
     config = AutoConfig.from_pretrained(pretrained_model_name_or_path = str(MODEL_DIR), trust_remote_code = True)
     text = config.text_config
+    if vocab_size is not None:
+        text.vocab_size = vocab_size
     text.num_hidden_layers = 4
     text.layer_types = ["linear_attention", "linear_attention", "linear_attention", "full_attention"]
     text.hidden_size = 128

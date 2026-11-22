@@ -48,7 +48,8 @@
 只支持 fp32 的 AdamW 状态和 --grad-accum 1（precision.host_problem，其余组合不允许）；--fp8-frozen lm/all 只适用于
 冻结的权重，不能使用。显存不足时的退让先增加做梯度检查点的层，再逐步把语言模型的层改为流式加载（参数改在主机内存中
 更新，主权重和 AdamW 状态原样搬过去，placement.LanguageModelUpdate.rebuild；精度设置不支持时跳过这一档），最后改为
-流式加载音频塔。
+流式加载音频塔。--optimizer muon（任务 #78）时全量微调不能流式加载语言模型的层（muon.stream_problem），退让同样跳过
+这一档；--offload-optimizer 只卸载 AdamW 部分。
 
 续训。--offload-activations、--activation-prefetch、--lm-blocks-to-swap、--offload-optimizer 与其余各项一样不在续训
 核对项中：它们只改变激活值、权重、梯度和优化器状态放在显存还是主机内存中，算法不变，续训状态的格式也不变（placement.py
@@ -194,12 +195,15 @@ def validate(
     total,
     train_language_model = False,
     host_problem = None,
+    stream_problem = None,
 ):
     """检查选项的组合，不合法时抛出 ValueError。
 
     host_problem 是全量微调时语言模型参数不能在主机内存中更新的原因（precision.host_problem），为 None 时可以：
-    它决定全量微调能否流式加载语言模型的层（--lm-blocks-to-swap）和打开 --offload-optimizer。
+    它决定全量微调能否流式加载语言模型的层（--lm-blocks-to-swap）和打开 --offload-optimizer。stream_problem 是只针对
+    流式加载的另一个原因（例如 --optimizer muon，muon.stream_problem），为 None 时只看 host_problem。
     """
+    stream_problem = stream_problem if stream_problem is not None else host_problem
     count = checkpoint_count(options = options, total = total)
     if min(options["lm_blocks_to_swap"], total) > count:
         raise ValueError("语言模型流式加载的层（--lm-blocks-to-swap）必须都做梯度检查点")
@@ -207,11 +211,10 @@ def validate(
         raise ValueError("--offload-activations 需要梯度检查点")
     if options.get("offload_optimizer") and not train_language_model:
         raise ValueError("--offload-optimizer 只作用于语言模型参数组，需要 --train-language-model")
-    if train_language_model and host_problem is not None:
-        if options["lm_blocks_to_swap"] > 0:
-            raise ValueError(f"全量微调时流式加载语言模型的层（--lm-blocks-to-swap）不支持这组设置：{host_problem}")
-        if options.get("offload_optimizer"):
-            raise ValueError(f"--offload-optimizer 不支持这组设置：{host_problem}")
+    if train_language_model and stream_problem is not None and options["lm_blocks_to_swap"] > 0:
+        raise ValueError(f"全量微调时流式加载语言模型的层（--lm-blocks-to-swap）不支持这组设置：{stream_problem}")
+    if train_language_model and host_problem is not None and options.get("offload_optimizer"):
+        raise ValueError(f"--offload-optimizer 不支持这组设置：{host_problem}")
     if train_language_model and _covers(choice = options["fp8_frozen"], part = "lm"):
         raise ValueError("训练语言模型时不能把语言模型的权重存为 fp8（--fp8-frozen lm 或 all）")
     if options.get("pack_sequences"):
@@ -292,13 +295,15 @@ class Applied:
         device,
         train_language_model = False,
         host_problem = None,
+        stream_problem = None,
     ):
         self.model = model
         self.options = dict(options)
         self.device = device
         self.train_language_model = train_language_model
         # 全量微调时语言模型的层能否流式加载（参数在主机内存中更新，placement.py）；不能时显存不足的退让跳过这一档。
-        self.lm_streamable = not train_language_model or host_problem is None
+        stream_problem = stream_problem if stream_problem is not None else host_problem
+        self.lm_streamable = not train_language_model or stream_problem is None
         self.lm = None
         self.audio = None
         self.lm_forwards = None
@@ -392,18 +397,20 @@ def apply(
     device = "cuda",
     train_language_model = False,
     host_problem = None,
+    stream_problem = None,
 ):
     """按 options 设置模型（模型已在 device 上），返回 Applied。
 
     顺序：视觉塔移回 CPU → fp8 → 音频注意力 → torch.compile → 接管各层前向（检查点、流式加载）。
     编译的是各层原来的前向，流式加载和检查点的包装在编译范围之外。train_language_model 为真时语言模型的权重
-    要更新，不允许只适用于冻结权重的设置；host_problem 见 validate。
+    要更新，不允许只适用于冻结权重的设置；host_problem、stream_problem 见 validate。
     """
     validate(
         options = options,
         total = len(model.model.language_model.layers),
         train_language_model = train_language_model,
         host_problem = host_problem,
+        stream_problem = stream_problem,
     )
     inner = model.model
     if getattr(inner, "visual", None) is not None:
@@ -445,6 +452,7 @@ def apply(
         device = device,
         train_language_model = train_language_model,
         host_problem = host_problem,
+        stream_problem = stream_problem,
     )
     applied.install_blocks()
     torch.cuda.empty_cache()

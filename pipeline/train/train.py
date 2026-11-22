@@ -64,6 +64,11 @@
 速度选项 --loss-impl（交叉熵的实现）和 --pack-sequences（每批样本拼成一行、去掉填充）见 optimize.py（任务 #66）。
 它们不改变每步的样本和损失的定义，不在 RESUME_KEYS 中，续训时可以改变。
 
+优化器 --optimizer（任务 #78）：adamw（默认，与以前相同）或 muon。muon 时二维隐藏层权重矩阵（projector 的两个权重、语言模型
+各层的线性层）由 torch.optim.Muon 更新，其余参数仍用 AdamW；学习率缩放、动量、迭代次数等见 muon.py 和 pipeline/train/__init__.py
+「Muon 优化器」。--optimizer 和 --muon-momentum-dtype 改变优化器状态的格式，在 RESUME_KEYS 中；以前的训练配置中没有它们，
+按默认值（adamw、fp32）核对。Muon 两组的峰值学习率（--muon-lr、--language-model-muon-lr）与 --lr 一样续训时沿用检查点。
+
 省显存的卸载选项 --offload-activations（层边界提前一层上传，--activation-prefetch）、全量微调时的 --lm-blocks-to-swap
 （流式加载可训练的层，参数在主机内存中更新）和 --offload-optimizer（梯度、主权重与 AdamW 状态放到主机内存）见
 optimize.py 和 placement.py（任务 #66）。它们只改变数据放在哪里，续训状态的格式不变，不在 RESUME_KEYS 中，续训时可以
@@ -99,7 +104,7 @@ from pipeline.train.data import (
     read_manifest,
     summarize_rows,
 )
-from pipeline.train import precision
+from pipeline.train import muon, precision
 from pipeline.train.master import DirectWeights, MasterWeights
 from pipeline.train.placement import LanguageModelUpdate
 from pipeline.train.mixing import BackgroundMixer, parse_category_weights
@@ -133,7 +138,7 @@ HOST_RNG_KEY = "host_rounding"
 # 只为取得各选项的默认值而解析一次参数时，填入必填项的占位值。
 REQUIRED_PLACEHOLDERS = ["--model-dir", "", "--train-manifest", "", "--target", TARGETS[0], "--output-dir", ""]
 # 续训时必须与原训练一致的配置：它们决定数据顺序、批次内容和损失，train_language_model 决定训练哪些参数，
-# precision.KEYS 决定语言模型参数组的更新方式和优化器状态的格式。
+# precision.KEYS 决定语言模型参数组的更新方式和优化器状态的格式，muon.KEYS 决定用哪种优化器和 Muon 动量的格式。
 # 音频从哪里读（--audio-shards、--audio-shard-dirs、--audio-shard-fallback）、清单行缓存放在哪里（--rows-cache-dir）、
 # 读取进程数、模型和输出目录都不改变批次，不在其中；--init-projector 只影响新开始的训练，也不在其中。
 RESUME_KEYS = (
@@ -159,6 +164,8 @@ RESUME_KEYS = (
     "train_language_model",
     # 全量微调的精度（precision.py）：决定优化器更新哪一份权重、状态以什么格式保存。
     *precision.KEYS,
+    # 优化器（muon.py）：AdamW 还是 Muon 加 AdamW，Muon 动量的存储精度。
+    *muon.KEYS,
 )
 # 决定训练计划（每一步读哪些样本）的配置，即 RESUME_KEYS 中混音、样本格式和训练范围以外的各项。音频分片按这个计划排列。
 PLAN_KEYS = (
@@ -391,6 +398,7 @@ def parse_args(argv = None):
     parser.add_argument("--no-frozen-check", action = "store_true", help = "跳过冻结参数前后一致的检查")
     parser.add_argument("--deterministic", action = "store_true", help = "使用确定性算法，同样的配置逐位复现")
     precision.add_arguments(parser = parser)
+    muon.add_arguments(parser = parser)
     add_optimize_arguments(parser = parser)
     return parser.parse_args(args = argv)
 
@@ -687,7 +695,8 @@ def append_jsonl(path, record):
 
 
 def check_language_model_args(args):
-    """--train-language-model 与 --language-model-lr 必须同时给出；精度选项的组合必须合法（precision.validate）。"""
+    """--train-language-model 与 --language-model-lr 必须同时给出；精度选项与优化器选项的组合必须合法
+    （precision.validate、muon.validate）。"""
     if args.train_language_model and args.language_model_lr is None:
         raise SystemExit("--train-language-model 需要同时给出语言模型的峰值学习率 --language-model-lr。")
     if args.language_model_lr is not None and not args.train_language_model:
@@ -697,14 +706,24 @@ def check_language_model_args(args):
             options = precision.options_from_args(args = args),
             train_language_model = args.train_language_model,
         )
+        muon.validate(args = args)
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
 
-def make_optimizer(args, params, language):
+def make_optimizer(args, params, language, muon_settings = None):
     """AdamW：只训练 projector 时一个参数组；训练语言模型时 projector 与语言模型各一组（--lr、--language-model-lr），
     实现与语言模型组的精度见 precision.make_optimizer，参数放在哪里更新见 placement.py。
+    --optimizer muon 时二维隐藏层权重矩阵改由 Muon 更新（muon.py）：只训练 projector 时为 muon.projector_optimizer，
+    训练语言模型时由 placement.LanguageModelUpdate 组建。
     """
+    if language is None and muon_settings is not None:
+        return muon.projector_optimizer(
+            params = params,
+            settings = muon_settings,
+            lr = args.lr,
+            weight_decay = args.weight_decay,
+        )
     if language is None:
         return torch.optim.AdamW(
             params = params,
@@ -713,6 +732,14 @@ def make_optimizer(args, params, language):
             weight_decay = args.weight_decay,
         )
     return language.optimizer
+
+
+def peak_lrs(args, muon_settings):
+    """各参数组的峰值学习率，按优化器 param_groups 的顺序（与 muon.lr_labels 对应）。"""
+    values = [args.lr] + ([args.language_model_lr] if args.train_language_model else [])
+    if muon_settings is not None:
+        values += muon.peak_lrs(settings = muon_settings, train_language_model = args.train_language_model)
+    return values
 
 
 def host_placement(args):
@@ -801,6 +828,8 @@ def main(argv = None):
             options = precision.options_from_args(args = args),
             grad_accum = args.grad_accum,
         ),
+        # Muon 的参数要在显存中正交化，全量微调时不能流式加载语言模型的层（muon.stream_problem）。
+        stream_problem = muon.stream_problem(optimizer = args.optimizer, train_language_model = args.train_language_model),
     )
     if args.pack_sequences:
         # 拼接批次时三处都必须是按样本边界分段的内核，退回参考实现时各条样本互相串扰而不报错。
@@ -813,6 +842,14 @@ def main(argv = None):
     if not trainable or set(trainable) != set(expected):
         scope = "projector 和语言模型" if args.train_language_model else "projector"
         raise RuntimeError(f"可训练参数应当只有 {scope}：{sorted(set(trainable) ^ set(expected))[:10]}")
+    # --optimizer muon：二维隐藏层权重矩阵用 Muon，其余用 AdamW（muon.classify）。
+    projector_names = [name for name, _ in model.named_parameters() if name.startswith(PROJECTOR_PREFIX)]
+    muon_settings = muon.settings_from_args(
+        args = args,
+        model = model,
+        projector_names = projector_names,
+        language_model_names = language_names,
+    )
     # 训练语言模型时它的参数仍以 bfloat16 计算，优化器更新 float32 主权重或直接更新这些参数（master.py、
     # precision.py）；参数在显存还是主机内存中更新见 placement.py。续训时用检查点中保存的那份权重，并写回模型参数。
     language = None
@@ -832,6 +869,7 @@ def main(argv = None):
             offload_optimizer = args.offload_optimizer,
             seed = args.seed,
             state = saved_weights,
+            muon_settings = muon_settings,
         )
         del saved_weights
 
@@ -883,7 +921,12 @@ def main(argv = None):
         raise SystemExit("请给出 --epochs 或 --max-steps。")
     config["total_steps"] = total_steps
 
-    optimizer = make_optimizer(args = args, params = params, language = language)
+    optimizer = make_optimizer(
+        args = args,
+        params = params,
+        language = language,
+        muon_settings = muon_settings,
+    )
     # 同一条曲线作用于每个参数组：各组的学习率都是本组峰值乘以这个系数。
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer = optimizer,
@@ -908,9 +951,14 @@ def main(argv = None):
         stream.offset = trainer_state["offset"]
         print(f"从 {resume_dir.name} 续训：第 {step} 步，第 {stream.epoch} 轮第 {stream.offset} 个微批。")
         # 学习率调度器的状态带着各组的峰值学习率（base_lrs），续训按它继续，命令行的 --lr 等不起作用。
-        requested = [args.lr] + ([args.language_model_lr] if language is not None else [])
+        requested = peak_lrs(args = args, muon_settings = muon_settings)
         if [float(value) for value in scheduler.base_lrs] != requested:
             print(f"续训沿用检查点中的峰值学习率 {scheduler.base_lrs}，命令行给出的 {requested} 不起作用。", flush = True)
+        if muon_settings is not None:
+            # Muon 组的动量、迭代次数等也随优化器状态载入，与学习率一样沿用检查点。
+            notice = muon.resume_notice(param_groups = optimizer.param_groups, settings = muon_settings)
+            if notice is not None:
+                print(notice, flush = True)
     else:
         (output_dir / "train_config.json").write_text(
             data = json.dumps(obj = config, ensure_ascii = False, indent = 2) + "\n",
@@ -971,9 +1019,25 @@ def main(argv = None):
         "language_model_precision": (
             precision.describe(
                 options = precision.options_from_args(args = args),
-                parameters = sum(parameter.numel() for _, parameter in language_named),
+                # Muon 时这里只算 AdamW 部分，Muon 部分见下面的 muon。
+                parameters = sum(
+                    parameter.numel() for name, parameter in language_named
+                    if muon_settings is None or name not in muon_settings.names
+                ),
             )
             if args.train_language_model else None
+        ),
+        "optimizer": args.optimizer,
+        "muon": (
+            muon.describe(
+                named = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad],
+                kinds = muon.classify(model = model, names = projector_names + language_names),
+                settings = muon_settings,
+                projector_names = projector_names,
+                options = precision.options_from_args(args = args) if args.train_language_model else None,
+                offload_optimizer = args.offload_optimizer,
+            )
+            if muon_settings is not None else None
         ),
         "language_model_placement": language.describe() if language is not None else None,
     }, ensure_ascii = False))
@@ -1241,6 +1305,11 @@ def main(argv = None):
                 if language is not None:
                     # 语言模型参数组的学习率；lr 是 projector 参数组的。
                     record["lm_lr"] = float(scheduler.get_last_lr()[1])
+                if muon_settings is not None:
+                    # Muon 各组的学习率：muon_lr（projector）、lm_muon_lr（语言模型）。
+                    labels = muon.lr_labels(train_language_model = args.train_language_model, optimizer = args.optimizer)
+                    for label, value in zip(labels, scheduler.get_last_lr(), strict = True):
+                        record.setdefault(label, float(value))
                 append_jsonl(path = log_path, record = record)
                 print(progress.line(record = record), flush = True)
                 progress.write(
