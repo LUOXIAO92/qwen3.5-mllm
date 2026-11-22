@@ -44,7 +44,8 @@ elif [ "$FILTER" = noloop ]; then
     # 每条投放的提示平均保留的 token 数（有循环的样本按 0 计），由不筛选目录估计
     PRIOR_MEAN="${PRIOR_MEAN:-free_raw=700,free_chat=750,cont_raw=800,cont_chat=400,free_chat_think=1500,prompt_chat=400}"
     MAX_INFLIGHT="${MAX_INFLIGHT:-0}"
-    GEN_FLAGS=(--drop-loops --topk 0)
+    # free_chat_think 的进度只计写出 </think> 的样本（没有写出的照样保留，是否使用由训练决定）
+    GEN_FLAGS=(--drop-loops --topk 0 --count-closed-think)
     PLAN_DEFAULT="cont_raw:train,cont_chat:train,free_raw:eval,free_chat:eval,cont_raw:eval,cont_chat:eval,free_chat:train,free_raw:train"
     PLAN_DEFAULT="$PLAN_DEFAULT,free_chat_think:eval,free_chat_think:train"
     DEFAULT_STEPS=(import think_prompts generate finalize langid estimate teacher verify report)

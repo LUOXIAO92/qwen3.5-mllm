@@ -53,7 +53,7 @@ import numpy as np
 
 from pipeline.replay.degeneration import degeneration_onset, loop_onset, near_loop_onset
 from pipeline.replay.prompts import CHAT_GROUPS, SELF_USER_GROUPS
-from pipeline.replay.store import TOP_K, ShardWriter, read_all_records, repair
+from pipeline.replay.store import TOP_K, ShardReader, ShardWriter, read_all_records, repair
 from pipeline.tokenizer_fix import check_tokenizer
 
 MAX_NEW_TOKENS = 16384
@@ -164,6 +164,7 @@ class Generator:
         check_tokenizer(tokenizer = tokenizer, source = args.model)
         self.stop_ids = [tokenizer.convert_tokens_to_ids("<|im_end|>"), tokenizer.convert_tokens_to_ids("<|endoftext|>")]
         self.im_end = self.stop_ids[0]
+        self.think_end = tokenizer.convert_tokens_to_ids("</think>")
         print(f"模型加载 {self.load_seconds:.0f} 秒，结束符 {self.stop_ids}", flush = True)
 
     def params(self, max_tokens):
@@ -194,7 +195,23 @@ class Generator:
         all_records = read_all_records(raw_dir = raw_dir)
         done = {record["prompt_index"] for record in all_records}
         records = [record for record in all_records if part is None or record.get("part") == part]
-        kept_total = sum(record["kept_gen"] for record in records)
+        # free_chat_think 加 --count-closed-think 时，只有写出 </think> 的样本计入进度（没有写出的照样保留）
+        count_closed = args.count_closed_think and group == "free_chat_think"
+        reader = ShardReader(raw_dir = raw_dir)
+
+        def closed_in_shard(record):
+            pieces = [piece for piece in record["pieces"] if piece.get("gen") == "assistant"]
+            return bool(pieces) and self.think_end in np.asarray(reader.piece(number = record["shard"], piece = pieces[-1])).tolist()
+
+        def progress(record):
+            if not count_closed or record["status"] == "loop":
+                return record["kept_gen"]
+            closed = record.get("think_closed")
+            if closed is None:
+                closed = closed_in_shard(record = record)
+            return record["kept_gen"] if closed else 0
+
+        kept_total = sum(progress(record = record) for record in records)
         inflight_path = raw_dir / ("inflight.pkl" if part is None else f"inflight-{part}.pkl")
         label = f"{group}/{split}" + (f"@{part}" if part else "")
         suspended = []
@@ -312,8 +329,15 @@ class Generator:
             if loop is not None:
                 record["loop"] = loop
                 counters["dropped"] += 1
+            counted = kept
+            if group == "free_chat_think" and loop is None:
+                # 助手回答（思考 + 回答）中是否写出了 </think>；没有助手回答的样本记为否
+                answer = [arrays[0] for arrays, role in zip(state["arrays"], state["roles"]) if role == "assistant"]
+                record["think_closed"] = bool(answer) and self.think_end in answer[-1].tolist()
+                if count_closed and not record["think_closed"]:
+                    counted = 0
             writer.add_record(record)
-            kept_total += kept
+            kept_total += counted
             counters["samples"] += 1
             finished_samples += 1
             # 按全部已完成样本的平均值估计在途样本；短样本先完成，滑动平均会偏低，导致投放过多
@@ -502,6 +526,11 @@ def main():
         "--drop-loops",
         action = "store_true",
         help = "发现循环（原样或近似）就立即中止并整条丢弃，只记元数据；其余样本生成到结束符或上限并原样保留，不截断",
+    )
+    parser.add_argument(
+        "--count-closed-think",
+        action = "store_true",
+        help = "free_chat_think 的进度只计写出 </think> 的样本；没有写出的样本照样保留，索引中 think_closed 为假",
     )
     parser.add_argument("--topk", type = int, default = TOP_K, help = f"每个生成位置另存的 top-k 对数概率个数，只能取 {TOP_K} 或 0（不存）")
     parser.add_argument("--max-new-tokens", type = int, default = MAX_NEW_TOKENS)
