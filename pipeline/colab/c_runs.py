@@ -41,7 +41,8 @@
 $WORK_DIR/data/T02。可选：C71_TAG（输出名后缀）、C71_RATIO（默认 0.5）、C71_REPLAY_NORM（asr 或 step，默认 asr，按 token 归一化）、
 C71_RUNS（逗号分隔，只跑这些运行，默认全部）、
 C71_SKIP_SMOKE=1、C71_THINK_MAX_NEW（默认 16384）、C71_DEADLINE_HOURS、C71_CU_PER_HOUR（默认 10，#65 实测的 G4 消耗）、
-C71_STATE_SYNC_STEPS、C71_ESTIMATE_ONLY=1（只打印估计后退出）。
+C71_STATE_SYNC_STEPS、C71_ESTIMATE_ONLY=1（只打印估计后退出）、C71_TRAIN_ONLY=1（只训练：跳过各运行的评测、参考模型的评测和
+汇总，训练全部完成后状态为 trained；以后去掉它重新运行驱动程序，只补做评测）。
 
 用法（Colab 单元格中，环境变量已设置，已运行 setup.sh、fleurs_prepare；见 pipeline/colab/README.md「#71 C 组」）：
 
@@ -84,6 +85,8 @@ THINK_MAX_NEW = int(ENV.get("C71_THINK_MAX_NEW", "16384"))
 DEADLINE_HOURS = float(ENV.get("C71_DEADLINE_HOURS", "23"))
 CU_PER_HOUR = float(ENV.get("C71_CU_PER_HOUR", "10"))
 STATE_SYNC_STEPS = int(ENV.get("C71_STATE_SYNC_STEPS", "0"))
+# 只训练（用户 2026-11-23：先训练，评测以后在本机或其他平台另做）
+TRAIN_ONLY = ENV.get("C71_TRAIN_ONLY", "0") == "1"
 # 名字中的 cpt77：CPT 格式、#77 修正后的分词器，与 t71 的输出（旧分词器）区分开。
 PROJECTOR_NAME = "v2b-2b-cpt77-projector" + TAG
 PROJECTOR_SAVE_EVERY = 100
@@ -239,8 +242,10 @@ def estimate(train_minutes = None):
     stages = {"smoke": ESTIMATE["shards_first_copy"] + ESTIMATE["smoke"], "projector": ESTIMATE["projector"]}
     for key in SELECTED:
         stages[f"train:{key}"] = train_c0 if RUNS[key] is None else train_replay
-        stages[f"eval:{key}"] = per_eval
-    stages["ref"] = ESTIMATE["eval_think"] + ESTIMATE["eval_replay_gap"] + ESTIMATE["eval_lm_ppl"]
+        if not TRAIN_ONLY:
+            stages[f"eval:{key}"] = per_eval
+    if not TRAIN_ONLY:
+        stages["ref"] = ESTIMATE["eval_think"] + ESTIMATE["eval_replay_gap"] + ESTIMATE["eval_lm_ppl"]
     remaining = {key: value for key, value in stages.items() if not is_done(key)}
     hours = sum(remaining.values()) / 60
     return {
@@ -846,8 +851,12 @@ def main():
         for key in SELECTED:
             if not is_done(f"train:{key}"):
                 phase_train(key = key)
-            if not is_done(f"eval:{key}"):
+            if not TRAIN_ONLY and not is_done(f"eval:{key}"):
                 phase_eval(key = key)
+        if TRAIN_ONLY:
+            set_status(phase = "trained")
+            log("训练全部完成（只训练模式，C71_TRAIN_ONLY=1）；评测另行进行：去掉 C71_TRAIN_ONLY 重新运行驱动程序只补做评测")
+            return 0
         if not is_done("ref"):
             phase_reference()
         phase_summary()
