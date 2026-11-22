@@ -187,12 +187,15 @@ step_estimate() {
 }
 
 step_teacher() {
+    # TEACHER_EXTRA 可以给出 --exclude-unclosed-think（free_chat_think 中没有写出 </think> 的样本不计算）
+    # shellcheck disable=SC2086
     run_resumable "$OUT/logs/teacher.log" "$TRAIN_ENV" -m pipeline.replay.teacher --mllm "$MLLM" --replay-dir "$REPLAY" \
-        --plan "$PLAN" --time-budget "$TIME_BUDGET"
+        --plan "$PLAN" --time-budget "$TIME_BUDGET" ${TEACHER_EXTRA:-}
 }
 
 step_verify() {
-    run_on_gpu "$TRAIN_ENV" -m pipeline.replay.teacher --mllm "$MLLM" --replay-dir "$REPLAY" --plan "$PLAN" --verify 4
+    # shellcheck disable=SC2086
+    run_on_gpu "$TRAIN_ENV" -m pipeline.replay.teacher --mllm "$MLLM" --replay-dir "$REPLAY" --plan "$PLAN" --verify 4 ${TEACHER_EXTRA:-}
 }
 
 step_report() {
