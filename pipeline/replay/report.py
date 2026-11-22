@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pipeline.replay.prompts import ALL_GROUPS, SPLITS
+from pipeline.replay.prompts import ALL_GROUPS, CHAT_GROUPS, SELF_USER_GROUPS, SPLITS
 from pipeline.replay.store import ShardReader
 from pipeline.replay.teacher import Teacher
 
@@ -240,7 +240,19 @@ def split_summary(replay_dir, group, split):
     for row in kept:
         tokens_by_lang[row.get("lang", "?")] += row["n_kept"]
     summary["lang_tokens"] = dict(tokens_by_lang.most_common())
-    if group == "free_chat":
+    if group == "free_chat_think":
+        answered = [row for row in kept if "think_closed" in row]
+        closed = [row for row in answered if row["think_closed"]]
+        summary["think"] = {
+            "samples_with_assistant": len(answered),
+            "closed": len(closed),
+            "close_rate": round(len(closed) / max(len(answered), 1), 4),
+            "not_closed": len(answered) - len(closed),
+            "reasoning_tokens": percentiles(values = [row["reasoning_tokens"] for row in closed]),
+            "answer_tokens": percentiles(values = [row["answer_tokens"] for row in closed]),
+            "reasoning_tokens_not_closed": percentiles(values = [row["reasoning_tokens"] for row in answered if not row["think_closed"]]),
+        }
+    if group in SELF_USER_GROUPS:
         summary["user_lang_samples"] = dict(Counter(row.get("user_lang", "?") for row in kept).most_common())
         summary["user_tokens"] = percentiles(values = [next(p["keep"] for p in row["pieces"] if p.get("gen") == "user") for row in kept])
     if group.startswith("cont"):
@@ -309,7 +321,7 @@ def noloop_table(summary):
     ]
     for key, item in summary.items():
         group, split = key.split("/")
-        main = "assistant" if group.endswith("chat") else "text"
+        main = "assistant" if group in CHAT_GROUPS else "text"
         teacher = item.get("teacher_nll") or {}
         nll_text = f"{teacher[main]['nll']:.4f}" if main in teacher else ""
         tail_text = f"{teacher['top32_tail_mass']['mean']:.4f}" if teacher.get("top32_tail_mass") else ""
@@ -344,6 +356,13 @@ def markdown(summary):
                 lines.append(f"- 来源：{item['source_samples']}；文档开头 token 数：{item['prefix_tokens']}")
             if "user_lang_samples" in item:
                 lines.append(f"- 用户消息语言：{item['user_lang_samples']}；用户消息 token 数：{item['user_tokens']}")
+            if "think" in item:
+                think = item["think"]
+                lines.append(
+                    f"- 思考模式：有助手回答的样本 {think['samples_with_assistant']}，写出 </think> 的 {think['closed']}（{think['close_rate']:.1%}），"
+                    f"没有写出的 {think['not_closed']}；思考 token 数 {think['reasoning_tokens']}；回答 token 数 {think['answer_tokens']}；"
+                    f"没有写出 </think> 的样本的思考长度 {think['reasoning_tokens_not_closed']}"
+                )
             if "prompt_lang_samples" in item:
                 lines.append(f"- 提问语言（保留样本数）：{item['prompt_lang_samples']}；回答与提问语言相同的比例：{item['same_lang_as_prompt']}")
                 lines.append(f"- 提问语言（保留 token 数）：{item['prompt_lang_tokens']}")
@@ -400,7 +419,7 @@ def markdown(summary):
     for key, item in summary.items():
         group, split = key.split("/")
         nll = item.get("nll") or {}
-        main = "assistant" if group.endswith("chat") else "generated"
+        main = "assistant" if group in CHAT_GROUPS else "generated"
         nll_text = f"{nll[main]['nll']:.4f}" if main in nll else ""
         gen_text = f"{item['gen_nll'].get('main', float('nan')):.4f}"
         dropped = ", ".join(f"{k} {v}" for k, v in item["dropped"].items()) or "0"

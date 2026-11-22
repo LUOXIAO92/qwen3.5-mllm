@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.replay.degeneration import gzip_ratio, loop_onset, max_window_repeat, near_loop_onset, ngram_repeat_rate
-from pipeline.replay.prompts import ALL_GROUPS, SPLITS
+from pipeline.replay.prompts import ALL_GROUPS, SELF_USER_GROUPS, SPLITS
 from pipeline.replay.store import ShardReader, read_all_records
 from pipeline.tokenizer_fix import check_tokenizer
 
@@ -183,12 +183,21 @@ def process(job):
         row["generated_text"] = generated
         stats_text = generated
     else:
-        user = content(ids = kept_arrays[0]) if group == "free_chat" else None
-        assistant = content(ids = kept_arrays[-1]) if (group in ("cont_chat", "prompt_chat") or len(kept_arrays) > 1) else ""
-        if group == "free_chat":
+        user = content(ids = kept_arrays[0]) if group in SELF_USER_GROUPS else None
+        has_assistant = group in ("cont_chat", "prompt_chat") or len(kept_arrays) > 1
+        assistant = content(ids = kept_arrays[-1]) if has_assistant else ""
+        if group in SELF_USER_GROUPS:
             row["user_text"] = user
         row["assistant_text"] = assistant
         stats_text = assistant
+        if group == "free_chat_think" and has_assistant:
+            # 思考模式：助手回答依次是思考、</think>、正式回答；记录 </think> 的位置（没有写出时为 None）
+            answer_ids = list(map(int, kept_arrays[-1]))
+            close = answer_ids.index(job["think_end_id"]) if job["think_end_id"] in answer_ids else None
+            row["think_closed"] = close is not None
+            row["reasoning_tokens"] = close if close is not None else len(answer_ids)
+            row["answer_tokens"] = len(answer_ids) - close - 1 if close is not None else 0
+            row["answer_text"] = content(ids = answer_ids[close + 1:]) if close is not None else ""
     prompt_meta(row = row, prompt = prompt, group = group)
     row.update(
         pieces = pieces,
@@ -229,6 +238,7 @@ def finalize_split(replay_dir, group, split, model_dir, jobs, no_filter = False,
             "stop_ids": stop_ids,
             "no_filter": no_filter,
             "drop_loops": drop_loops,
+            "think_end_id": tokenizer.convert_tokens_to_ids("</think>"),
         }
         for record in records
     ]

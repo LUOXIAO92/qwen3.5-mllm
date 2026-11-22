@@ -17,7 +17,7 @@ from pathlib import Path
 from pipeline.text.langid import LangIdentifier
 from pipeline.text.langs import GLOTLID_LABELS
 
-GROUPS = ("free_raw", "free_chat", "cont_raw", "cont_chat", "prompt_chat")
+GROUPS = ("free_raw", "free_chat", "cont_raw", "cont_chat", "free_chat_think", "prompt_chat")
 SPLITS = ("eval", "train")
 LABEL_TO_LANG = {label: lang for lang, labels in GLOTLID_LABELS.items() for label in labels}
 MAX_CHARS = 20000
@@ -57,9 +57,11 @@ def main():
                 rows = [json.loads(line) for line in handle]
             for row in rows:
                 text = row.get("generated_text") if group in ("free_raw", "cont_raw") else row.get("assistant_text")
+                if row.get("think_closed"):
+                    text = row.get("answer_text")  # 思考模式：判断正式回答的语言
                 row["lang"], row["lang_label"], row["lang_prob"] = detect(identifier = identifier, text = text)
                 row["script"] = main_script(text = text or "")
-                if group == "free_chat":
+                if group in ("free_chat", "free_chat_think"):
                     row["user_lang"], row["user_lang_label"], _ = detect(identifier = identifier, text = row.get("user_text"))
             tmp = path.with_suffix(".jsonl.tmp")
             with open(tmp, "w", encoding = "utf-8") as handle:

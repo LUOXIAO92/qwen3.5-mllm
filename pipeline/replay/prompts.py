@@ -8,6 +8,7 @@
 | --- | --- |
 | free_raw | 一个换行 `\\n`（模拟 BOS）；`--free-raw-start random` 时改为从普通词表中均匀抽取的一个 token。第一个生成 token 由 `first_token` 抽取后写进提示清单的 `first` 字段 |
 | free_chat | 聊天模板的用户轮开头 `<|im_start|>user\\n`。模型写完用户消息（以 `<|im_end|>` 结束）后，补上助手轮开头和空的思考块，再让模型写回答 |
+| free_chat_think | 与 free_chat 相同，助手轮按思考模式打开（`enable_thinking = True` 的生成提示，补上的是 `<|im_start|>assistant\\n<think>\\n`），模型先写思考、`</think>`，再写回答 |
 | cont_raw | 文档开头（64–256 token），不加模板 |
 | cont_chat | 用户轮内容为续写指令加空行加同一段文档开头，助手轮开头和空的思考块之后由模型续写 |
 
@@ -44,8 +45,12 @@ from pipeline.replay.first_token import first_token_logprobs, sample_first
 from pipeline.tokenizer_fix import check_tokenizer
 
 GROUPS = ("free_raw", "free_chat", "cont_raw", "cont_chat")
-# 第五组 prompt_chat（数据集中的真人提问 + 参考模型写的回答）只在丢弃循环的回放目录中，提示由 user_prompts 写出
-ALL_GROUPS = GROUPS + ("prompt_chat",)
+# 只在丢弃循环的回放目录中的组：free_chat_think（与 free_chat 相同，但助手轮按思考模式打开）；prompt_chat（数据集中的
+# 真人提问 + 参考模型写的回答，提示由 user_prompts 写出，暂不生成）
+ALL_GROUPS = GROUPS + ("free_chat_think", "prompt_chat")
+# 带聊天模板的组（生成的主体是助手回答），以及用户消息也由模型自己写的组
+CHAT_GROUPS = ("free_chat", "free_chat_think", "cont_chat", "prompt_chat")
+SELF_USER_GROUPS = ("free_chat", "free_chat_think")
 SPLITS = ("eval", "train")
 CONTINUE_INSTRUCTION = "Continue writing the following text."
 MIN_PREFIX_TOKENS = 64
@@ -78,6 +83,18 @@ def render_prompt(tokenizer, user):
         add_generation_prompt = True,
         enable_thinking = False,
     )
+
+
+def thinking_between(tokenizer):
+    """思考模式下用户消息的 <|im_end|> 之后补上的文本：按 enable_thinking = True 渲染生成提示，取用户内容之后的部分。"""
+    conversation = [{"role": "user", "content": [{"type": "text", "text": _USER}]}]
+    text = tokenizer.apply_chat_template(
+        conversation = conversation,
+        tokenize = False,
+        add_generation_prompt = True,
+        enable_thinking = True,
+    )
+    return text.split(_USER)[1].removeprefix("<|im_end|>")
 
 
 def chat_segments(tokenizer):
@@ -147,7 +164,7 @@ def main():
     parser.add_argument("--model", required = True, help = "参考模型目录（取分词器与 chat template）")
     parser.add_argument("--replay-dir", required = True, help = "回放目录；续写组默认读取其中的 prefixes/<划分>.jsonl")
     parser.add_argument("--prefixes-dir", default = None, help = "文档开头目录（prefixes 的输出），默认为 <回放目录>/prefixes")
-    parser.add_argument("--groups", nargs = "+", default = list(GROUPS))
+    parser.add_argument("--groups", nargs = "+", default = list(GROUPS), help = "free_chat_think 只用于丢弃循环的回放目录，需要显式给出")
     parser.add_argument("--free-count", default = "eval=8000,train=60000", help = "自由生成两组每个划分的提示条数（生成在达到 token 目标时停止）")
     parser.add_argument("--free-raw-start", choices = ["newline", "random"], default = "newline")
     parser.add_argument("--seed", type = int, default = 0)
@@ -180,17 +197,23 @@ def main():
                 sampler = np.random.default_rng(seed = [args.seed, SPLITS.index(split)])
                 rows = [{"prompt_ids": ids, "first": sample_first(logprobs = table[ids[0]], rng = sampler)} for ids in starts]
                 templates[group] = {"start": args.free_raw_start, "start_text": "\n" if args.free_raw_start == "newline" else None, "template": None}
-            elif group == "free_chat":
+            elif group in SELF_USER_GROUPS:
                 start_ids = encode(tokenizer = tokenizer, text = segments["user_start"])
                 rows = [{"prompt_ids": start_ids} for _ in range(free_count[split])]
+                if group == "free_chat":
+                    between = segments["between"].removeprefix("<|im_end|>")
+                    template = "apply_chat_template(add_generation_prompt = False, enable_thinking = False)，无系统消息"
+                else:
+                    between = thinking_between(tokenizer = tokenizer)
+                    template = "apply_chat_template(add_generation_prompt = True, enable_thinking = True) 的助手轮开头，模型自己写思考与 </think>，无系统消息"
                 templates[group] = {
                     "start_text": segments["user_start"],
                     "start_ids": start_ids,
                     # 用户消息以生成的 <|im_end|> 结束，其后补上的 token
-                    "between_text": segments["between"].removeprefix("<|im_end|>"),
-                    "between_ids": encode(tokenizer = tokenizer, text = segments["between"].removeprefix("<|im_end|>")),
+                    "between_text": between,
+                    "between_ids": encode(tokenizer = tokenizer, text = between),
                     "end_text": segments["end"],
-                    "template": "apply_chat_template(add_generation_prompt = False, enable_thinking = False)，无系统消息",
+                    "template": template,
                 }
             else:
                 with open(prefixes_dir / f"{split}.jsonl", encoding = "utf-8") as handle:
@@ -236,7 +259,9 @@ def main():
                 row["prompt_index"] = number
             write_jsonl(path = replay_dir / group / split / "prompts.jsonl", rows = rows)
             print(f"{group}/{split}: 提示 {len(rows)} 条", flush = True)
-    templates_path.write_text(json.dumps(templates, ensure_ascii = False, indent = 2) + "\n", encoding = "utf-8")
+    tmp = templates_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(templates, ensure_ascii = False, indent = 2) + "\n", encoding = "utf-8")
+    tmp.replace(templates_path)
 
 
 if __name__ == "__main__":

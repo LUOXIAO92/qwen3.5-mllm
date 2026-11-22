@@ -10,8 +10,8 @@
 # export prompts generate finalize langid report：沿用筛选目录的文档开头和自由生成两组的提示，续写两组的提示用修正后的
 # 分词器重新写出；生成时不检查循环、不保存 top-20，每条样本生成到结束符或上限，循环只作为元数据。
 # 丢弃循环模式（FILTER=noloop，写入 $DATASET/text/qwen3.5-asr/replay-noloop）的步骤依次为
-# import generate finalize langid estimate teacher verify report：import 把不筛选目录中没有循环的样本复制过来、有循环的
-# 只记元数据；generate 发现循环就中止并整条丢弃，其余样本原样保留，目标按保留的 token 数计；estimate 统计保留的
+# import think_prompts generate finalize langid estimate teacher verify report：import 把不筛选目录中没有循环的样本复制
+# 过来、有循环的只记元数据；think_prompts 写出 free_chat_think（与 free_chat 相同，助手轮按思考模式打开）的提示；generate 发现循环就中止并整条丢弃，其余样本原样保留，目标按保留的 token 数计；estimate 统计保留的
 # token 数与磁盘需求，teacher 再用参考模型前向一遍，保存保留样本每个生成位置的 top-32 分布。
 # 第五组 prompt_chat（数据集中的真人提问，参考模型写回答）的提示可以用 user_prompts 一步写出，但暂不生成（用户
 # 2026-11-22 决定），默认计划不含这一组；需要时加上 PLAN=...,prompt_chat:eval@instruct,prompt_chat:train@instruct 和对应的 TARGET。
@@ -40,13 +40,14 @@ elif [ "$FILTER" = noloop ]; then
     REPLAY="${REPLAY:-$DATASET/text/qwen3.5-asr/replay-noloop}"
     OUT="${OUT:-$WORK_DIR/data/T70/noloop}"
     # 无模板两组的训练用目标降为 1,000 万保留 token（用户 2026-11-22）
-    TARGET="${TARGET:-eval=1000000,train=30000000,free_raw:train=10000000,cont_raw:train=10000000}"
+    TARGET="${TARGET:-eval=1000000,train=30000000,free_raw:train=10000000,cont_raw:train=10000000,free_chat_think:train=10000000}"
     # 每条投放的提示平均保留的 token 数（有循环的样本按 0 计），由不筛选目录估计
-    PRIOR_MEAN="${PRIOR_MEAN:-free_raw=700,free_chat=750,cont_raw=800,cont_chat=400,prompt_chat=400}"
+    PRIOR_MEAN="${PRIOR_MEAN:-free_raw=700,free_chat=750,cont_raw=800,cont_chat=400,free_chat_think=1500,prompt_chat=400}"
     MAX_INFLIGHT="${MAX_INFLIGHT:-0}"
     GEN_FLAGS=(--drop-loops --topk 0)
     PLAN_DEFAULT="cont_raw:train,cont_chat:train,free_raw:eval,free_chat:eval,cont_raw:eval,cont_chat:eval,free_chat:train,free_raw:train"
-    DEFAULT_STEPS=(import generate finalize langid estimate teacher verify report)
+    PLAN_DEFAULT="$PLAN_DEFAULT,free_chat_think:eval,free_chat_think:train"
+    DEFAULT_STEPS=(import think_prompts generate finalize langid estimate teacher verify report)
 else
     REPLAY="${REPLAY:-$UNFILTERED_REPLAY}"
     OUT="${OUT:-$WORK_DIR/data/T70/unfiltered}"
@@ -140,6 +141,12 @@ step_prompts() {
         done
     done
     "$EVAL_ENV" -m pipeline.replay.prompts --groups cont_raw cont_chat --model "$REF" --replay-dir "$REPLAY" --prefixes-dir "$PREFIXES"
+}
+
+step_think_prompts() {
+    if [ ! -f "$REPLAY/free_chat_think/train/prompts.jsonl" ]; then
+        "$EVAL_ENV" -m pipeline.replay.prompts --groups free_chat_think --model "$REF" --replay-dir "$REPLAY"
+    fi
 }
 
 step_user_prompts() {

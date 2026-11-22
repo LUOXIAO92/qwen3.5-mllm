@@ -52,6 +52,7 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.replay.degeneration import degeneration_onset, loop_onset, near_loop_onset
+from pipeline.replay.prompts import CHAT_GROUPS, SELF_USER_GROUPS
 from pipeline.replay.store import TOP_K, ShardWriter, read_all_records, repair
 from pipeline.tokenizer_fix import check_tokenizer
 
@@ -211,10 +212,10 @@ class Generator:
         started = done | {stream.state["row"]["prompt_index"] for stream in suspended}
         pending = (row for row in prompts if row["prompt_index"] not in started and (part is None or row.get("part") == part))
         between_ids = None
-        if group == "free_chat":
+        if group in SELF_USER_GROUPS:
             templates = json.loads((Path(args.replay_dir) / "templates.json").read_text(encoding = "utf-8"))
-            between_ids = templates["free_chat"]["between_ids"]
-        main_role = "assistant" if group in ("free_chat", "cont_chat", "prompt_chat") else "text"
+            between_ids = templates[group]["between_ids"]
+        main_role = "assistant" if group in CHAT_GROUPS else "text"
 
         writer = None
         streams = {}
@@ -355,7 +356,7 @@ class Generator:
             finish_sample(state = state, status = "ok", kept = kept)
 
         for stream in suspended:
-            phase = 2 if stream.role == "assistant" and group == "free_chat" else 1
+            phase = 2 if stream.role == "assistant" and group in SELF_USER_GROUPS else 1
             request(request_id = f"{stream.state['row']['prompt_index']}-{phase}", stream = stream)
 
         while True:
@@ -382,7 +383,7 @@ class Generator:
                     exhausted = True
                     break
                 state = {"row": row, "pieces": [{"ids": row["prompt_ids"]}], "arrays": [], "roles": []}
-                role = "user" if group == "free_chat" else main_role
+                role = "user" if group in SELF_USER_GROUPS else main_role
                 submit(
                     state = state,
                     phase = 1,
