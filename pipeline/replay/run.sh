@@ -10,10 +10,11 @@
 # export prompts generate finalize langid report：沿用筛选目录的文档开头和自由生成两组的提示，续写两组的提示用修正后的
 # 分词器重新写出；生成时不检查循环、不保存 top-20，每条样本生成到结束符或上限，循环只作为元数据。
 # 丢弃循环模式（FILTER=noloop，写入 $DATASET/text/qwen3.5-asr/replay-noloop）的步骤依次为
-# import user_prompts generate finalize langid estimate teacher verify report：import 把不筛选目录中没有循环的样本复制
-# 过来、有循环的只记元数据；user_prompts 写出第五组 prompt_chat 的提示（数据集中的真人提问，AGENT_CONTEXTS 给出时
-# 另外追加工具调用与编程上下文）；generate 发现循环就中止并整条丢弃，其余样本原样保留，目标按保留的 token 数计；
-# estimate 统计保留的 token 数与磁盘需求，teacher 再用参考模型前向一遍，保存保留样本每个生成位置的 top-32 分布。
+# import generate finalize langid estimate teacher verify report：import 把不筛选目录中没有循环的样本复制过来、有循环的
+# 只记元数据；generate 发现循环就中止并整条丢弃，其余样本原样保留，目标按保留的 token 数计；estimate 统计保留的
+# token 数与磁盘需求，teacher 再用参考模型前向一遍，保存保留样本每个生成位置的 top-32 分布。
+# 第五组 prompt_chat（数据集中的真人提问，参考模型写回答）的提示可以用 user_prompts 一步写出，但暂不生成（用户
+# 2026-11-22 决定），默认计划不含这一组；需要时加上 PLAN=...,prompt_chat:eval@instruct,prompt_chat:train@instruct 和对应的 TARGET。
 # 不给参数时执行当前模式的全部步骤。每一步都可以单独重跑；generate 与 teacher 每次持有 GPU 锁约 TIME_BUDGET 秒，
 # 没有完成就释放锁再续跑。每次占用 GPU 之前检查 nvidia-smi：有其他进程占着显存（例如 ComfyUI）就等待，不结束别人的进程。
 set -euo pipefail
@@ -39,20 +40,13 @@ elif [ "$FILTER" = noloop ]; then
     REPLAY="${REPLAY:-$DATASET/text/qwen3.5-asr/replay-noloop}"
     OUT="${OUT:-$WORK_DIR/data/T70/noloop}"
     # 无模板两组的训练用目标降为 1,000 万保留 token（用户 2026-11-22）
-    # prompt_chat 的训练用目标分成数据集提问 2,000 万与工具调用、编程上下文 1,000 万，评测用 70 万与 30 万
-    TARGET="${TARGET:-eval=1000000,train=30000000,free_raw:train=10000000,cont_raw:train=10000000,prompt_chat:eval@instruct=700000,prompt_chat:train@instruct=20000000,prompt_chat:eval@agent=300000,prompt_chat:train@agent=10000000}"
+    TARGET="${TARGET:-eval=1000000,train=30000000,free_raw:train=10000000,cont_raw:train=10000000}"
     # 每条投放的提示平均保留的 token 数（有循环的样本按 0 计），由不筛选目录估计
     PRIOR_MEAN="${PRIOR_MEAN:-free_raw=700,free_chat=750,cont_raw=800,cont_chat=400,prompt_chat=400}"
     MAX_INFLIGHT="${MAX_INFLIGHT:-0}"
-    # 工具调用上下文的提示最长 12,288 个 token，加上最多 16,384 个生成 token
-    MAX_MODEL_LEN="${MAX_MODEL_LEN:-28800}"
-    GEN_FLAGS=(--drop-loops --topk 0 --max-model-len "$MAX_MODEL_LEN")
+    GEN_FLAGS=(--drop-loops --topk 0)
     PLAN_DEFAULT="cont_raw:train,cont_chat:train,free_raw:eval,free_chat:eval,cont_raw:eval,cont_chat:eval,free_chat:train,free_raw:train"
-    PLAN_DEFAULT="$PLAN_DEFAULT,prompt_chat:eval@instruct,prompt_chat:train@instruct"
-    if [ -n "${AGENT_CONTEXTS:-}" ]; then
-        PLAN_DEFAULT="$PLAN_DEFAULT,prompt_chat:eval@agent,prompt_chat:train@agent"
-    fi
-    DEFAULT_STEPS=(import user_prompts generate finalize langid estimate teacher verify report)
+    DEFAULT_STEPS=(import generate finalize langid estimate teacher verify report)
 else
     REPLAY="${REPLAY:-$UNFILTERED_REPLAY}"
     OUT="${OUT:-$WORK_DIR/data/T70/unfiltered}"
@@ -149,11 +143,9 @@ step_prompts() {
 }
 
 step_user_prompts() {
+    # 只写出 prompt_chat 的提示，不在默认步骤中
     if [ ! -f "$REPLAY/prompt_chat/train/prompts.jsonl" ]; then
         "$EVAL_ENV" -m pipeline.replay.user_prompts --model "$REF" --raw-root "$DATASET/text" --replay-dir "$REPLAY"
-    fi
-    if [ -n "${AGENT_CONTEXTS:-}" ]; then
-        "$EVAL_ENV" -m pipeline.replay.user_prompts --model "$REF" --replay-dir "$REPLAY" --agent "$AGENT_CONTEXTS"
     fi
 }
 

@@ -306,7 +306,7 @@ Common Voice 和 Tatoeba 的质量因语言而异。Common Voice 的 id、ms 句
 
 ## 回放文本的用户提问（#70）
 
-自生成回放的第五组 prompt_chat 用指令数据集中真人写的用户提问作用户消息，由参考模型写回答（脚本 `pipeline/replay/user_prompts.py`，用法见 `pipeline/README.md` 第 9 节）。只用提问，不用数据集中的回答。两份数据都不需要申请，2026-11-22 读取数据卡核对过许可，下载到 `$DATASET/text/<机构>/<数据集名>`。
+自生成回放的第五组 prompt_chat 用指令数据集中真人写的用户提问作用户消息，由参考模型写回答（脚本 `pipeline/replay/user_prompts.py`，用法见 `pipeline/README.md` 第 9 节）；提示已经写好，暂不生成。只用提问，不用数据集中的回答。两份数据都不需要申请，2026-11-22 读取数据卡核对过许可，下载到 `$DATASET/text/<机构>/<数据集名>`。
 
 ### [CohereLabs/aya_dataset](https://huggingface.co/datasets/CohereLabs/aya_dataset)
 
