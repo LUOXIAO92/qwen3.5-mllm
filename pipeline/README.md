@@ -154,6 +154,16 @@ WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid <工作目录>/en
 
 读音频的两项（FLEURS、探针）用 `envs/mllm-eval`（有 soundfile），纯文本的三项和冒烟比较用 `envs/mllm-train`（有 flash-linear-attention、flash-attn 与 mm_assistant_mask）。在 RTX 5090 上估计每个运行约 1.5 小时（思考检查约 34 分钟，用 sdpa 时约 49 分钟），参考模型约 42 分钟，全部约 9.6 小时；思考检查的估计按每步 K、V 的读写量和显存带宽算出，没有实测，驱动程序做完第一项后改按实测用时估计剩余时间。一晚做不完时用 `kill <status.json 中的 pid>` 停下，下次重新运行即可续跑。设置与续跑的细节见脚本开头。
 
+#71 的文本基准衡量全量微调后的语言模型还保留多少 Qwen3.5-2B 原有的文本能力（`pipeline/eval/text_bench.py`，只用语言模型，不需要 projector）。MMLU-Redux（排除数据集标为有错的 278 题，用其余 2,722 题）、C-Eval 验证集（1,346 题）和 MMMLU 中与项目重合的 10 种语言（每种同一组 500 题）是零样本选择题，用非思考模式：提示要求只回答字母，不生成，比较助手回合第一个位置上 A、B、C、D 四个 token 的对数概率。IFEval（541 条）用非思考模式贪心生成，最多 1,280 个新 token，打分用 google-research 的官方代码（`pipeline/eval/ifeval/`，Apache-2.0，只改了导入和两个可以用标准库代替的依赖），给出 prompt 级与 instruction 级的 strict、loose 四个比例。GPQA Diamond（198 题）用思考模式，生成设置与思考检查相同（温度 1，最多 16,384 个新 token，全注意力层用 FlashAttention-2，按剩余显存分批），答案从 `</think>` 之后的 `"answer": "X"` 或 `\boxed{X}` 中解析，没写完 `</think>` 或找不到答案都算错；它的使用条款要求不公开题目，结果文件只记录题目编号、选项顺序与对错。数据放在 `$DATASET/text/<机构>/<数据集名>`，来源、许可和下载版本见 `datasets.md`「文本基准（#71）」。
+
+`pipeline/eval/bench_local.py` 先对参考模型和 C 组六个运行各做一遍四项简单基准（每个模型一个进程，模型只载入一次），全部做完后再对每个模型做 GPQA。已有结果的项目跳过，单项失败记下后接着做，GPU 锁、显存等待和进程组的处理与 `c71_local.py` 相同（直接使用它的 `Driver`）。IFEval 的打分需要 langdetect 与 nltk（≥ 3.9.1，带 punkt_tab 数据），项目的 `envs/mllm-train`、`envs/mllm-eval` 都没有，用 `--py-ifeval` 指定另一个有这两个包的 python，只用 CPU；不给时只生成、不打分，以后补上参数重新运行即可补打分。结果在 `<工作目录>/data/T71c/bench/<模型>/`，`summary.md` 列出各模型的分数、与参考模型之差、模型卡上的分数、MMMLU 各语言和诊断量（四个字母的概率和、IFEval 回答长度、GPQA 写完 `</think>` 的比例等）。在 RTX 5090 上估计每个模型的简单基准约 8 分钟、GPQA 约 45 分钟，七个模型共约 6 小时：
+
+```bash
+WORK_DIR=<工作目录> DATASET=<数据集目录> python -m pipeline.eval.bench_local --runs-root <运行目录> --py-ifeval <python> --dry-run
+WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid <工作目录>/envs/mllm-train/bin/python -m pipeline.eval.bench_local \
+    --runs-root <运行目录> --py-ifeval <python> >> <工作目录>/data/T71c/bench/launch.out 2>&1 < /dev/null &
+```
+
 ## 8. 在 Google Colab 上训练
 
 本机的训练可以在 Colab 上续训。训练音频按训练计划打包成约 1 GB 的 tar 分片上传到 Google Drive，Colab 上只在本地保留常驻分片和一段滚动窗口，训练程序按位置读出原始字节再解码（`--audio-shards`）。打包、上传、Colab 单元格和存储桶测试的步骤见 [colab/README.md](colab/README.md)。

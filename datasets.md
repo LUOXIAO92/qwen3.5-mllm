@@ -319,3 +319,37 @@ Common Voice 和 Tatoeba 的质量因语言而异。Common Voice 的 id、ms 句
 - **内容**：众包的多轮对话树，按消息存放，字段含 `parent_id`、`role`、`lang`、`review_result`、`deleted`、`text`。
 - **用法**：每棵树只取第一条用户消息（`parent_id` 为空、`role` 为 prompter、`review_result` 为真、没有删除）；`validation` 划分作评测用，`train` 划分作训练用。语言取 `lang` 的主标签（pt-BR 算 pt），项目语言以英语、西班牙语、俄语、中文、德语为主。
 - **许可**：Apache-2.0。
+
+## 文本基准（#71）
+
+用来看全量微调后的语言模型还保留多少 Qwen3.5-2B 原有的文本能力（脚本 `pipeline/eval/text_bench.py` 与 `pipeline/eval/bench_local.py`，用法见 `pipeline/README.md` 第 7 节）。只用于评测，不参与任何训练。2026-11-24 读取数据卡核对许可，下载到 `$DATASET/text/<机构>/<数据集名>`。前四份不需要申请，下载时不登录、不带 token，按固定版本（各目录的 `REVISION`）下载；GPQA 需要在 Hugging Face 上同意条款（自动批准），由用户同意后下载。
+
+### [edinburgh-dawg/mmlu-redux](https://huggingface.co/datasets/edinburgh-dawg/mmlu-redux)
+
+- **内容**：MMLU 30 个学科各 100 题的人工复核版，共 3,000 题，字段 `question`、`choices`（4 个选项）、`answer`、`error_type`（`ok` 或问题类型）、`correct_answer` 等。`error_type` 不是 `ok` 的有 278 题：题目不清楚 85、标准答案错误 83、多个正确答案 35、需要专家判断 30、没有正确答案 30、选项不清楚 15。
+- **用法**：读各学科的 `data-00000-of-00001.arrow`（`test.csv` 只有部分学科有）；排除 `error_type` 不是 `ok` 的题，用其余 2,722 题，全部 3,000 题按原标准答案的结果另记。
+- **许可**：CC-BY-4.0。版本 `3720db6aeb3d019de48bf37916c1a54074ff4997`。
+
+### [ceval/ceval-exam](https://huggingface.co/datasets/ceval/ceval-exam)
+
+- **内容**：52 个学科的中文四选一考试题，每个学科分 dev、val、test 三个划分，字段 `id`、`question`、`A`–`D`、`answer`、`explanation`。test 划分的答案不公开。
+- **用法**：只下载并使用 val 划分（1,346 题）。
+- **许可**：CC-BY-NC-SA-4.0（非商业使用，本项目纯开源、不涉及商业使用）。版本 `617524a00b307ff6f9933702f724131fe12ca7ce`。
+
+### [openai/MMMLU](https://huggingface.co/datasets/openai/MMMLU)
+
+- **内容**：MMLU 测试集（14,042 题）由专业译者译成 14 种语言，每种语言一个 CSV，各文件按行对应同一道题，字段 `Question`、`A`–`D`、`Answer`、`Subject`；少数行的译本调整了选项顺序，标准答案也随之不同。
+- **用法**：只下载与项目重合的 10 种语言（ar `AR-XY`、de `DE-DE`、es `ES-LA`、fr `FR-FR`、id `ID-ID`、it `IT-IT`、ja `JA-JP`、ko `KO-KR`、pt `PT-BR`、zh `ZH-CN`），用固定种子抽同一组 500 个行号。
+- **许可**：MIT。版本 `325a01dc3e173cac1578df94120499aaca2e2504`。
+
+### [google/IFEval](https://huggingface.co/datasets/google/IFEval)
+
+- **内容**：541 条带可自动检查的格式要求（字数、段落数、不用逗号、全小写、JSON 等 25 类）的提问，字段 `key`、`prompt`、`instruction_id_list`、`kwargs`。
+- **用法**：模型生成回答，用 google-research 官方的检查代码打分（放在 `pipeline/eval/ifeval/`，Apache-2.0）。与 F 盘已有的副本（`F:\models\qwen3.5-asr\dataset\eval\google__IFEval`）逐字节相同。
+- **许可**：Apache-2.0。版本 `966cd89545d6b6acfd7638bc708b98261ca58e84`。
+
+### [Idavidrein/gpqa](https://huggingface.co/datasets/Idavidrein/gpqa)
+
+- **内容**：生物、物理、化学领域专家写的高难度四选一题；只用 `gpqa_diamond.csv`（198 题），字段含 `Question`、`Correct Answer`、`Incorrect Answer 1`–`3`、`Record ID`。
+- **用法**：思考模式生成，选项按 Record ID 固定打乱。条款要求不在网上以文字或图片公开题目（避免泄漏进训练语料），所以结果文件只有 Record ID、选项顺序、答案字母与对错，日志不打印题目、选项和模型的回答；生成的 token id 只存在本机的 `gpqa.ids.i32` 中，汇总只有比例。
+- **许可**：CC-BY-4.0，gated（同意条款后自动批准）。
