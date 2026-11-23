@@ -50,7 +50,7 @@ GPQA Diamond（思考模式）：数据的使用条款要求不在网上公开�
 top_p 0.95、top_k 20、presence_penalty 1.5），每批开始前按 --gpqa-seed 加批序号固定随机数，每题只采样一次；最多
 --gpqa-max-new-tokens（默认 16,384，与思考检查相同；模型卡建议大多数提问用 32,768）个新 token；全注意力层用
 FlashAttention-2（think_check.FLASH_ATTENTION），载入或生成出错时整项改用 sdpa，批大小按剩余显存估算（与思考检查的
---fit-memory 相同），显存不足时对半拆开重试。答案只在 </think> 之后找：`"answer": "X"`（键可以不带引号）与
+--fit-memory 相同，RTX 5090 上 3 批、每批 66 题），显存不足时对半拆开重试；题目按提示长度排序后分批，减少左填充。答案只在 </think> 之后找：`"answer": "X"`（键可以不带引号）与
 `\\boxed{X}` 两种写法中位置最靠后的一个。没有写完 </think>（unclosed）或者找不到答案（no_answer）都算错，单独报告。
 主指标是 198 题的准确率（模型卡思考模式 51.6）；每题只采样一次，198 题的标准误约 3.5 个百分点。
 
@@ -534,9 +534,11 @@ def run_gpqa(args, data_dir: Path, out_dir: Path, log) -> None:
             log = log,
         )
 
+    # 提示长度相差很大（中位数约 218 个 token，最长约 2,800），按长度排序后再分批，同一批左填充得少；结果按原顺序写出
+    order = sorted(range(len(prompts)), key = lambda index: (len(prompts[index][1]), index))
     result = think_check.think_generate(
         load = load,
-        prompts = prompts,
+        prompts = [prompts[index] for index in order],
         requested = args.gpqa_attention,
         choose_batch_size = choose_batch_size,
         max_new_tokens = args.gpqa_max_new_tokens,
@@ -544,10 +546,13 @@ def run_gpqa(args, data_dir: Path, out_dir: Path, log) -> None:
         seed = args.gpqa_seed,
         log = log,
     )
+    outputs = [None] * len(prompts)
+    for position, index in enumerate(order):
+        outputs[index] = result["outputs"][position]
     items = []
     generated = []
     offset = 0
-    for row, (_, prompt), ids in zip(rows, prompts, result["outputs"]):
+    for row, (_, prompt), ids in zip(rows, prompts, outputs):
         stats = think_check.analyze(ids = ids, max_new_tokens = args.gpqa_max_new_tokens)
         pred = None
         if stats["closed"]:

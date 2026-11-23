@@ -7,7 +7,7 @@
 checkpoint-0030000/language_model.safetensors，按 safetensors 文件头核对已下载完整；纯文本评测不需要 projector）。
 
 顺序：先对每个模型做四项简单基准（每个模型一个进程，模型只载入一次，约几分钟），参考模型在前；全部模型做完后，再对每个
-模型做 GPQA（每个模型约 45 分钟，最费时，放在最后）。IFEval 生成之后，用 --py-ifeval（需要 langdetect 与 nltk 的
+模型做 GPQA（每个模型约 42 分钟，最费时，放在最后）。IFEval 生成之后，用 --py-ifeval（需要 langdetect 与 nltk 的
 python，只用 CPU、不持有 GPU 锁）打分；没有给 --py-ifeval 或它缺少依赖时只做生成、跳过打分，并在 driver.log 中说明，
 以后补上 --py-ifeval 重新运行即可补打分。GPQA 的数据（gated，需要在 Hugging Face 上同意条款后下载）不在时跳过 GPQA 并
 说明。每做完一种项目（简单基准、GPQA）之前重新检查哪些运行已下载完整，中途下载完成的运行在后面补上。
@@ -53,15 +53,16 @@ SIMPLE = ("mmlu_redux", "ceval", "mmmlu", "ifeval")
 BENCH_CHOICES = SIMPLE + ("gpqa",)
 LM_FILE = f"{c71_local.CHECKPOINT}/language_model.safetensors"
 # RTX 5090 上的估计用时（分钟），不含从运行目录载入语言模型（c71_local.LM_LOAD_MINUTES）：
-# - 载入融合模型约 1 分钟；
-# - 三项选择题共约 137 万个提示 token，只做前向；IFEval 541 条贪心生成，按剩余显存约 2 批、每批最多 1,280 步；
-# - GPQA：198 题、每题最多 16,384 个新 token，按剩余显存分成 3 批、每批 66 条（与思考检查相同；提示中位数约 218 个
-#   token，与思考检查相近）。几乎每批都有样本写到上限，一批的用时由上限决定：参考模型的思考检查（2026-11-24 本机，
-#   flash_attention_2，67 条一批）实测每批约 829 秒，比 c71_local.think_minutes 的估计（每批约 11 分钟）长。
+# - 载入融合模型：冒烟测试（2026-11-24，参考模型）6 秒，取 1 分钟；
+# - 三项选择题共约 137 万个提示 token，只做前向：冒烟测试 240 题（约 3.7 万 token）用 1.8 秒，全部约 1–2 分钟；
+# - IFEval 541 条贪心生成：每条约 0.05 GiB，按剩余显存分 2 批，每批最多 1,280 步（冒烟测试 5 条 13 秒）；
+# - GPQA：198 题、每题最多 16,384 个新 token，按剩余显存分成 3 批、每批 66 条（与思考检查相同）。几乎每批都有样本写到
+#   上限，一批的用时由上限决定：参考模型的思考检查（2026-11-24 本机，flash_attention_2，67、67、66 条三批）实测共 2,435
+#   秒、每批约 812 秒，比 c71_local.think_minutes 的估计（每批约 11 分钟）长。
 LOAD_MINUTES = 1.0
-SIMPLE_MINUTES = {"mmlu_redux": 1.0, "ceval": 0.5, "mmmlu": 1.5, "ifeval": 4.0}
+SIMPLE_MINUTES = {"mmlu_redux": 0.5, "ceval": 0.3, "mmmlu": 1.0, "ifeval": 3.0}
 GPQA_BATCHES = 3
-THINK_BATCH_SECONDS = 829
+THINK_BATCH_SECONDS = 812
 IFEVAL_SCORE_TIMEOUT = 30 * 60
 
 

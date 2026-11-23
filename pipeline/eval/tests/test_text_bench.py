@@ -149,6 +149,81 @@ class LetterScoreTest(unittest.TestCase):
         self.assertEqual(stats["pred_share"]["D"], 0.25)
 
 
+class FakeTokenizer:
+    """chat template 原样返回用户消息；每个字符一个 token（字符编码），解码时还原。"""
+
+    def apply_chat_template(self, conversation, tokenize, add_generation_prompt, enable_thinking):
+        return conversation[0]["content"]
+
+    def __call__(self, text, add_special_tokens):
+        return {"input_ids": [ord(char) for char in text]}
+
+    def decode(self, token_ids, skip_special_tokens):
+        return "".join(chr(token) for token in token_ids if token < 0x110000)
+
+
+class GpqaRunTest(unittest.TestCase):
+    def test_sorted_batches_restore_order_and_statuses(self):
+        from pipeline.eval import think_check
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = [
+                {
+                    "Record ID": f"rec{i}",
+                    "Question": "q" * (50 - 10 * i),
+                    "Correct Answer": "right",
+                    "Incorrect Answer 1": "w1",
+                    "Incorrect Answer 2": "w2",
+                    "Incorrect Answer 3": "w3",
+                }
+                for i in range(4)
+            ]
+            data = Path(tmp) / "text"
+            write_csv(path = data / text_bench.DATA["gpqa"], rows = rows)
+            golds = {row["id"]: row["gold"] for row in text_bench.load_gpqa(path = data / text_bench.DATA["gpqa"])}
+            seen = {}
+
+            def fake_generate(load, prompts, requested, choose_batch_size, max_new_tokens, temperature, seed, log):
+                seen["order"] = [sample_id for sample_id, _ in prompts]
+                outputs = []
+                for sample_id, _ in prompts:
+                    reasoning = [ord("x")] * 5
+                    if sample_id == "rec0":
+                        outputs.append(reasoning * 20)
+                        continue
+                    if sample_id == "rec1":
+                        answer = "I cannot decide."
+                    elif sample_id == "rec2":
+                        answer = '{"answer": "%s"}' % golds[sample_id]
+                    else:
+                        answer = "\\boxed{%s}" % ("A" if golds[sample_id] != "A" else "B")
+                    outputs.append(reasoning + [think_check.THINK_END_ID] + [ord(char) for char in answer] + [think_check.STOP_IDS[0]])
+                return {"outputs": outputs, "batches": [4], "batch_size": 4, "used": requested, "reason": None, "seconds": 1.0}
+
+            args = text_bench.parse_args(argv = ["gpqa", "--model-dir", tmp, "--data-dir", str(data), "--out-dir", tmp, "--gpqa-max-new-tokens", "100"])
+            with mock.patch.object(target = text_bench, attribute = "tokenizer_of", return_value = FakeTokenizer()), \
+                    mock.patch.object(target = think_check, attribute = "think_generate", side_effect = fake_generate):
+                text_bench.run_gpqa(args = args, data_dir = data, out_dir = Path(tmp), log = lambda message: None)
+            summary = json.loads((Path(tmp) / "gpqa.json").read_text(encoding = "utf-8"))
+            items = [json.loads(line) for line in (Path(tmp) / "gpqa.items.jsonl").read_text(encoding = "utf-8").splitlines()]
+            ids_size = (Path(tmp) / "gpqa.ids.i32").stat().st_size
+        # 题目越往后越短：按提示长度排序后倒过来生成，结果按原顺序写出
+        self.assertEqual(seen["order"], ["rec3", "rec2", "rec1", "rec0"])
+        self.assertEqual([item["id"] for item in items], ["rec0", "rec1", "rec2", "rec3"])
+        self.assertEqual([item["status"] for item in items], ["unclosed", "no_answer", "answered", "answered"])
+        self.assertEqual([item["correct"] for item in items], [False, False, True, False])
+        self.assertEqual(summary["accuracy"], 0.25)
+        self.assertEqual(summary["unclosed"], 0.25)
+        self.assertEqual(summary["no_answer"], 0.25)
+        self.assertEqual(summary["accuracy_answered"], 0.5)
+        self.assertEqual(summary["closed"], 0.75)
+        self.assertEqual(ids_size, 4 * sum(item["tokens"] for item in items))
+        # 结果中没有题目与选项的文字
+        self.assertNotIn("question", items[0])
+        self.assertNotIn("options", items[0])
+        self.assertNotIn("right", json.dumps(items) + json.dumps(summary))
+
+
 def fake_paths(root):
     root = Path(root)
     return {
