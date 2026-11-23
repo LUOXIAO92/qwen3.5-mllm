@@ -40,7 +40,8 @@
 回放数据须已由 setup.sh 解到 $DATASET/text/qwen3.5-asr/replay-noloop，FLEURS test 已由 fleurs_prepare 准备在
 $WORK_DIR/data/T02。可选：C71_TAG（输出名后缀）、C71_RATIO（默认 0.5）、C71_REPLAY_NORM（asr 或 step，默认 asr，按 token 归一化）、
 C71_RUNS（逗号分隔，只跑这些运行，默认全部）、
-C71_SKIP_SMOKE=1、C71_THINK_MAX_NEW（默认 16384）、C71_DEADLINE_HOURS、C71_CU_PER_HOUR（默认 10，#65 实测的 G4 消耗）、
+C71_SKIP_SMOKE=1、C71_THINK_MAX_NEW（默认 16384）、C71_THINK_ATTENTION（思考检查全注意力层的实现，默认 flash_attention_2）、
+C71_DEADLINE_HOURS、C71_CU_PER_HOUR（默认 10，#65 实测的 G4 消耗）、
 C71_STATE_SYNC_STEPS、C71_ESTIMATE_ONLY=1（只打印估计后退出）、C71_TRAIN_ONLY=1（只训练：跳过各运行的评测、参考模型的评测和
 汇总，训练全部完成后状态为 trained；以后去掉它重新运行驱动程序，只补做评测）。
 
@@ -82,6 +83,9 @@ RATIO = ENV.get("C71_RATIO", "0.5")
 # 一步损失的分母（train.py --replay-norm）：step 是用户 2026-11-23 的决定；asr 见 pipeline/train/replay.py「损失归一化与实际权重」。
 REPLAY_NORM = ENV.get("C71_REPLAY_NORM", "asr")
 THINK_MAX_NEW = int(ENV.get("C71_THINK_MAX_NEW", "16384"))
+# 思考检查中语言模型全注意力层的实现（think_check --attn-implementation）。用户 2026-11-23 决定所有模型（六个运行与参考模型）
+# 一律用 FlashAttention-2；think_check 在它出错时自动改用 sdpa，并在 summary.json 中记下实际的实现。
+THINK_ATTENTION = ENV.get("C71_THINK_ATTENTION", "flash_attention_2")
 DEADLINE_HOURS = float(ENV.get("C71_DEADLINE_HOURS", "23"))
 CU_PER_HOUR = float(ENV.get("C71_CU_PER_HOUR", "10"))
 STATE_SYNC_STEPS = int(ENV.get("C71_STATE_SYNC_STEPS", "0"))
@@ -685,17 +689,20 @@ def eval_items(
     fleurs_dir = None,
     replay_dir = None,
     think_max_new = None,
+    think_attention = None,
 ):
     """一个模型的各项评测：[(名称, 命令, 完成标志文件, 估计分钟)]。都不给时评测参考模型（原始语言模型）。
 
-    python、model_dir、fleurs_dir、replay_dir、think_max_new 不给时用本驱动程序的设置（PY、MODEL、FLEURS、REPLAY_DIR、
-    C71_THINK_MAX_NEW）。本机评测（pipeline.eval.c71_local）传入本机的路径，评测项目和设置都以这里为准。
+    python、model_dir、fleurs_dir、replay_dir、think_max_new、think_attention 不给时用本驱动程序的设置（PY、MODEL、FLEURS、
+    REPLAY_DIR、C71_THINK_MAX_NEW、C71_THINK_ATTENTION）。本机评测（pipeline.eval.c71_local）传入本机的路径，评测项目和设置
+    都以这里为准。
     """
     python = PY if python is None else str(python)
     model = str(MODEL if model_dir is None else model_dir)
     manifests = str(FLEURS if fleurs_dir is None else fleurs_dir)
     replay = str(REPLAY_DIR if replay_dir is None else replay_dir)
     think_max_new = THINK_MAX_NEW if think_max_new is None else int(think_max_new)
+    think_attention = THINK_ATTENTION if think_attention is None else str(think_attention)
     lm_args = ["--language-model", str(language_model)] if language_model is not None else []
     audio_args = (["--projector", str(projector)] if projector is not None else []) + lm_args
     items = []
@@ -720,7 +727,7 @@ def eval_items(
         ], out / "replay_gap" / "summary.json", ESTIMATE["eval_replay_gap"]),
         ("think", [
             python, "-m", "pipeline.eval.think_check", "--model-dir", model, *lm_args, "--replay-dir", replay,
-            "--max-new-tokens", str(think_max_new), "--output-dir", str(out / "think"),
+            "--max-new-tokens", str(think_max_new), "--attn-implementation", think_attention, "--output-dir", str(out / "think"),
         ], out / "think" / "summary.json", 16 * think_max_new / 16384 + 2),
     ]
     return items

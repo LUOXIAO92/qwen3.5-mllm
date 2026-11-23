@@ -139,20 +139,20 @@ flock <工作目录>/gpu.lock python -m pipeline.eval.lm_ppl --model-dir qwen3.5
 flock <工作目录>/gpu.lock python -m pipeline.eval.replay_gap --model-dir qwen3.5-2b-mllm --language-model <检查点>/language_model.safetensors \
     --replay-dir $DATASET/text/qwen3.5-asr/replay-noloop --output-dir <输出目录>/replay_gap
 flock <工作目录>/gpu.lock python -m pipeline.eval.think_check --model-dir qwen3.5-2b-mllm --language-model <检查点>/language_model.safetensors \
-    --replay-dir $DATASET/text/qwen3.5-asr/replay-noloop --output-dir <输出目录>/think
+    --replay-dir $DATASET/text/qwen3.5-asr/replay-noloop --attn-implementation flash_attention_2 --fit-memory --output-dir <输出目录>/think
 ```
 
-`lm_ppl` 是语言模型对 FLEURS 参考文本的每字困惑度（与 #66、#71 第一轮的计算相同）。`replay_gap` 在五组回放评测集上按训练时的损失位置算每 token 负对数似然，减去参考模型的（teacher 中的 `lp.f32`），得到前向 KL 的估计，free_chat_think 另分推理和回答。`think_check` 用 free_chat_think 评测集中参考模型自己写的 200 条提问开启思考生成（温度 1、不设 top-k / top-p，最多 16,384 个新 token），统计写完 `</think>` 的比例、推理与回答的长度和循环比例。在 32 GB 的显卡上加 `--fit-memory`，按剩余显存把 200 条分成几批（RTX 5090 上 3 批、每批 67 条），提问、温度和上限不变。
+`lm_ppl` 是语言模型对 FLEURS 参考文本的每字困惑度（与 #66、#71 第一轮的计算相同）。`replay_gap` 在五组回放评测集上按训练时的损失位置算每 token 负对数似然，减去参考模型的（teacher 中的 `lp.f32`），得到前向 KL 的估计，free_chat_think 另分推理和回答。`think_check` 用 free_chat_think 评测集中参考模型自己写的 200 条提问开启思考生成（温度 1、不设 top-k / top-p，最多 16,384 个新 token），统计写完 `</think>` 的比例、推理与回答的长度和循环比例。`--attn-implementation flash_attention_2` 让语言模型的 6 个全注意力层用 FlashAttention-2（线性注意力层仍用 fla 的内核），载入或生成出错时自动改用 sdpa 从头重做，`summary.json` 的 `attn_implementation_used` 记下实际的实现；比较不同模型时要用同一种实现。在 32 GB 的显卡上加 `--fit-memory`，按剩余显存和注意力实现把 200 条分成几批（RTX 5090 上两种实现都是 3 批、每批 67 条，每条约 0.26 GiB 与 0.36 GiB），提问、温度和上限不变。`--smoke` 在 4 条左填充的提问上逐步比较 sdpa 与 FlashAttention-2 的分布，给出该用哪一种。
 
-#71 C 组第一轮在 Colab 上只训练，全部评测在本机进行，由 `pipeline/eval/c71_local.py` 完成。从 Google Drive 下载每个运行 `runs/v2b-2b-cpt77-<c0|c-free_raw|c-free_chat|c-cont_raw|c-cont_chat|c-mix>/` 中的 `checkpoint-0030000/language_model.safetensors`（约 3.76 GB）、`projector.safetensors`、`projector.json`，以及运行目录中的 `train_config.json`、`train_log.jsonl`、`eval_log.jsonl`、`replay_log.jsonl`（C0 没有），保持同样的目录结构放到 `<工作目录>/data/T71c/runs/` 下，六个运行共约 22.8 GB，`trainer_state.pt` 不用下载。驱动程序对下载齐全的运行和参考模型做 Colab 驱动程序 `c_runs.py` 中同样的评测项目（命令由 `c_runs.eval_items` 生成，只换成本机的路径和 python），已有结果的项目跳过，单项失败记下后接着做，每一项持有 GPU 锁，结束后不留 GPU 进程；默认先对所有模型做回放差距与困惑度，再做 FLEURS、探针，最后做最费时的思考检查。结果、`summary/summary.md`（与 Colab 汇总同样的表格，另加与 C0 比较的两张表）、`status.json` 和 `driver.log` 都在 `<工作目录>/data/T71c/` 下。先用 `--dry-run` 检查输入、列出计划和时间估计，再在后台启动：
+#71 C 组第一轮在 Colab 上只训练，全部评测在本机进行，由 `pipeline/eval/c71_local.py` 完成。从 Google Drive 下载每个运行 `runs/v2b-2b-cpt77-<c0|c-free_raw|c-free_chat|c-cont_raw|c-cont_chat|c-mix>/` 中的 `checkpoint-0030000/language_model.safetensors`（约 3.76 GB）、`projector.safetensors`、`projector.json`，以及运行目录中的 `train_config.json`、`train_log.jsonl`、`eval_log.jsonl`、`replay_log.jsonl`（C0 没有），保持同样的目录结构放到运行目录下（`--runs-root` 或环境变量 `C71_RUNS_ROOT` 指定，不指定时为 `<工作目录>/data/T71c/runs/`；这次放在 F 盘，见下面的启动命令），六个运行共约 22.8 GB，`trainer_state.pt` 不用下载。F 盘在 WSL 中是 9P 挂载，实测顺序读约 150 MB/s，每项评测载入语言模型约 25 秒。驱动程序对下载齐全的运行和参考模型做 Colab 驱动程序 `c_runs.py` 中同样的评测项目（命令由 `c_runs.eval_items` 生成，只换成本机的路径和 python），已有结果的项目跳过，单项失败记下后接着做，每一项持有 GPU 锁，结束后不留 GPU 进程；开始时先用参考模型做一次思考检查的冒烟比较（约 5 分钟），一致时所有模型的思考检查都用 FlashAttention-2，否则都用 sdpa；默认先对所有模型做回放差距与困惑度，再做 FLEURS、探针，最后做最费时的思考检查。结果、`summary/summary.md`（与 Colab 汇总同样的表格，另加与 C0 比较的两张表，并列出各模型思考检查实际所用的注意力实现）、冒烟比较的 `think_smoke/`、`status.json` 和 `driver.log` 都在 `<工作目录>/data/T71c/` 下。先用 `--dry-run` 检查输入、列出计划和时间估计，再在后台启动：
 
 ```bash
-WORK_DIR=<工作目录> DATASET=<数据集目录> python -m pipeline.eval.c71_local --dry-run
+WORK_DIR=<工作目录> DATASET=<数据集目录> python -m pipeline.eval.c71_local --runs-root /mnt/f/models/qwen3.5-asr/c71-runs --dry-run
 WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid <工作目录>/envs/mllm-eval/bin/python -m pipeline.eval.c71_local \
-    >> <工作目录>/data/T71c/launch.out 2>&1 < /dev/null &
+    --runs-root /mnt/f/models/qwen3.5-asr/c71-runs >> <工作目录>/data/T71c/launch.out 2>&1 < /dev/null &
 ```
 
-读音频的两项（FLEURS、探针）用 `envs/mllm-eval`（有 soundfile），纯文本的三项用 `envs/mllm-train`（有 flash-linear-attention 与 mm_assistant_mask）。在 RTX 5090 上估计每个运行约 1.5 小时（思考检查约 40 分钟），参考模型约 50 分钟，全部约 10 小时，一晚做不完时用 `kill <status.json 中的 pid>` 停下，下次重新运行即可续跑。设置与续跑的细节见脚本开头。
+读音频的两项（FLEURS、探针）用 `envs/mllm-eval`（有 soundfile），纯文本的三项和冒烟比较用 `envs/mllm-train`（有 flash-linear-attention、flash-attn 与 mm_assistant_mask）。在 RTX 5090 上估计每个运行约 1.5 小时（思考检查约 34 分钟，用 sdpa 时约 49 分钟），参考模型约 42 分钟，全部约 9.6 小时；思考检查的估计按每步 K、V 的读写量和显存带宽算出，没有实测，驱动程序做完第一项后改按实测用时估计剩余时间。一晚做不完时用 `kill <status.json 中的 pid>` 停下，下次重新运行即可续跑。设置与续跑的细节见脚本开头。
 
 ## 8. 在 Google Colab 上训练
 

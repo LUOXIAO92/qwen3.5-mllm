@@ -8,7 +8,7 @@ pipeline/colab/c_runs.py 的 eval_items（同一份代码），这里只换成�
   flash-linear-attention 与 mm_assistant_mask，#70 参考模型的 teacher 对数概率也是在这个环境里算的）。本机没有同时装
   这两样的环境；Colab 的训练环境两样都有。envs/mllm-eval 里线性注意力用 transformers 的 PyTorch 实现，数值与 fla
   内核有极小的差别，C 组各运行都在本机用同样的环境评测，彼此可以直接比较。
-- 显存：think_check 一批 200 条生成到 16,384 个新 token 约需 74 GB，加 --fit-memory 后按剩余显存分批（5090 上约 3 批、
+- 显存：think_check 一批 200 条生成到 16,384 个新 token 约需 52–71 GiB，加 --fit-memory 后按剩余显存分批（5090 上 3 批、
   每批 67 条，见 think_check.py 开头「显存」）。其余各项的批大小在 32 GB 内放得下，保持不变：fleurs 一批 48 条峰值约
   10 GiB（T54 实测），lm_ppl 一批 32 条最长的一批（菲律宾语）词表输出约 11 GB，replay_gap 每批 32,768 个 token（#70 的
   teacher 在本机用 65,536 个 token 一批）。所有子进程设 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True，减少反复
@@ -17,9 +17,18 @@ pipeline/colab/c_runs.py 的 eval_items（同一份代码），这里只换成�
   最后做最费时的思考检查；一晚做不完时，已完成的部分在各运行之间可以直接比较。--order run 与 Colab 相同，一个运行做完
   全部项目再做下一个，最后做参考模型。
 
+思考检查的注意力实现：用户 2026-11-23 决定语言模型的全注意力层一律用 FlashAttention-2（c_runs.THINK_ATTENTION，命令中的
+--attn-implementation），六个运行与参考模型相同，比较才公平。--think-attention auto（默认）时，驱动程序在开始评测之前先做
+一次冒烟比较（think_check --smoke，参考模型，约 5 分钟，结果在 <输出目录>/think_smoke/）：sdpa 与 flash_attention_2 在
+同样的左填充提问上逐步比较分布，一致时全部思考检查用 flash_attention_2，不一致、flash_attention_2 不能运行或比较本身失败时
+全部用 sdpa，并写进 driver.log 与 status.json 的 think_attention。已经有思考检查结果时沿用它们所用的实现，不再比较，同一组
+结果始终来自同一种实现；summary.md 列出每个模型实际所用的实现（think_check 出错时会自行改用 sdpa）。--think-attention
+flash_attention_2 或 sdpa 直接指定，不做冒烟比较。
+
 下载（用户从 Google Drive 下载，保持 Drive 上的目录结构）：每个运行 <名称> = v2b-2b-cpt77-<c0|c-free_raw|c-free_chat|
-c-cont_raw|c-cont_chat|c-mix>，Drive 上的 runs/<名称>/ 对应本机的 <运行目录>/<名称>/（--runs-root，默认
-<工作目录>/data/T71c/runs）：
+c-cont_raw|c-cont_chat|c-mix>，Drive 上的 runs/<名称>/ 对应本机的 <运行目录>/<名称>/（--runs-root，默认环境变量
+C71_RUNS_ROOT，再没有时为 <工作目录>/data/T71c/runs）。用户把运行放在 F 盘（WSL 中的 9P 挂载），读取比本机盘慢：
+实测顺序读约 150 MB/s，每项评测载入 3.76 GB 的语言模型约 25 秒，已计入时间估计：
 
 - 必需：checkpoint-0030000/language_model.safetensors（约 3.76 GB）、checkpoint-0030000/projector.safetensors；
 - 汇总用（缺少时表中留空）：checkpoint-0030000/projector.json、train_config.json（读 projector 的起点）、
@@ -41,15 +50,16 @@ nvidia-smi 的已用显存，超过 --busy-mib（默认 3,000 MiB，例如 Windo
 - eval/<标签>/：各项评测的结果与日志（<项目>.log），标签为 c0、c-free_raw、…、ref，目录结构与 Colab 的 eval/ 相同；
 - summary/：summary.md、summary.json（与 c_runs.phase_summary 同样的两张表、report 的 FLEURS 表格，另加与 C0 比较的
   两张表）、report 的 tables.md 与 tables.json；
-- status.json（阶段、正在做的项目、各项结果与用时、剩余时间的估计）、driver.log。
+- think_smoke/：冒烟比较的结果（summary.json 的 use 为结论）与日志；
+- status.json（阶段、正在做的项目、各项结果与用时、剩余时间的估计、思考检查的注意力实现）、driver.log。
 
 退出码：0 全部完成；1 有失败的项目；2 缺少基本输入（模型、FLEURS、回放数据、python 环境）；3 能做的都做完了，但有运行的
 文件还没下载；143 / 130 收到 SIGTERM / SIGINT 后停下。
 
 用法（在仓库根目录运行；--dry-run 只检查输入、列出计划和时间估计，不占用 GPU）：
 
-    WORK_DIR=<工作目录> DATASET=<数据集目录> python -m pipeline.eval.c71_local --dry-run
-    WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid python -m pipeline.eval.c71_local \\
+    WORK_DIR=<工作目录> DATASET=<数据集目录> python -m pipeline.eval.c71_local --runs-root <运行目录> --dry-run
+    WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid python -m pipeline.eval.c71_local --runs-root <运行目录> \\
         >> <工作目录>/data/T71c/launch.out 2>&1 < /dev/null &
 
 停下：kill <status.json 中的 pid>（驱动程序结束正在运行的评测进程组后退出），之后重新运行即可续跑。
@@ -67,6 +77,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 from pipeline.colab import c_runs
@@ -88,21 +99,57 @@ OPTIONAL_FILES = (f"{CHECKPOINT}/projector.json", "train_config.json", "train_lo
 APPROX_BYTES = {"language_model.safetensors": 3.76e9, "projector.safetensors": 3.4e7}
 BUSY_POLL_SECONDS = 300
 LOCK_POLL_SECONDS = 30
+# 思考检查的注意力实现：auto 为先做冒烟比较再决定（见开头「思考检查的注意力实现」）。
+THINK_ATTENTION_CHOICES = ("auto", "flash_attention_2", "sdpa")
+SMOKE_DIR = "think_smoke"
+SMOKE_MINUTES = 5
+# 运行目录在 F 盘（9P 挂载）时，每项评测载入 3.76 GB 的语言模型的用时（分钟）：实测顺序读约 150 MB/s。
+LM_LOAD_MINUTES = 3.76e9 / 150e6 / 60
+# 思考检查用时的估计（think_minutes）用到的量，2B 模型、RTX 5090：
+THINK_PROMPT_TOKENS = 219       # 200 条提示左填充后的长度
+THINK_BATCHES = 3               # --fit-memory 时两种实现都分成 3 批（think_check.py 开头「显存」）
+THINK_BATCH = 67
+FULL_LAYERS = 6
+KV_TOKEN_BYTES = 2 * 256 * 2    # 一层、一条样本、一个 token 的 K（或 V）：KV 头数 × 每头维数 × 2 字节
+# 逐 token 生成时每个全注意力层每一步读写的数据量，以这一层全部的 K（或 V）的大小为单位。两种实现都有缓存拼接（K、V 各读
+# 一遍、写一遍，4 份）。sdpa 另把 K、V 复制到 8 个查询头（读 2、写 8），注意力再读一遍复制后的（8），共 22；
+# flash_attention_2 另把 K、V 排成按 token 连续的一份（读 2、写 2）、取出有效部分（读 2、写 2），注意力读一遍（2），共 14。
+KV_PASSES = {"sdpa": 22, "flash_attention_2": 14}
+MEMORY_BANDWIDTH = 1.5e12       # 字节/秒：RTX 5090 的显存带宽 1.79 TB/s，复制与读取实际约八成
+STEP_OTHER_SECONDS = 0.006      # 注意力以外的每步用时：读一遍 3.5 GiB 的语言模型权重、67 条的线性注意力递推状态（约 2.5 GB）、采样
+STEP_MIN_SECONDS = 0.015        # transformers 的 generate 每步逐层发起计算的 CPU 用时；GPU 更快时每步仍要这么久
+THINK_LOAD_MINUTES = 2          # 载入模型、读提问
 
 
-def local_minutes(item, think_max_new):
-    """本机 RTX 5090 上一项评测的估计用时（分钟），由 c_runs.ESTIMATE（Colab G4）换算：
+def think_minutes(max_new, attention):
+    """本机一次思考检查的估计用时（分钟）。
+
+    一批的每一步都要读写全部全注意力层的 KV 缓存，第 t 步的数据量与提示加已生成的 token 数成正比；批内所有样本一直算到
+    这一批结束，参考模型约 6% 的样本写到上限，所以每批都按生成满 max_new 步计。每步用时取 STEP_MIN_SECONDS 与
+    「STEP_OTHER_SECONDS 加 KV 读写量 ÷ MEMORY_BANDWIDTH」中较大的一个，再乘以批数。按这个模型，16,384 个新 token 时
+    flash_attention_2 约 34 分钟、sdpa 约 49 分钟（此前按 Colab 估计换算的 40 分钟偏低）。这是没有实测的估计；驱动程序
+    做完第一项思考检查后，剩余时间改按实测用时估计。
+    """
+    per_token = FULL_LAYERS * KV_PASSES[attention] * KV_TOKEN_BYTES * THINK_BATCH / MEMORY_BANDWIDTH
+    seconds = sum(
+        max(STEP_MIN_SECONDS, STEP_OTHER_SECONDS + per_token * (THINK_PROMPT_TOKENS + step))
+        for step in range(1, max_new + 1)
+    )
+    return THINK_LOAD_MINUTES + THINK_BATCHES * seconds / 60
+
+
+def local_minutes(item, think_max_new, think_attention = c_runs.THINK_ATTENTION):
+    """本机 RTX 5090 上一项评测的估计用时（分钟），不含从运行目录载入语言模型（LM_LOAD_MINUTES）：
 
     - fleurs：G4 估计 15；T54 在本机用同样的批大小（48）评测 2B 的 FLEURS test，生成实测 19.6–24.4 分钟，取 22。
     - probe：与 fleurs 同样是逐批贪心生成，按同样的比例换算（G4 15 → 22）。
     - lm_ppl：G4 估计 3，纯前向，本机相同。
     - replay_gap：#70 的参考模型前向在本机约 3 万 token/s，五组评测集约 620 万 token，加载模型，约 5（G4 估计 6）。
-    - think：G4 估计 18（一批 200 条）；本机分 3 批、每批 67 条，各生成到上限，每步的固定开销按批数增加，KV 缓存与复制到
-      全部查询头的临时张量的读写总量与条数成正比，估计 40（随生成上限按比例缩放）。
+    - think：见 think_minutes。
     """
     minutes = {"fleurs": 22, "probe": 22, "lm_ppl": 3, "replay_gap": 5}
     if item == "think":
-        return 38 * think_max_new / 16384 + 2
+        return think_minutes(max_new = think_max_new, attention = think_attention)
     return minutes[item]
 
 
@@ -162,32 +209,43 @@ def discover_runs(runs_root, keys):
     return found
 
 
-def localize(items, python_audio, python_text, think_max_new):
+def localize(items, python_audio, python_text, think_max_new, think_attention = c_runs.THINK_ATTENTION, load_minutes = 0.0):
     """把 c_runs.eval_items 的项目换成本机的形式：[{item, command, marker, minutes}]。
 
-    只换命令开头的 python 并追加 LOCAL_EXTRA，其余参数与 c_runs 相同。
+    只换命令开头的 python 并追加 LOCAL_EXTRA，其余参数与 c_runs 相同。load_minutes 为每项从运行目录载入语言模型的用时。
     """
     pythons = {"audio": str(python_audio), "text": str(python_text)}
     localized = []
     for name, command, marker, _ in items:
+        minutes = local_minutes(
+            item = name,
+            think_max_new = think_max_new,
+            think_attention = think_attention,
+        )
         localized.append({
             "item": name,
             "command": [pythons[PYTHON_OF_ITEM[name]], *command[1:], *LOCAL_EXTRA.get(name, [])],
             "marker": Path(marker),
-            "minutes": local_minutes(item = name, think_max_new = think_max_new),
+            "minutes": minutes + load_minutes,
         })
     return localized
 
 
 def label_items(label, run, paths):
-    """一个标签（运行或参考模型）的本机评测项目，按 c_runs.eval_items 生成。run 为 discover_runs 的一项，参考模型为 None。"""
+    """一个标签（运行或参考模型）的本机评测项目，按 c_runs.eval_items 生成。run 为 discover_runs 的一项，参考模型为 None。
+
+    思考检查的注意力实现取 paths["think_attention"]（main 按冒烟比较或 --think-attention 决定），没有时用
+    c_runs.THINK_ATTENTION。
+    """
     out = paths["eval_root"] / label
+    think_attention = paths.get("think_attention") or c_runs.THINK_ATTENTION
     common = {
         "python": paths["python_audio"],
         "model_dir": paths["model_dir"],
         "fleurs_dir": paths["fleurs"],
         "replay_dir": paths["replay"],
         "think_max_new": paths["think_max_new"],
+        "think_attention": think_attention,
     }
     if run is None:
         items = c_runs.eval_items(
@@ -209,6 +267,8 @@ def label_items(label, run, paths):
         python_audio = paths["python_audio"],
         python_text = paths["python_text"],
         think_max_new = paths["think_max_new"],
+        think_attention = think_attention,
+        load_minutes = 0.0 if run is None else LM_LOAD_MINUTES,
     )
     for entry in localized:
         entry["label"] = label
@@ -233,6 +293,85 @@ def build_plan(runs, keys, paths, order = "item", include_ref = True):
         for label in labels:
             plan += [entry for entry in per_label[label] if entry["item"] == item]
     return plan
+
+
+def smoke_entry(paths):
+    """冒烟比较（think_check --smoke，用参考模型）的项目，形式与 build_plan 的项目相同。"""
+    out = paths["out_dir"] / SMOKE_DIR
+    return {
+        "label": REF,
+        "item": "think_smoke",
+        "command": [
+            str(paths["python_text"]), "-m", "pipeline.eval.think_check", "--model-dir", str(paths["model_dir"]),
+            "--replay-dir", str(paths["replay"]), "--smoke", "--output-dir", str(out),
+        ],
+        "marker": out / "summary.json",
+        "minutes": SMOKE_MINUTES,
+        "log": out / "smoke.log",
+    }
+
+
+def smoke_result(paths):
+    """冒烟比较的结论 (实现, 说明)；还没有结果时为 None，结果中没有可用的结论时为 sdpa。"""
+    path = paths["out_dir"] / SMOKE_DIR / "summary.json"
+    if not path.exists():
+        return None
+    summary = load_json(path = path) or {}
+    use = summary.get("use")
+    if use not in ("flash_attention_2", "sdpa"):
+        return "sdpa", f"冒烟比较的结果 {path} 中没有结论，为稳妥起见用 sdpa"
+    return use, f"冒烟比较：{summary.get('reason', '')}"
+
+
+def think_attentions(eval_root):
+    """已有思考检查结果所用的实现：{标签: 实现}。summary.json 没有这项记录时（加入记录之前的结果）为 sdpa。"""
+    root = Path(eval_root)
+    found = {}
+    if not root.exists():
+        return found
+    for directory in sorted(root.iterdir()):
+        summary = load_json(path = directory / "think" / "summary.json")
+        if summary is not None:
+            found[directory.name] = summary.get("attn_implementation_used", "sdpa")
+    return found
+
+
+def planned_think_attention(requested, paths):
+    """不做冒烟比较就能确定的思考检查注意力实现 (实现, 说明)；需要先做冒烟比较时为 None。
+
+    依次看 --think-attention 指定的、已有思考检查结果所用的（同一组结果保持同一种实现）、已有的冒烟比较结论。
+    """
+    if requested != "auto":
+        return requested, "--think-attention 指定"
+    existing = think_attentions(eval_root = paths["eval_root"])
+    if existing:
+        counts = Counter(existing.values())
+        use = counts.most_common(1)[0][0]
+        mixed = "（已有结果所用的实现不同，取多数）" if len(counts) > 1 else ""
+        return use, f"沿用已有思考检查结果的实现{mixed}：" + "，".join(f"{label} {value}" for label, value in existing.items())
+    return smoke_result(paths = paths)
+
+
+def filesystem(path):
+    """path（不存在时取最近的已存在的上级）所在的 (挂载点, 文件系统类型)，读 /proc/mounts；读不出时为 None。"""
+    path = Path(path)
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    try:
+        target = str(path.resolve())
+        lines = Path("/proc/mounts").read_text(encoding = "utf-8").splitlines()
+    except OSError:
+        return None
+    best = None
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        point = fields[1].replace("\\040", " ")
+        if target == point or target.startswith(point.rstrip("/") + "/"):
+            if best is None or len(point) > len(best[0]):
+                best = (point, fields[2])
+    return best
 
 
 def gpu_used_mib():
@@ -433,6 +572,12 @@ def write_summary(paths, runs, keys, with_report, log):
     lines = ["# #71 C 组第一轮汇总（本机评测）", ""]
     if start is not None:
         lines += [f"projector 起点：第 {start[0]} 步（训练配置的 init_projector：{start[1]}）", ""]
+    attentions = think_attentions(eval_root = eval_root)
+    if attentions:
+        lines += [
+            "思考检查中语言模型全注意力层的实现：" + "，".join(f"{label} {attentions[label]}" for label in labels if label in attentions),
+            "",
+        ]
     body, table = c_runs.summary_tables(labels = labels, eval_root = eval_root, runs = train)
     lines += body
     tables = load_json(path = summary_dir / "tables.json") or {}
@@ -440,8 +585,9 @@ def write_summary(paths, runs, keys, with_report, log):
     if (summary_dir / "tables.md").exists():
         lines += ["", "## FLEURS test（report）", "", (summary_dir / "tables.md").read_text(encoding = "utf-8")]
     (summary_dir / "summary.md").write_text(data = "\n".join(lines) + "\n", encoding = "utf-8")
+    data = {"labels": labels, "fleurs_mean": tables.get("fleurs_mean"), "think_attention": attentions, "runs": table}
     (summary_dir / "summary.json").write_text(
-        data = json.dumps(obj = {"labels": labels, "fleurs_mean": tables.get("fleurs_mean"), "runs": table}, ensure_ascii = False, indent = 1),
+        data = json.dumps(obj = data, ensure_ascii = False, indent = 1),
         encoding = "utf-8",
     )
     return labels
@@ -686,12 +832,22 @@ def check_inputs(paths, check_python = True):
     return checks
 
 
-def dry_run(paths, keys, order, include_ref):
+def dry_run(paths, keys, order, include_ref, think_attention = "auto"):
     """检查输入、列出计划和时间估计，不占用 GPU。返回退出码（基本输入不全时为 2）。"""
     print("#71 C 组第一轮的本机评测：演习（只检查和列出计划，不占用 GPU）")
     for name in ("model_dir", "fleurs", "replay", "runs_root", "out_dir", "python_audio", "python_text"):
         print(f"  {name}: {paths[name]}")
     print(f"  思考检查的生成上限：{paths['think_max_new']}")
+    planned = planned_think_attention(requested = think_attention, paths = paths)
+    if planned is None:
+        paths["think_attention"] = c_runs.THINK_ATTENTION
+        print(
+            f"  思考检查的注意力实现：开始评测前先做冒烟比较（约 {SMOKE_MINUTES} 分钟，结果在 {paths['out_dir'] / SMOKE_DIR}），"
+            f"一致时全部用 {c_runs.THINK_ATTENTION}，否则全部用 sdpa；下面按 {c_runs.THINK_ATTENTION} 估计"
+        )
+    else:
+        paths["think_attention"], reason = planned
+        print(f"  思考检查的注意力实现：{paths['think_attention']}（{reason}）")
     print("\n输入检查")
     checks = check_inputs(paths = paths)
     for ok, text in checks:
@@ -699,6 +855,12 @@ def dry_run(paths, keys, order, include_ref):
     disk = shutil.disk_usage(path = paths["out_dir"] if paths["out_dir"].exists() else paths["out_dir"].parent)
     print(f"  信息  输出所在磁盘剩余 {disk.free / 1e9:.0f} GB")
     runs_root = Path(paths["runs_root"])
+    mount = filesystem(path = runs_root)
+    print(
+        f"  信息  运行目录 {runs_root}：{'存在' if runs_root.exists() else '还不存在（下载后出现）'}；"
+        + ("所在文件系统读不出" if mount is None else f"在 {mount[0]}（{mount[1]}）上")
+        + (f"，按约 150 MB/s 读，每项载入语言模型约 {LM_LOAD_MINUTES * 60:.0f} 秒" if mount is not None and mount[1] in ("9p", "drvfs") else "")
+    )
     root_disk = shutil.disk_usage(path = runs_root if runs_root.exists() else runs_root.parent if runs_root.parent.exists() else "/")
     print(f"  信息  运行目录所在磁盘剩余 {root_disk.free / 1e9:.0f} GB")
     used = gpu_used_mib()
@@ -742,14 +904,24 @@ def dry_run(paths, keys, order, include_ref):
         else:
             state = "等待下载"
         print(f"  {entry['item']:<11} {entry['label']:<12} {state:<10} 约 {entry['minutes']:.0f} 分钟")
-    now = sum(entry["minutes"] for entry in plan_now if not entry["marker"].exists())
-    full = sum(entry["minutes"] for entry in plan_full if not entry["marker"].exists())
+    smoke = SMOKE_MINUTES if planned is None else 0
+    now = smoke + sum(entry["minutes"] for entry in plan_now if not entry["marker"].exists())
+    full = smoke + sum(entry["minutes"] for entry in plan_full if not entry["marker"].exists())
     per_run = sum(entry["minutes"] for entry in plan_full if entry["label"] == BASE)
     per_ref = sum(entry["minutes"] for entry in plan_full if entry["label"] == REF)
-    print(f"\n时间估计（RTX 5090）：每个运行约 {per_run:.0f} 分钟，参考模型约 {per_ref:.0f} 分钟；"
+    think = local_minutes(
+        item = "think",
+        think_max_new = paths["think_max_new"],
+        think_attention = paths["think_attention"],
+    )
+    print(f"\n时间估计（RTX 5090）：每个运行约 {per_run:.0f} 分钟（其中思考检查约 {think:.0f} 分钟，{paths['think_attention']}；"
+          f"sdpa 时约 {think_minutes(max_new = paths['think_max_new'], attention = 'sdpa'):.0f} 分钟），参考模型约 {per_ref:.0f} 分钟"
+          + (f"，冒烟比较约 {SMOKE_MINUTES} 分钟" if smoke else "") + "；"
           f"现在能做的 {len([e for e in plan_now if not e['marker'].exists()])} 项约 {now / 60:.1f} 小时，"
           f"全部下载后共 {len([e for e in plan_full if not e['marker'].exists()])} 项约 {full / 60:.1f} 小时")
     print("\n各项的命令（以第一个运行为例；参考模型不给 --projector、--language-model）")
+    if planned is None:
+        print("  [think_smoke] " + " ".join(smoke_entry(paths = paths)["command"]))
     shown = set()
     for entry in plan_full:
         if entry["item"] not in shown and entry["label"] != REF:
@@ -774,6 +946,8 @@ def resolve_paths(args):
         "python_text": Path(args.py_text) if args.py_text else work / "envs" / "mllm-train" / "bin" / "python",
         "gpu_lock": Path(args.gpu_lock) if args.gpu_lock else work / "gpu.lock",
         "think_max_new": args.think_max_new,
+        # 思考检查的注意力实现，main 或 dry_run 按冒烟比较或 --think-attention 填入
+        "think_attention": None,
     }
 
 
@@ -782,7 +956,11 @@ def parse_args(argv = None):
     parser.add_argument("--work-dir", default = os.environ.get("WORK_DIR", str(REPO.parent / "qwen3.5-asr-work")), help = "工作目录，默认环境变量 WORK_DIR")
     parser.add_argument("--dataset", default = os.environ.get("DATASET"), help = "数据集目录，默认环境变量 DATASET（回放数据在其下）")
     parser.add_argument("--model-dir", default = os.environ.get("MODEL_DIR", str(REPO / "qwen3.5-2b-mllm")), help = "2B 融合模型目录（分词器已按 #77 修正）")
-    parser.add_argument("--runs-root", default = None, help = "下载的运行目录的上级，默认 <输出目录>/runs")
+    parser.add_argument(
+        "--runs-root",
+        default = os.environ.get("C71_RUNS_ROOT"),
+        help = "下载的运行目录的上级（Drive 上的 runs/），默认环境变量 C71_RUNS_ROOT，再没有时为 <输出目录>/runs",
+    )
     parser.add_argument("--out-dir", default = None, help = "输出目录，默认 <工作目录>/data/T71c")
     parser.add_argument("--fleurs-dir", default = None, help = "FLEURS 评测清单目录，默认 <工作目录>/data/T02")
     parser.add_argument("--replay-dir", default = None, help = "回放数据目录，默认 <数据集目录>/text/qwen3.5-asr/replay-noloop")
@@ -802,6 +980,12 @@ def parse_args(argv = None):
         type = int,
         default = c_runs.THINK_MAX_NEW,
         help = "思考检查的生成上限（各模型要用同一个）",
+    )
+    parser.add_argument(
+        "--think-attention",
+        default = "auto",
+        choices = THINK_ATTENTION_CHOICES,
+        help = "思考检查中全注意力层的实现：auto 先做冒烟比较再决定（默认），也可以直接指定（见开头「思考检查的注意力实现」）",
     )
     parser.add_argument(
         "--busy-mib",
@@ -838,6 +1022,7 @@ def main(argv = None):
             keys = keys,
             order = args.order,
             include_ref = include_ref,
+            think_attention = args.think_attention,
         )
     paths["out_dir"].mkdir(parents = True, exist_ok = True)
     driver = Driver(paths = paths, busy_mib = args.busy_mib, timeout_factor = args.timeout_factor)
@@ -854,8 +1039,12 @@ def main(argv = None):
         current = None,
         order = args.order,
         think_max_new = args.think_max_new,
+        runs_root = str(paths["runs_root"]),
     )
-    driver.log(f"开始（pid {os.getpid()}，顺序 {args.order}，运行 {keys}，参考模型 {'评测' if include_ref else '不评测'}）")
+    driver.log(
+        f"开始（pid {os.getpid()}，顺序 {args.order}，运行 {keys}，参考模型 {'评测' if include_ref else '不评测'}，"
+        f"运行目录 {paths['runs_root']}）"
+    )
     failed_inputs = [text for ok, text in check_inputs(paths = paths, check_python = True) if not ok]
     if failed_inputs:
         driver.log(f"缺少基本输入：{failed_inputs}")
@@ -897,7 +1086,23 @@ def main(argv = None):
                 # FLEURS 的 report 要重新打分全部运行，只在 FLEURS 做完一项时重算
                 summarize(runs = runs, with_report = entry["item"] == "fleurs")
 
+    def decide_think_attention():
+        """思考检查的注意力实现：能直接确定时用它，否则先做冒烟比较；比较没有结论时用 sdpa。"""
+        decided = planned_think_attention(requested = args.think_attention, paths = paths)
+        if decided is None:
+            entry = smoke_entry(paths = paths)
+            driver.log("思考检查的注意力实现：先做冒烟比较（sdpa 与 flash_attention_2，参考模型）")
+            result = driver.run_entry(entry = entry, plan = [entry])
+            decided = smoke_result(paths = paths) or (
+                "sdpa",
+                f"冒烟比较没有完成（{result}，见 {entry['log']}），为稳妥起见全部用 sdpa",
+            )
+        paths["think_attention"], reason = decided
+        driver.log(f"思考检查的注意力实现：{paths['think_attention']}（{reason}）")
+        driver.set_status(think_attention = {"use": paths["think_attention"], "reason": reason})
+
     try:
+        decide_think_attention()
         if args.order == "run":
             runs, plan = current_plan()
             driver.log(f"计划 {len(plan)} 项，估计剩余 {driver.remaining_minutes(plan = plan) / 60:.1f} 小时")
