@@ -674,34 +674,54 @@ def phase_train(key):
     raise Blocked(f"{key} 训练没有完成（{state.get('status')}，第 {state.get('step')} 步，退出码 {state.get('exit_code')}）")
 
 
-def eval_items(out, projector = None, language_model = None, probe = True, fleurs = True):
-    """一个模型的各项评测：[(名称, 命令, 完成标志文件, 估计分钟)]。都不给时评测参考模型（原始语言模型）。"""
+def eval_items(
+    out,
+    projector = None,
+    language_model = None,
+    probe = True,
+    fleurs = True,
+    python = None,
+    model_dir = None,
+    fleurs_dir = None,
+    replay_dir = None,
+    think_max_new = None,
+):
+    """一个模型的各项评测：[(名称, 命令, 完成标志文件, 估计分钟)]。都不给时评测参考模型（原始语言模型）。
+
+    python、model_dir、fleurs_dir、replay_dir、think_max_new 不给时用本驱动程序的设置（PY、MODEL、FLEURS、REPLAY_DIR、
+    C71_THINK_MAX_NEW）。本机评测（pipeline.eval.c71_local）传入本机的路径，评测项目和设置都以这里为准。
+    """
+    python = PY if python is None else str(python)
+    model = str(MODEL if model_dir is None else model_dir)
+    manifests = str(FLEURS if fleurs_dir is None else fleurs_dir)
+    replay = str(REPLAY_DIR if replay_dir is None else replay_dir)
+    think_max_new = THINK_MAX_NEW if think_max_new is None else int(think_max_new)
     lm_args = ["--language-model", str(language_model)] if language_model is not None else []
     audio_args = (["--projector", str(projector)] if projector is not None else []) + lm_args
     items = []
     if fleurs:
         items.append(("fleurs", [
-            PY, "-m", "pipeline.eval.run_eval", "--model-dir", str(MODEL), *audio_args, "--manifest-dir", str(FLEURS),
+            python, "-m", "pipeline.eval.run_eval", "--model-dir", model, *audio_args, "--manifest-dir", manifests,
             "--batch-size", "48", "--prompt-format", "cpt", "--output-dir", str(out / "fleurs"),
         ], out / "fleurs" / "summary.json", ESTIMATE["eval_fleurs"]))
     if probe:
         items.append(("probe", [
-            PY, "-m", "pipeline.eval.instruct_probe", "--model-dir", str(MODEL), *audio_args, "--manifest-dir", str(FLEURS),
+            python, "-m", "pipeline.eval.instruct_probe", "--model-dir", model, *audio_args, "--manifest-dir", manifests,
             "--batch-size", "16", "--prompt-format", "chat", "cpt", "--output-dir", str(out / "probe"),
         ], out / "probe" / "summary.json", ESTIMATE["eval_probe"]))
     items += [
         ("lm_ppl", [
-            PY, "-m", "pipeline.eval.lm_ppl", "--model-dir", str(MODEL), *lm_args, "--manifest-dir", str(FLEURS),
+            python, "-m", "pipeline.eval.lm_ppl", "--model-dir", model, *lm_args, "--manifest-dir", manifests,
             "--output", str(out / "lm_ppl.json"),
         ], out / "lm_ppl.json", ESTIMATE["eval_lm_ppl"]),
         ("replay_gap", [
-            PY, "-m", "pipeline.eval.replay_gap", "--model-dir", str(MODEL), *lm_args, "--replay-dir", REPLAY_DIR,
+            python, "-m", "pipeline.eval.replay_gap", "--model-dir", model, *lm_args, "--replay-dir", replay,
             "--output-dir", str(out / "replay_gap"),
         ], out / "replay_gap" / "summary.json", ESTIMATE["eval_replay_gap"]),
         ("think", [
-            PY, "-m", "pipeline.eval.think_check", "--model-dir", str(MODEL), *lm_args, "--replay-dir", REPLAY_DIR,
-            "--max-new-tokens", str(THINK_MAX_NEW), "--output-dir", str(out / "think"),
-        ], out / "think" / "summary.json", ESTIMATE["eval_think"]),
+            python, "-m", "pipeline.eval.think_check", "--model-dir", model, *lm_args, "--replay-dir", replay,
+            "--max-new-tokens", str(think_max_new), "--output-dir", str(out / "think"),
+        ], out / "think" / "summary.json", 16 * think_max_new / 16384 + 2),
     ]
     return items
 
@@ -770,6 +790,64 @@ def load_json(path):
         return None
 
 
+REPLAY_GROUPS = ("free_raw", "free_chat", "cont_raw", "cont_chat", "free_chat_think")
+PPL_LANGS = ("zh", "ja", "ko", "th", "en")
+
+
+def probe_overview(probe):
+    """探针 summary.json 中各任务、各指令的 ALL（各语言平均）。summary.json 另有 config 一项（模型与设置），不是任务，跳过。"""
+    return {
+        task: {instruction: value["ALL"] for instruction, value in instructions.items()}
+        for task, instructions in probe.items()
+        if task != "config"
+    }
+
+
+def summary_tables(labels, eval_root, runs):
+    """汇总的两张表（训练要点与回放差距；思考检查与每字困惑度）和 summary.json 的内容。
+
+    eval_root/<label>/ 下是各项评测的结果（replay_gap/、lm_ppl.json、think/、probe/），runs 为 {label: 训练要点（train_stats）}。
+    返回 (lines, table)。Colab 驱动程序的 phase_summary 和本机评测（pipeline.eval.c71_local）都用它，两边的表格式相同。
+    """
+    eval_root = Path(eval_root)
+    lines = [
+        "| 运行 | dev 损失 | 回放比例 | 回放梯度份额 | 差距 free_raw | free_chat | cont_raw | cont_chat | free_chat_think | 各组平均 |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    table = {}
+    for label in labels:
+        run = runs.get(label, {})
+        gap = load_json(path = eval_root / label / "replay_gap" / "summary.json") or {}
+        groups = gap.get("groups", {})
+        cells = [f"{groups[g]['gap']:.4f}" if g in groups else "" for g in REPLAY_GROUPS]
+        lines.append(
+            f"| {label} | {run.get('dev_loss', '')} | {run.get('replay_ratio_total', '')} | {run.get('replay_grad_share', '')} | "
+            + " | ".join(cells) + f" | {gap.get('mean_gap', '')} |"
+        )
+        table[label] = {
+            "train": run,
+            "replay_gap": gap,
+            "lm_ppl": load_json(path = eval_root / label / "lm_ppl.json"),
+            "think": load_json(path = eval_root / label / "think" / "summary.json"),
+        }
+        probe = load_json(path = eval_root / label / "probe" / "summary.json")
+        if probe:
+            table[label]["probe"] = probe_overview(probe = probe)
+    lines += [
+        "",
+        "| 运行 | 写完 </think> | 循环 | 到上限 | 推理中位 | 回答中位 | 每字困惑度 zh / ja / ko / th / en |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for label in labels:
+        think = table[label]["think"] or {}
+        ppl = table[label]["lm_ppl"] or {}
+        ppl_cells = " / ".join(str(ppl.get(lang, {}).get("char_ppl", "")) for lang in PPL_LANGS)
+        reasoning = (think.get("reasoning_tokens") or {}).get("median", "")
+        answer = (think.get("answer_tokens") or {}).get("median", "")
+        lines.append(f"| {label} | {think.get('closed', '')} | {think.get('loop', '')} | {think.get('capped', '')} | {reasoning} | {answer} | {ppl_cells} |")
+    return lines, table
+
+
 def phase_summary():
     """report 的 FLEURS 表格，加各运行的回放差距、困惑度、思考检查、探针要点。"""
     summary_dir = EVAL_ROOT / "summary"
@@ -787,34 +865,8 @@ def phase_summary():
         )
     status = read_status()
     lines = ["# #71 C 组第一轮汇总", "", f"projector 起点：第 {status.get('projector_checkpoint')} 步（突降在第 {status.get('drop_step')} 步）", ""]
-    lines += ["| 运行 | dev 损失 | 回放比例 | 回放梯度份额 | 差距 free_raw | free_chat | cont_raw | cont_chat | free_chat_think | 各组平均 |",
-              "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
-    table = {}
-    for label in labels:
-        run = status.get("runs", {}).get(label, {})
-        gap = load_json(path = EVAL_ROOT / label / "replay_gap" / "summary.json") or {}
-        groups = gap.get("groups", {})
-        cells = [f"{groups[g]['gap']:.4f}" if g in groups else "" for g in ("free_raw", "free_chat", "cont_raw", "cont_chat", "free_chat_think")]
-        lines.append(
-            f"| {label} | {run.get('dev_loss', '')} | {run.get('replay_ratio_total', '')} | {run.get('replay_grad_share', '')} | "
-            + " | ".join(cells) + f" | {gap.get('mean_gap', '')} |"
-        )
-        table[label] = {"train": run, "replay_gap": gap, "lm_ppl": load_json(path = EVAL_ROOT / label / "lm_ppl.json"),
-                        "think": load_json(path = EVAL_ROOT / label / "think" / "summary.json")}
-        probe = load_json(path = EVAL_ROOT / label / "probe" / "summary.json")
-        if probe:
-            table[label]["probe"] = {
-                task: {instruction: value["ALL"] for instruction, value in instructions.items()}
-                for task, instructions in probe.items()
-            }
-    lines += ["", "| 运行 | 写完 </think> | 循环 | 到上限 | 推理中位 | 回答中位 | 每字困惑度 zh / ja / ko / th / en |", "| --- | ---: | ---: | ---: | ---: | ---: | --- |"]
-    for label in labels:
-        think = table[label]["think"] or {}
-        ppl = table[label]["lm_ppl"] or {}
-        ppl_cells = " / ".join(str(ppl.get(lang, {}).get("char_ppl", "")) for lang in ("zh", "ja", "ko", "th", "en"))
-        reasoning = (think.get("reasoning_tokens") or {}).get("median", "")
-        answer = (think.get("answer_tokens") or {}).get("median", "")
-        lines.append(f"| {label} | {think.get('closed', '')} | {think.get('loop', '')} | {think.get('capped', '')} | {reasoning} | {answer} | {ppl_cells} |")
+    body, table = summary_tables(labels = labels, eval_root = EVAL_ROOT, runs = status.get("runs", {}))
+    lines += body
     if (summary_dir / "tables.md").exists():
         lines += ["", "## FLEURS test（report）", "", (summary_dir / "tables.md").read_text(encoding = "utf-8")]
     (summary_dir / "summary.md").write_text(data = "\n".join(lines) + "\n", encoding = "utf-8")
