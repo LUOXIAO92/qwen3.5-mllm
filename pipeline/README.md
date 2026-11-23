@@ -142,7 +142,17 @@ flock <工作目录>/gpu.lock python -m pipeline.eval.think_check --model-dir qw
     --replay-dir $DATASET/text/qwen3.5-asr/replay-noloop --output-dir <输出目录>/think
 ```
 
-`lm_ppl` 是语言模型对 FLEURS 参考文本的每字困惑度（与 #66、#71 第一轮的计算相同）。`replay_gap` 在五组回放评测集上按训练时的损失位置算每 token 负对数似然，减去参考模型的（teacher 中的 `lp.f32`），得到前向 KL 的估计，free_chat_think 另分推理和回答。`think_check` 用 free_chat_think 评测集中参考模型自己写的 200 条提问开启思考生成（温度 1、不设 top-k / top-p，最多 16,384 个新 token），统计写完 `</think>` 的比例、推理与回答的长度和循环比例。
+`lm_ppl` 是语言模型对 FLEURS 参考文本的每字困惑度（与 #66、#71 第一轮的计算相同）。`replay_gap` 在五组回放评测集上按训练时的损失位置算每 token 负对数似然，减去参考模型的（teacher 中的 `lp.f32`），得到前向 KL 的估计，free_chat_think 另分推理和回答。`think_check` 用 free_chat_think 评测集中参考模型自己写的 200 条提问开启思考生成（温度 1、不设 top-k / top-p，最多 16,384 个新 token），统计写完 `</think>` 的比例、推理与回答的长度和循环比例。在 32 GB 的显卡上加 `--fit-memory`，按剩余显存把 200 条分成几批（RTX 5090 上 3 批、每批 67 条），提问、温度和上限不变。
+
+#71 C 组第一轮在 Colab 上只训练，全部评测在本机进行，由 `pipeline/eval/c71_local.py` 完成。从 Google Drive 下载每个运行 `runs/v2b-2b-cpt77-<c0|c-free_raw|c-free_chat|c-cont_raw|c-cont_chat|c-mix>/` 中的 `checkpoint-0030000/language_model.safetensors`（约 3.76 GB）、`projector.safetensors`、`projector.json`，以及运行目录中的 `train_config.json`、`train_log.jsonl`、`eval_log.jsonl`、`replay_log.jsonl`（C0 没有），保持同样的目录结构放到 `<工作目录>/data/T71c/runs/` 下，六个运行共约 22.8 GB，`trainer_state.pt` 不用下载。驱动程序对下载齐全的运行和参考模型做 Colab 驱动程序 `c_runs.py` 中同样的评测项目（命令由 `c_runs.eval_items` 生成，只换成本机的路径和 python），已有结果的项目跳过，单项失败记下后接着做，每一项持有 GPU 锁，结束后不留 GPU 进程；默认先对所有模型做回放差距与困惑度，再做 FLEURS、探针，最后做最费时的思考检查。结果、`summary/summary.md`（与 Colab 汇总同样的表格，另加与 C0 比较的两张表）、`status.json` 和 `driver.log` 都在 `<工作目录>/data/T71c/` 下。先用 `--dry-run` 检查输入、列出计划和时间估计，再在后台启动：
+
+```bash
+WORK_DIR=<工作目录> DATASET=<数据集目录> python -m pipeline.eval.c71_local --dry-run
+WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid <工作目录>/envs/mllm-eval/bin/python -m pipeline.eval.c71_local \
+    >> <工作目录>/data/T71c/launch.out 2>&1 < /dev/null &
+```
+
+读音频的两项（FLEURS、探针）用 `envs/mllm-eval`（有 soundfile），纯文本的三项用 `envs/mllm-train`（有 flash-linear-attention 与 mm_assistant_mask）。在 RTX 5090 上估计每个运行约 1.5 小时（思考检查约 40 分钟），参考模型约 50 分钟，全部约 10 小时，一晚做不完时用 `kill <status.json 中的 pid>` 停下，下次重新运行即可续跑。设置与续跑的细节见脚本开头。
 
 ## 8. 在 Google Colab 上训练
 
