@@ -210,7 +210,10 @@ def load_model(
     projector_path: Path | None,
     language_model_path: Path | None = None,
     device: str = "cuda",
+    attn_implementation: str | dict | None = None,
 ):
+    """载入融合模型（可选换上 projector 与全量微调的语言模型）。attn_implementation 不给时用 transformers 的默认（sdpa）；
+    也可以是按子配置给出的字典，例如思考检查的 think_check.FLASH_ATTENTION。"""
     import torch
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
@@ -221,10 +224,12 @@ def load_model(
     # 分词规则必须与原始 Qwen3.5 相同（#77），提示中的文字（例如级联参照中的转写）才按语言模型预训练时的切法分词
     check_tokenizer(tokenizer = processor, source = model_dir)
     processor.tokenizer.padding_side = "left"
+    extra = {} if attn_implementation is None else {"attn_implementation": attn_implementation}
     model = AutoModelForImageTextToText.from_pretrained(
         pretrained_model_name_or_path = str(model_dir),
         trust_remote_code = True,
         dtype = torch.bfloat16,
+        **extra,
     )
     if projector_path is not None:
         load_projector(model = model, projector_path = projector_path)
