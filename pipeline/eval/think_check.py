@@ -17,6 +17,14 @@
 200 条一批时几乎每批都要生成满 16k 步。--max-new-tokens 降低时，超过上限才写完 </think> 的样本记为没有写完，比较
 不同模型时用同一个上限。
 
+显存：生成到上限时一条样本占用的显存主要是全注意力层的 KV 缓存，另有一层注意力计算时的临时张量（左填充的批次带注意力
+掩码，transformers 的 SDPA 路径把 K、V 复制到全部 8 个查询头）和线性注意力层的递推状态，2B 模型在 16,384 个新 token 时约
+0.37 GB。一批 200 条约需 74 GB，Colab G4（96 GB）放得下，RTX 5090（32 GB）放不下。--fit-memory 在载入模型后按剩余显存
+（减去 --memory-reserve-gb）估算一批最多放几条（per_sample_bytes），超过 --batch-size 时把提问平均分成几批（5090 上约为
+3 批、每批 67 条）。批的划分只改变随机数流（每批开始前按 --seed 加批序号固定随机数），提问、温度和上限都不变，比较时
+统计意义相同。任何一批显存不足时，这一批对半拆开重试（前一半沿用这一批的种子，后一半加 SPLIT_SEED_OFFSET）；
+summary.json 的 batches 记下实际的各批条数。
+
 指标（summary.json、summary.md；逐条结果在 generations.jsonl，生成的 token id 在 generations.ids.i32）：
 - closed：写出了 </think> 的比例；ended：在上限之前写出结束符的比例；capped：写到上限的比例。
 - loop：生成内容出现循环（原样或近似，pipeline/replay/degeneration.py 的 degeneration_onset，与回放数据丢弃循环的规则
@@ -28,7 +36,9 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import math
 import time
 from pathlib import Path
 
@@ -37,6 +47,8 @@ import numpy as np
 THINK_END_ID = 248069
 STOP_IDS = (248046, 248044)
 PAD_ID = 248044
+# 显存不足、一批对半拆开时，后一半的随机数种子加上这个数，与其他批的种子（--seed 加批序号）不重合。
+SPLIT_SEED_OFFSET = 10000
 
 
 def load_prompts(replay_dir, count, split = "eval"):
@@ -102,6 +114,86 @@ def generate_batch(model, prompts, max_new_tokens, temperature, seed):
         stops = np.nonzero(np.isin(element = row, test_elements = STOP_IDS))[0]
         results.append(row[: stops[0] + 1] if len(stops) else row)
     return results
+
+
+def per_sample_bytes(config, total_tokens, sampling_copies = 4):
+    """一条样本生成到 total_tokens（提示加新 token）时占用的显存估计（字节），config 为语言模型的 text_config。
+
+    - 全注意力层的 KV 缓存（bfloat16）：层数 × 2（K、V）× KV 头数 × 每头维数 × 2 字节 × token 数；
+    - 一层注意力计算时的临时张量：缓存拼接（torch.cat）时多出的一份 K（或 V），加上左填充时 SDPA 路径把 K、V 复制到全部
+      查询头（repeat_kv）的两份；
+    - 线性注意力层的递推状态（float32，值头数 × 键维数 × 值维数）与短卷积状态（bfloat16）；
+    - 采样时一个位置的词表分布，按 sampling_copies 份 float32 计。
+    """
+    layer_types = list(config.layer_types)
+    full = layer_types.count("full_attention")
+    linear = len(layer_types) - full
+    head_bytes = config.head_dim * 2
+    kv_cache = full * 2 * config.num_key_value_heads * head_bytes * total_tokens
+    temporary = config.num_key_value_heads * head_bytes * total_tokens
+    if config.num_attention_heads != config.num_key_value_heads:
+        temporary += 2 * config.num_attention_heads * head_bytes * total_tokens
+    recurrent = linear * config.linear_num_value_heads * config.linear_key_head_dim * config.linear_value_head_dim * 4
+    conv_dim = 2 * config.linear_num_key_heads * config.linear_key_head_dim + config.linear_num_value_heads * config.linear_value_head_dim
+    conv = linear * conv_dim * config.linear_conv_kernel_dim * 2
+    sampling = sampling_copies * config.vocab_size * 4
+    return kv_cache + temporary + recurrent + conv + sampling
+
+
+def fit_batch_size(requested, count, sample_bytes, free_bytes, reserve_bytes):
+    """剩余显存放得下的批大小：一批最多 (free_bytes − reserve_bytes) ÷ sample_bytes 条（至少 1 条），不超过 requested；
+    需要分成几批时，把 count 条平均分开（例如 200 条、最多 72 条时分成 3 批，每批 67 条）。"""
+    cap = max(1, int((free_bytes - reserve_bytes) // sample_bytes))
+    size = max(1, min(requested, cap, count))
+    batches = math.ceil(count / size)
+    return math.ceil(count / batches)
+
+
+def generate_resilient(model, prompts, max_new_tokens, temperature, seed, generate = None, log = print):
+    """生成一批；显存不足时把这一批对半拆开重试（前一半用 seed，后一半用 seed + SPLIT_SEED_OFFSET），一直拆到单条。
+
+    返回 (结果列表, 实际的各批条数)。generate 默认为 generate_batch，测试时可以换成假的函数。
+    """
+    import torch
+
+    generate = generate_batch if generate is None else generate
+    try:
+        outputs = generate(
+            model = model,
+            prompts = prompts,
+            max_new_tokens = max_new_tokens,
+            temperature = temperature,
+            seed = seed,
+        )
+        return list(outputs), [len(prompts)]
+    except torch.OutOfMemoryError:
+        if len(prompts) == 1:
+            raise
+    # 异常对象引用着出错时的栈帧，在 except 之外清理，生成到一半的缓存才能释放
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    half = (len(prompts) + 1) // 2
+    log(f"{len(prompts)} 条一批显存不足，拆成 {half} 条与 {len(prompts) - half} 条重试")
+    first, first_sizes = generate_resilient(
+        model = model,
+        prompts = prompts[:half],
+        max_new_tokens = max_new_tokens,
+        temperature = temperature,
+        seed = seed,
+        generate = generate,
+        log = log,
+    )
+    second, second_sizes = generate_resilient(
+        model = model,
+        prompts = prompts[half:],
+        max_new_tokens = max_new_tokens,
+        temperature = temperature,
+        seed = seed + SPLIT_SEED_OFFSET,
+        generate = generate,
+        log = log,
+    )
+    return first + second, first_sizes + second_sizes
 
 
 def analyze(ids, max_new_tokens):
@@ -205,6 +297,17 @@ def main(argv = None):
     )
     parser.add_argument("--temperature", type = float, default = 1.0)
     parser.add_argument("--seed", type = int, default = 1234)
+    parser.add_argument(
+        "--fit-memory",
+        action = "store_true",
+        help = "载入模型后按剩余显存估算一批放得下几条，放不下 --batch-size 时平均分成几批（见开头「显存」）",
+    )
+    parser.add_argument(
+        "--memory-reserve-gb",
+        type = float,
+        default = 2.0,
+        help = "--fit-memory 估算时留出的显存（GiB）",
+    )
     parser.add_argument("--output-dir", required = True, type = Path)
     args = parser.parse_args(args = argv)
 
@@ -215,18 +318,41 @@ def main(argv = None):
     if len(prompts) < args.count:
         print(f"只有 {len(prompts)} 条可用的提问（要求 {args.count}）", flush = True)
     model, _ = load_model(model_dir = args.model_dir, projector_path = None, language_model_path = args.language_model)
+    batch_size = args.batch_size
+    if args.fit_memory:
+        import torch
+
+        free_bytes, _ = torch.cuda.mem_get_info()
+        sample_bytes = per_sample_bytes(
+            config = model.config.text_config,
+            total_tokens = max(len(ids) for _, ids in prompts) + args.max_new_tokens,
+        )
+        batch_size = fit_batch_size(
+            requested = args.batch_size,
+            count = len(prompts),
+            sample_bytes = sample_bytes,
+            free_bytes = free_bytes,
+            reserve_bytes = int(args.memory_reserve_gb * 2 ** 30),
+        )
+        print(
+            f"剩余显存 {free_bytes / 2 ** 30:.1f} GiB，每条约 {sample_bytes / 2 ** 30:.3f} GiB，"
+            f"批大小 {batch_size}（要求 {args.batch_size}）",
+            flush = True,
+        )
     rows = []
     generated = []
+    batches = []
     start = time.perf_counter()
-    for number, begin in enumerate(range(0, len(prompts), args.batch_size)):
-        batch = prompts[begin: begin + args.batch_size]
-        outputs = generate_batch(
+    for number, begin in enumerate(range(0, len(prompts), batch_size)):
+        batch = prompts[begin: begin + batch_size]
+        outputs, sizes = generate_resilient(
             model = model,
             prompts = batch,
             max_new_tokens = args.max_new_tokens,
             temperature = args.temperature,
             seed = args.seed + number,
         )
+        batches += sizes
         for (sample_id, prompt), ids in zip(batch, outputs):
             row = {"sample_id": sample_id, "prompt_tokens": len(prompt), **analyze(ids = ids, max_new_tokens = args.max_new_tokens)}
             rows.append(row)
@@ -243,6 +369,7 @@ def main(argv = None):
         "model": str(args.language_model or args.model_dir),
         "temperature": args.temperature,
         "seed": args.seed,
+        "batches": batches,
         "seconds": round(number = time.perf_counter() - start, ndigits = 1),
         **summarize(rows = rows, max_new_tokens = args.max_new_tokens),
     }
