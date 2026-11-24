@@ -722,7 +722,12 @@ class Driver:
             return "skipped"
         entry["log"].parent.mkdir(parents = True, exist_ok = True)
         self.acquire_lock(entry = entry)
-        timeout = max(self.min_timeout_minutes, self.timeout_factor * self.estimate_minutes(entry = entry))
+        # 超时按「实测平均」与「事先估计」中较大的一个计算：某个模型异常地快（例如 C0 的思考检查 200 条都在几个 token 内结束，
+        # 0.3 分钟）时，不让后面正常的同类项目因为超时被结束。
+        timeout = max(
+            self.min_timeout_minutes,
+            self.timeout_factor * max(self.estimate_minutes(entry = entry), entry["minutes"]),
+        )
         self.log(
             f"开始 {entry['label']} {entry['item']}（估计 {self.estimate_minutes(entry = entry):.0f} 分钟，超时 {timeout:.0f} 分钟），"
             f"日志 {entry['log']}"
