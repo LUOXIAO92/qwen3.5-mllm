@@ -135,7 +135,10 @@ def label_entries(paths, label, language_model, benches):
             "label": label,
             "item": "gpqa",
             "benches": ["gpqa"],
-            "command": base + ["gpqa"] + common + ["--gpqa-max-new-tokens", str(paths["gpqa_max_new"])],
+            "command": base + ["gpqa"] + common + [
+                "--gpqa-max-new-tokens", str(paths["gpqa_max_new"]),
+                "--memory-reserve-gb", str(paths["gpqa_reserve_gb"]),
+            ],
             "marker": Outputs(paths = [bench_output(bench = "gpqa", label_dir = label_dir)]),
             "minutes": gpqa_minutes(max_new_tokens = paths["gpqa_max_new"]) + (load - LOAD_MINUTES),
             "log": label_dir / "gpqa.log",
@@ -457,6 +460,7 @@ def resolve_paths(args):
         "python_ifeval": Path(args.py_ifeval) if args.py_ifeval else None,
         "gpu_lock": Path(args.gpu_lock) if args.gpu_lock else work / "gpu.lock",
         "gpqa_max_new": args.gpqa_max_new_tokens,
+        "gpqa_reserve_gb": args.gpqa_memory_reserve_gb,
     }
     paths["ifeval_problem"] = ifeval_python_problem(python = paths["python_ifeval"]) if "ifeval" in args.bench_list else None
     return paths
@@ -485,6 +489,12 @@ def parse_args(argv = None):
     parser.add_argument("--no-ref", action = "store_true", help = "不评测参考模型")
     parser.add_argument("--benches", default = ",".join(BENCH_CHOICES), help = "逗号分隔的基准，默认全部")
     parser.add_argument("--gpqa-max-new-tokens", type = int, default = 16384, help = "GPQA 的生成上限（各模型要用同一个）")
+    parser.add_argument(
+        "--gpqa-memory-reserve-gb",
+        type = float,
+        default = 8.0,
+        help = "GPQA 按剩余显存估算批大小时留出的显存（GiB）。本机 2 GiB 时第 3 批（提示最长）在 WSL 下出现 CUDA 错误（#71），默认留 8 GiB",
+    )
     parser.add_argument("--busy-mib", type = int, default = 3000, help = "已用显存超过它时等待（MiB）")
     parser.add_argument("--timeout-factor", type = float, default = 3.0, help = "单项超过估计用时的这么多倍（至少 30 分钟）时结束它")
     parser.add_argument("--dry-run", action = "store_true", help = "只检查输入、列出计划与时间估计")

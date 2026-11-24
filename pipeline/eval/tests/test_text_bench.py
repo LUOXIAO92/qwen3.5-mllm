@@ -235,6 +235,7 @@ def fake_paths(root):
         "python_ifeval": root / "bin" / "python-ifeval",
         "gpu_lock": root / "gpu.lock",
         "gpqa_max_new": 16384,
+        "gpqa_reserve_gb": 8.0,
         "ifeval_problem": None,
     }
 
