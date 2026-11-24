@@ -266,7 +266,7 @@ class PlanTest(unittest.TestCase):
         self.assertNotIn("--language-model", ref_simple["command"])
         self.assertEqual(c0_simple["command"][c0_simple["command"].index("--language-model") + 1], str(ready["c0"]))
         self.assertEqual(c0_gpqa["command"][3], "gpqa")
-        self.assertEqual(c0_gpqa["command"][-2:], ["--gpqa-max-new-tokens", "16384"])
+        self.assertEqual(c0_gpqa["command"][-4:], ["--gpqa-max-new-tokens", "16384", "--memory-reserve-gb", "8.0"])
         self.assertGreater(c0_gpqa["minutes"], ref_gpqa["minutes"])
         self.assertGreater(ref_gpqa["minutes"], 3 * ref_simple["minutes"])
         self.assertEqual(len(c0_simple["marker"].paths), 4)
