@@ -81,6 +81,35 @@ INSTRUCTIONS = {
         {"id": "segment_zh", "text": "第 {start:.1f} 秒到第 {end:.1f} 秒之间说了什么？"},
     ],
 }
+# 严格版指令（用户 2026-11-24）：要求只输出答案、不加任何其他文字，排除「加开场白、Markdown、概括」这类与任务无关的输出。
+# 「你听到了什么」本来就是开放式问题，不在严格版中。id 与默认版不同，结果可以并列比较。
+STRICT_INSTRUCTIONS = {
+    "transcribe": [
+        {
+            "id": "transcribe_strict",
+            "text": "Transcribe the speech in this audio verbatim, in the language it is spoken. "
+                    "Output only the transcription, with no other text.",
+        },
+        {"id": "transcribe_strict_zh", "text": "逐字转写这段音频，使用说话所用的语言。只输出转写内容，不要输出任何其他文字。"},
+    ],
+    "translate": [
+        {
+            "id": "translate_en_strict",
+            "text": "Translate the speech in this audio into English. Output only the English translation, with no other text.",
+            "target_lang": "en",
+        },
+        {"id": "translate_zh_strict", "text": "把这段音频里说的话翻译成中文。只输出中文译文，不要输出任何其他文字。", "target_lang": "zh"},
+    ],
+    "timestamps": [
+        {
+            "id": "segment_en_strict",
+            "text": "Transcribe verbatim only the words spoken between {start:.1f} and {end:.1f} seconds of this audio. "
+                    "Output only those words, with no other text.",
+        },
+        {"id": "segment_zh_strict", "text": "逐字转写这段音频第 {start:.1f} 秒到第 {end:.1f} 秒之间说的话。只输出这部分内容，不要输出任何其他文字。"},
+    ],
+}
+INSTRUCTION_SETS = {"default": INSTRUCTIONS, "strict": STRICT_INSTRUCTIONS}
 # cpt 格式只有音频标记，没有指令。
 CPT_INSTRUCTION = {"id": "transcribe_cpt", "text": None}
 # 级联参照中代替音频的文字：参考转写放在指令之前，与音频在指令之前的位置相同。
@@ -551,6 +580,12 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
     parser.add_argument("--langs", nargs = "+", default = LANGS, help = "语言代码，默认全部 18 种")
     parser.add_argument("--tasks", nargs = "+", default = list(TASKS), choices = TASKS, help = "要做的任务，默认全部")
     parser.add_argument(
+        "--instruction-set",
+        default = "default",
+        choices = sorted(INSTRUCTION_SETS),
+        help = "指令：default 为原来的简短指令；strict 要求只输出答案（只有 transcribe、translate、timestamps）",
+    )
+    parser.add_argument(
         "--prompt-format",
         nargs = "+",
         default = ["chat"],
@@ -572,6 +607,11 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
 
 def main(argv: list | None = None) -> int:
     args = parse_args(argv = argv)
+    global INSTRUCTIONS
+    INSTRUCTIONS = INSTRUCTION_SETS[args.instruction_set]
+    missing = [task for task in args.tasks if task not in INSTRUCTIONS]
+    if missing:
+        raise SystemExit(f"指令集 {args.instruction_set} 没有这些任务：{missing}")
     for lang in args.langs:
         if lang not in METRIC_BY_LANG:
             raise SystemExit(f"不支持的语言代码：{lang}")
