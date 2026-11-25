@@ -290,6 +290,12 @@ if module == "pipeline.eval.ifeval.score":
     sys.exit(0)
 label = args[args.index("--label") + 1]
 accuracy = 0.70 if label == "ref" else 0.60
+if module == "pipeline.eval.gpqa_vllm":
+    out.mkdir(parents = True, exist_ok = True)
+    max_new = int(args[args.index("--gpqa-max-new-tokens") + 1])
+    (out / "gpqa.json").write_text(json.dumps({{"accuracy": accuracy - 0.1, "engine": "vllm", "max_new_tokens": max_new,
+        "closed": 0.95, "no_answer": 0.02, "capped": 0.05, "loop": 0.01, "reasoning_tokens": {{"median": 9000.0}}}}))
+    sys.exit(0)
 benches = [arg for arg in args[2:args.index("--model-dir")]]
 out.mkdir(parents = True, exist_ok = True)
 for bench in benches:

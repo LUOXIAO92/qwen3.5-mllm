@@ -17,6 +17,13 @@ python，只用 CPU、不持有 GPU 锁）打分；没有给 --py-ifeval 或它�
 时等待，子进程在单独的进程组中运行、结束后整组结束，不留 GPU 进程；单项超过估计时间的 --timeout-factor 倍（至少 30 分钟）
 视为超时。
 
+GPQA 的生成引擎（--gpqa-engine）：默认 hf，用 text_bench 的 transformers 分批生成；vllm 时改用 pipeline/eval/gpqa_vllm.py
+（提示、采样、解析和输出文件相同，生成换成 vLLM 的连续批处理，在 docker 镜像 --gpqa-vllm-image 中运行，见它的开头）。
+参考模型直接加载已导出的 --gpqa-ref-lm（默认 <工作目录>/data/T70/ref-lm）；各运行先导出到 --gpqa-export-root/<模型标签>
+（默认 <工作目录>/tmp/T71c/vllm-lm，每个约 3.8 GB，配置与分词器文件取自 --gpqa-ref-lm），评测后删除（--gpqa-keep-export
+保留）。导出在 GPU 锁内进行，不到 1 分钟。与容器交换提示和结果的任务目录为 <工作目录>/tmp/T71c/vllm-job/<模型标签>（完成后
+删除），容器中的 HOME（vLLM、Triton 等的编译缓存，各模型共用）为 <工作目录>/tmp/T71c/vllm-home。
+
 输出（--out-dir，默认 <工作目录>/data/T71c/bench）：<模型标签>/<基准>.json（与 text_bench 的输出相同，IFEval 的打分为
 ifeval.json）、各项日志 <模型标签>/<项目>.log、summary.md 与 summary.json（各基准的绝对分数、与参考模型之差、模型卡上的
 分数，MMMLU 各语言，诊断量）、status.json 与 driver.log。summary 中 GPQA 只有汇总的比例，没有题目内容。
@@ -30,6 +37,8 @@ ifeval.json）、各项日志 <模型标签>/<项目>.log、summary.md 与 summa
         --py-ifeval <有 langdetect 与 nltk 的 python> --dry-run
     WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid python -m pipeline.eval.bench_local --runs-root <运行目录> \\
         --py-ifeval <有 langdetect 与 nltk 的 python> >> <工作目录>/data/T71c/bench/launch.out 2>&1 < /dev/null &
+    WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid python -m pipeline.eval.bench_local --runs-root <运行目录> \\
+        --benches gpqa --gpqa-engine vllm --gpqa-max-new-tokens 32768 >> <工作目录>/data/T71c/bench/launch.out 2>&1 < /dev/null &
 """
 
 from __future__ import annotations
@@ -64,6 +73,20 @@ SIMPLE_MINUTES = {"mmlu_redux": 0.5, "ceval": 0.3, "mmmlu": 1.0, "ifeval": 3.0}
 GPQA_BATCHES = 3
 THINK_BATCH_SECONDS = 812
 IFEVAL_SCORE_TIMEOUT = 30 * 60
+GPQA_ENGINES = ("hf", "vllm")
+VLLM_IMAGE = "vllm/vllm-openai:nightly-x86_64"
+GPQA_QUESTIONS = 198
+# GPQA 的 vLLM 版（gpqa_vllm）的估计：
+# - 启动容器、载入与 CUDA graph：回放文本（#70）中 vLLM 0.28 载入同一个 2B 语言模型 16–22 秒；镜像中的 0.34 第一次要
+#   编译（缓存存在容器的 HOME 中，以后的模型直接用），取 2 分钟；
+# - 运行的导出：从运行目录读 3.8 GB 检查点、写 3.8 GB；c0 实测共 41 秒（2026-11-25，其中从 F 盘读检查点约 25 秒，即
+#   c71_local.LM_LOAD_MINUTES，另外加上），取 0.5 分钟；
+# - 生成：参考模型 16k 上限时平均每题写了上限的 97%，取 90%；回放文本在 144 条、上下文到 16k 时约 7,000 token/s，
+#   GPQA 同时约 62 条、上下文到 32k，每步读的 KV 缓存与之相近，取 3,500 token/s。
+VLLM_LOAD_MINUTES = 2.0
+VLLM_EXPORT_MINUTES = 0.5
+VLLM_FILL = 0.9
+VLLM_TOKENS_PER_SECOND = 3500
 
 
 class Outputs:
@@ -82,6 +105,12 @@ class Outputs:
 def gpqa_minutes(max_new_tokens):
     """GPQA 一个模型的估计用时（分钟）：按实测的每批用时，与生成上限成正比。"""
     return LOAD_MINUTES + GPQA_BATCHES * THINK_BATCH_SECONDS / 60 * max_new_tokens / 16384
+
+
+def vllm_gpqa_minutes(max_new_tokens, export):
+    """GPQA 的 vLLM 版一个模型的估计用时（分钟），export 为是否要先导出语言模型。"""
+    generate = GPQA_QUESTIONS * max_new_tokens * VLLM_FILL / VLLM_TOKENS_PER_SECOND / 60
+    return VLLM_LOAD_MINUTES + generate + (VLLM_EXPORT_MINUTES + c71_local.LM_LOAD_MINUTES if export else 0.0)
 
 
 def bench_output(bench, label_dir):
@@ -131,19 +160,51 @@ def label_entries(paths, label, language_model, benches):
             "log": label_dir / "simple.log",
         })
     if "gpqa" in benches:
+        if paths.get("gpqa_engine", "hf") == "vllm":
+            command, minutes = vllm_gpqa_command(
+                paths = paths,
+                label = label,
+                language_model = language_model,
+                common = common,
+            )
+        else:
+            command = base + ["gpqa"] + common + [
+                "--gpqa-max-new-tokens", str(paths["gpqa_max_new"]),
+                "--memory-reserve-gb", str(paths["gpqa_reserve_gb"]),
+            ]
+            minutes = gpqa_minutes(max_new_tokens = paths["gpqa_max_new"]) + (load - LOAD_MINUTES)
         entries.append({
             "label": label,
             "item": "gpqa",
             "benches": ["gpqa"],
-            "command": base + ["gpqa"] + common + [
-                "--gpqa-max-new-tokens", str(paths["gpqa_max_new"]),
-                "--memory-reserve-gb", str(paths["gpqa_reserve_gb"]),
-            ],
+            "command": command,
             "marker": Outputs(paths = [bench_output(bench = "gpqa", label_dir = label_dir)]),
-            "minutes": gpqa_minutes(max_new_tokens = paths["gpqa_max_new"]) + (load - LOAD_MINUTES),
+            "minutes": minutes,
             "log": label_dir / "gpqa.log",
         })
     return entries
+
+
+def vllm_gpqa_command(paths, label, language_model, common):
+    """GPQA 的 vLLM 版（gpqa_vllm）的命令与估计用时：参考模型直接加载 --gpqa-ref-lm，运行先导出到 --gpqa-export-root/<标签>。"""
+    command = [str(paths["python_text"]), "-m", "pipeline.eval.gpqa_vllm"] + common + [
+        "--gpqa-max-new-tokens", str(paths["gpqa_max_new"]),
+        "--inflight-factor", str(paths["gpqa_inflight_factor"]),
+        "--image", str(paths["gpqa_vllm_image"]),
+        "--job-dir", str(paths["gpqa_job_root"] / label),
+        "--docker-home", str(paths["gpqa_docker_home"]),
+    ]
+    if language_model is None:
+        command += ["--vllm-model", str(paths["gpqa_ref_lm"])]
+    else:
+        command += [
+            "--export-dir", str(paths["gpqa_export_root"] / label),
+            "--config-dir", str(paths["gpqa_ref_lm"]),
+        ]
+        if paths.get("gpqa_keep_export"):
+            command.append("--keep-export")
+    minutes = vllm_gpqa_minutes(max_new_tokens = paths["gpqa_max_new"], export = language_model is not None)
+    return command, minutes
 
 
 def build_plan(paths, ready, keys, include_ref, benches):
@@ -339,10 +400,25 @@ def summary_lines(results, labels):
         "回答后判定的（温度 0.7、top_p 0.8、top_k 20、presence_penalty 1.5），与字母对数概率的分数不能直接比较。",
         "- IFEval 为贪心解码、最多 1,280 个新 token，用 google-research 的官方打分逻辑；模型卡的 61.2 对应 prompt strict。",
         "- GPQA Diamond 为思考模式，温度 1、不设 top-k / top-p（与思考检查相同；模型卡为 top_p 0.95、top_k 20、presence_penalty "
-        "1.5），最多 16,384 个新 token（模型卡建议 32,768），每题采样一次，198 题的标准误约 3.5 个百分点；没有写完 </think> "
-        "或找不到答案都算错。",
+        f"1.5），{gpqa_settings_text(results = results, labels = labels)}，每题采样一次，198 题的标准误约 3.5 个百分点；"
+        "没有写完 </think> 或找不到答案都算错。",
     ]
     return lines
+
+
+def gpqa_settings_text(results, labels):
+    """各模型 GPQA 的生成上限与引擎（取自 gpqa.json；旧结果没有 engine 时是 transformers）。各模型相同时只写一次。"""
+    settings = {}
+    for label in labels:
+        gpqa = results.get(label, {}).get("gpqa") or {}
+        if gpqa:
+            engine = "vLLM" if gpqa.get("engine") == "vllm" else "transformers"
+            settings[label] = f"最多 {gpqa.get('max_new_tokens', 16384):,} 个新 token、{engine} 生成"
+    if not settings:
+        return "最多 16,384 个新 token（模型卡建议 32,768）"
+    if len(set(settings.values())) == 1:
+        return next(iter(settings.values())) + "（模型卡建议 32,768）"
+    return "各模型的设置不同：" + "；".join(f"{label} {text}" for label, text in settings.items()) + "（模型卡建议 32,768）"
 
 
 def write_summary(paths, labels):
@@ -389,16 +465,44 @@ def check_inputs(paths, benches):
         ok = result.returncode == 0
         detail = "import torch, transformers, safetensors, pyarrow, fla：" + ("通过" if ok else result.stderr.strip().splitlines()[-1][:200])
     checks.append((ok, f"python（text_bench）{python}：{detail}", True))
+    if "gpqa" in benches and paths.get("gpqa_engine") == "vllm":
+        checks += vllm_checks(paths = paths)
     if "ifeval" in benches:
         problem = paths.get("ifeval_problem")
         checks.append((problem is None, f"IFEval 打分用的 python {paths['python_ifeval']}：" + (problem or "langdetect、nltk、punkt_tab 齐全"), False))
     return checks
 
 
+def vllm_checks(paths):
+    """vllm 引擎的输入检查：参考模型的语言模型目录（分词器已按 #77 修正）与 docker 镜像是否在本机（不启动容器）。"""
+    ref_lm = Path(paths["gpqa_ref_lm"])
+    tokenizer_class = (c71_local.load_json(path = ref_lm / "tokenizer_config.json") or {}).get("tokenizer_class")
+    ref_ok = (ref_lm / "model.safetensors").exists() and (ref_lm / "config.json").exists() and tokenizer_class == c71_local.TOKENIZER_CLASS
+    checks = [(ref_ok, f"参考模型的语言模型目录（vLLM）{ref_lm}：分词器 {tokenizer_class}（应为 {c71_local.TOKENIZER_CLASS}）", True)]
+    image = paths["gpqa_vllm_image"]
+    try:
+        result = subprocess.run(
+            args = ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+            capture_output = True,
+            text = True,
+            check = False,
+        )
+        ok = result.returncode == 0
+        detail = result.stdout.strip()[:19] if ok else (result.stderr.strip().splitlines() or ["失败"])[-1][:200]
+    except FileNotFoundError:
+        ok = False
+        detail = "没有 docker 命令"
+    checks.append((ok, f"vLLM 镜像 {image}：{detail}", True))
+    return checks
+
+
 def dry_run(paths, keys, include_ref, benches):
     print("#71 文本基准的本机驱动程序：演习（只检查和列出计划，不占用 GPU）")
-    for name in ("model_dir", "data_dir", "runs_root", "out_dir", "python_text", "python_ifeval"):
+    for name in ("model_dir", "data_dir", "runs_root", "out_dir", "python_text", "python_ifeval", "gpqa_engine"):
         print(f"  {name}: {paths[name]}")
+    if paths["gpqa_engine"] == "vllm":
+        for name in ("gpqa_vllm_image", "gpqa_ref_lm", "gpqa_export_root", "gpqa_job_root", "gpqa_docker_home", "gpqa_keep_export", "gpqa_inflight_factor"):
+            print(f"  {name}: {paths[name]}")
     print("\n输入检查")
     checks = check_inputs(paths = paths, benches = benches)
     for ok, text, required in checks:
@@ -444,6 +548,10 @@ def dry_run(paths, keys, include_ref, benches):
         if entry["item"] not in shown and entry["label"] != REF:
             shown.add(entry["item"])
             print(f"  [{entry['item']}] " + " ".join(entry["command"]))
+    if paths["gpqa_engine"] == "vllm":
+        for entry in plan_full:
+            if entry["item"] == "gpqa" and entry["label"] == REF:
+                print("  [gpqa，参考模型] " + " ".join(entry["command"]))
     return 0 if all(ok for ok, _, required in checks if required) else 2
 
 
@@ -461,6 +569,14 @@ def resolve_paths(args):
         "gpu_lock": Path(args.gpu_lock) if args.gpu_lock else work / "gpu.lock",
         "gpqa_max_new": args.gpqa_max_new_tokens,
         "gpqa_reserve_gb": args.gpqa_memory_reserve_gb,
+        "gpqa_engine": args.gpqa_engine,
+        "gpqa_ref_lm": Path(args.gpqa_ref_lm) if args.gpqa_ref_lm else work / "data" / "T70" / "ref-lm",
+        "gpqa_export_root": Path(args.gpqa_export_root) if args.gpqa_export_root else work / "tmp" / "T71c" / "vllm-lm",
+        "gpqa_keep_export": args.gpqa_keep_export,
+        "gpqa_inflight_factor": args.gpqa_inflight_factor,
+        "gpqa_vllm_image": args.gpqa_vllm_image,
+        "gpqa_job_root": work / "tmp" / "T71c" / "vllm-job",
+        "gpqa_docker_home": work / "tmp" / "T71c" / "vllm-home",
     }
     paths["ifeval_problem"] = ifeval_python_problem(python = paths["python_ifeval"]) if "ifeval" in args.bench_list else None
     return paths
@@ -495,6 +611,22 @@ def parse_args(argv = None):
         default = 8.0,
         help = "GPQA 按剩余显存估算批大小时留出的显存（GiB）。本机 2 GiB 时第 3 批（提示最长）在 WSL 下出现 CUDA 错误（#71），默认留 8 GiB",
     )
+    parser.add_argument(
+        "--gpqa-engine",
+        default = "hf",
+        choices = GPQA_ENGINES,
+        help = "GPQA 的生成引擎：hf 为 text_bench 的 transformers 分批生成，vllm 为 gpqa_vllm 的连续批处理",
+    )
+    parser.add_argument("--gpqa-ref-lm", default = None, help = "vllm 引擎时参考模型的语言模型目录，默认 <工作目录>/data/T70/ref-lm")
+    parser.add_argument("--gpqa-export-root", default = None, help = "vllm 引擎时各运行导出语言模型的上级目录，默认 <工作目录>/tmp/T71c/vllm-lm")
+    parser.add_argument("--gpqa-keep-export", action = "store_true", help = "vllm 引擎时评测后保留导出的语言模型")
+    parser.add_argument(
+        "--gpqa-inflight-factor",
+        type = float,
+        default = 1.25,
+        help = "vllm 引擎时同时生成的题数为 KV 缓存放得下的满长条数的这么多倍（gpqa_vllm 的 --inflight-factor）",
+    )
+    parser.add_argument("--gpqa-vllm-image", default = VLLM_IMAGE, help = f"vllm 引擎时运行生成的 docker 镜像，默认 {VLLM_IMAGE}")
     parser.add_argument("--busy-mib", type = int, default = 3000, help = "已用显存超过它时等待（MiB）")
     parser.add_argument("--timeout-factor", type = float, default = 3.0, help = "单项超过估计用时的这么多倍（至少 30 分钟）时结束它")
     parser.add_argument("--dry-run", action = "store_true", help = "只检查输入、列出计划与时间估计")
