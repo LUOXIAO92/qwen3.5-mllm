@@ -79,7 +79,10 @@ def draw(runs_dir: Path, status_path: Path, out: Path, tag: str = "", runs: list
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    status = json.loads(status_path.read_text(encoding = "utf-8")) if status_path.exists() else {}
+    try:
+        status = json.loads(status_path.read_text(encoding = "utf-8")) if status_path.exists() else {}
+    except (OSError, ValueError):
+        status = {}
     figure, axes = plt.subplots(nrows = 2, ncols = 2, figsize = (13, 8.5), facecolor = SURFACE)
     (projector_axis, train_axis), (dev_axis, replay_axis) = axes
 
@@ -171,7 +174,10 @@ def main() -> None:
             print(f"画图失败：{error!r}", flush = True)
         if args.interval is None:
             return
-        status = json.loads(args.status.read_text(encoding = "utf-8")) if args.status.exists() else {}
+        try:  # 驱动程序可能正在改写 status.json，读到不完整的内容时下次再看
+            status = json.loads(args.status.read_text(encoding = "utf-8")) if args.status.exists() else {}
+        except (OSError, ValueError):
+            status = {}
         if status.get("phase") in FINAL_PHASES:
             draw(runs_dir = args.runs_dir, status_path = args.status, out = args.out, tag = args.tag, runs = runs)
             return
