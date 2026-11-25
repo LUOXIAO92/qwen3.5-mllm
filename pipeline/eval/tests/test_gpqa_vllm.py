@@ -314,7 +314,7 @@ class SameAsTextBenchTest(unittest.TestCase):
         self.assertEqual(hf["unclosed"], 0.2)
         self.assertEqual(hf["no_answer"], 0.2)
         engine_keys = {"attn_implementation_requested", "attn_implementation_used", "attn_fallback_reason", "batch_size", "batches", "seconds"}
-        vllm_keys = {"engine", "seed_scheme", "language_model", "vllm", "finish_reasons", "seconds"}
+        vllm_keys = {"engine", "seed_scheme", "language_model", "vllm", "finish_reasons", "seconds", "sampling", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty"}
         self.assertEqual({key: value for key, value in hf.items() if key not in engine_keys}, {key: value for key, value in vllm.items() if key not in vllm_keys})
         self.assertEqual(vllm["engine"], "vllm")
         self.assertEqual(vllm["finish_reasons"], {"stop": 5})

@@ -189,6 +189,7 @@ def vllm_gpqa_command(paths, label, language_model, common):
     """GPQA 的 vLLM 版（gpqa_vllm）的命令与估计用时：参考模型直接加载 --gpqa-ref-lm，运行先导出到 --gpqa-export-root/<标签>。"""
     command = [str(paths["python_text"]), "-m", "pipeline.eval.gpqa_vllm"] + common + [
         "--gpqa-max-new-tokens", str(paths["gpqa_max_new"]),
+        "--gpqa-sampling", str(paths.get("gpqa_sampling", "plain")),
         "--inflight-factor", str(paths["gpqa_inflight_factor"]),
         "--image", str(paths["gpqa_vllm_image"]),
         "--job-dir", str(paths["gpqa_job_root"] / label),
@@ -568,6 +569,7 @@ def resolve_paths(args):
         "python_ifeval": Path(args.py_ifeval) if args.py_ifeval else None,
         "gpu_lock": Path(args.gpu_lock) if args.gpu_lock else work / "gpu.lock",
         "gpqa_max_new": args.gpqa_max_new_tokens,
+        "gpqa_sampling": args.gpqa_sampling,
         "gpqa_reserve_gb": args.gpqa_memory_reserve_gb,
         "gpqa_engine": args.gpqa_engine,
         "gpqa_ref_lm": Path(args.gpqa_ref_lm) if args.gpqa_ref_lm else work / "data" / "T70" / "ref-lm",
@@ -605,6 +607,12 @@ def parse_args(argv = None):
     parser.add_argument("--no-ref", action = "store_true", help = "不评测参考模型")
     parser.add_argument("--benches", default = ",".join(BENCH_CHOICES), help = "逗号分隔的基准，默认全部")
     parser.add_argument("--gpqa-max-new-tokens", type = int, default = 16384, help = "GPQA 的生成上限（各模型要用同一个）")
+    parser.add_argument(
+        "--gpqa-sampling",
+        default = "plain",
+        choices = ("plain", "card"),
+        help = "GPQA（vLLM）的采样预设：plain 不设 top-k、top-p 与惩罚；card 为 Qwen3.5-2B 模型卡的设置",
+    )
     parser.add_argument(
         "--gpqa-memory-reserve-gb",
         type = float,

@@ -49,16 +49,17 @@ def inflight_limit(concurrency: float, factor: float, explicit: int, max_num_seq
 
 
 def sampling_params(SamplingParams, final_only, job: dict, seed: int):
-    """一条请求的采样设置：温度 job["temperature"]，不设 top-k、top-p、min-p 和惩罚，带自己的种子，只在结束时返回结果。"""
+    """一条请求的采样设置：温度 job["temperature"]；top_p、top_k、min_p、presence_penalty、repetition_penalty 取 job 中的值
+    （没有时为 1、不限、0、0、1，即不设），带自己的种子，只在结束时返回结果。"""
     return SamplingParams(
         n = 1,
         temperature = job["temperature"],
-        top_p = 1.0,
-        top_k = 0,
-        min_p = 0.0,
-        presence_penalty = 0.0,
+        top_p = job.get("top_p", 1.0),
+        top_k = job.get("top_k", 0),
+        min_p = job.get("min_p", 0.0),
+        presence_penalty = job.get("presence_penalty", 0.0),
         frequency_penalty = 0.0,
-        repetition_penalty = 1.0,
+        repetition_penalty = job.get("repetition_penalty", 1.0),
         seed = seed,
         max_tokens = job["max_tokens"],
         stop_token_ids = list(job["stop_token_ids"]),

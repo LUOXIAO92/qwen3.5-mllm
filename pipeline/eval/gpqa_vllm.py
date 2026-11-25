@@ -181,6 +181,14 @@ def request_seed(seed: int, index: int) -> int:
     return seed + index
 
 
+# 采样预设：plain 为温度之外不设任何限制（与思考检查、回放数据相同）；card 为 Qwen3.5-2B 模型卡语言评测表的设置
+# （思考模式：top_p 0.95、top_k 20、presence_penalty 1.5、温度 1.0），与模型卡的分数对照时用它。
+SAMPLING_PRESETS = {
+    "plain": {"top_p": 1.0, "top_k": 0, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0},
+    "card": {"top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0},
+}
+
+
 def job_settings(args, model_path: Path, prompts: list) -> dict:
     """写进 job.json 的生成设置（vllm_generate 读取）。"""
     from pipeline.eval.think_check import STOP_IDS
@@ -189,6 +197,7 @@ def job_settings(args, model_path: Path, prompts: list) -> dict:
         "model": str(Path(model_path).resolve()),
         "max_tokens": args.gpqa_max_new_tokens,
         "temperature": args.gpqa_temperature,
+        **SAMPLING_PRESETS[args.gpqa_sampling],
         "stop_token_ids": list(STOP_IDS),
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "max_model_len": max(len(ids) for _, ids in prompts) + args.gpqa_max_new_tokens,
@@ -352,7 +361,8 @@ def plan_text(prompts: list, args, command: list | None) -> str:
     return "\n".join([
         f"{len(prompts)} 题，提示长度最短 {lengths[0]}、中位数 {lengths[len(lengths) // 2]}、最长 {lengths[-1]} 个 token",
         f"max_model_len {max_model_len}，按 KV 缓存约 {KV_TOKENS_ESTIMATE:,} token 估计同时放得下 {concurrency:.1f} 条，同时生成最多 {limit} 题",
-        f"采样：温度 {args.gpqa_temperature}，每题种子 {args.gpqa_seed} + 题号，最多 {args.gpqa_max_new_tokens} 个新 token",
+        f"采样：温度 {args.gpqa_temperature}，{args.gpqa_sampling}（{SAMPLING_PRESETS[args.gpqa_sampling]}），"
+        f"每题种子 {args.gpqa_seed} + 题号，最多 {args.gpqa_max_new_tokens} 个新 token",
         f"模型：{model}",
         f"任务目录：{args.job_dir}（{'评测后保留' if args.keep_job else '评测后删除'}）",
         "生成程序：" + (" ".join(command) if command else "（docker 镜像信息取不到）"),
@@ -379,6 +389,12 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
     parser.add_argument("--gpqa-limit", default = None, type = int, help = "只做前这么多题")
     parser.add_argument("--gpqa-max-new-tokens", default = 16384, type = int)
     parser.add_argument("--gpqa-temperature", default = 1.0, type = float)
+    parser.add_argument(
+        "--gpqa-sampling",
+        default = "plain",
+        choices = sorted(SAMPLING_PRESETS),
+        help = "采样预设：plain 不设 top-k、top-p 与惩罚；card 为模型卡的设置（top_p 0.95、top_k 20、presence_penalty 1.5）",
+    )
     parser.add_argument("--gpqa-seed", default = 1234, type = int, help = "每题的种子为它加题号")
     parser.add_argument("--gpu-memory-utilization", default = 0.88, type = float)
     parser.add_argument("--max-num-seqs", default = 256, type = int, help = "vLLM 调度器的序列数上限（实际同时生成的题数见 --inflight-factor）")
@@ -502,6 +518,8 @@ def main(argv: list | None = None) -> int:
     }
     settings = {
         "temperature": args.gpqa_temperature,
+        "sampling": args.gpqa_sampling,
+        **SAMPLING_PRESETS[args.gpqa_sampling],
         "seed": args.gpqa_seed,
         "seed_scheme": "per question: seed + row index in gpqa_diamond.csv",
         "option_seed": text_bench.GPQA_OPTION_SEED,
