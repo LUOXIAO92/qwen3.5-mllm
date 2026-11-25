@@ -39,7 +39,7 @@
 环境变量（与 t71_cpt_run.py 相同）：REPO、WORK_DIR、DRIVE_DIR、DATASET、PY、INDEX、SHARDS_DRIVE、SHARDS_LOCAL；
 回放数据须已由 setup.sh 解到 $DATASET/text/qwen3.5-asr/replay-noloop，FLEURS test 已由 fleurs_prepare 准备在
 $WORK_DIR/data/T02。可选：C71_TAG（输出名后缀）、C71_RATIO（默认 0.5）、C71_REPLAY_NORM（asr 或 step，默认 asr，按 token 归一化）、
-C71_RUNS（逗号分隔，只跑这些运行，默认第一轮的六个；第二轮的 kl32 运行 c-cont_raw-kl32、c-cont_think-kl32 要点名）、
+C71_RUNS（逗号分隔，只跑这些运行，默认第一轮的六个；第二轮的 kl32 运行 c-cont_raw-kl32、c-cont_think-kl32、c-cont_raw-kl32tail 要点名）、
 C71_SKIP_SMOKE=1、C71_THINK_MAX_NEW（默认 16384）、C71_THINK_ATTENTION（思考检查全注意力层的实现，默认 flash_attention_2）、
 C71_DEADLINE_HOURS、C71_CU_PER_HOUR（默认 10，#65 实测的 G4 消耗）、
 C71_STATE_SYNC_STEPS、C71_ESTIMATE_ONLY=1（只打印估计后退出）、C71_TRAIN_ONLY=1（只训练：跳过各运行的评测、参考模型的评测和
@@ -112,7 +112,11 @@ RUNS = {
 KL_RUNS = {
     "c-cont_raw-kl32": "cont_raw=1",
     "c-cont_think-kl32": "cont_raw=1,free_chat_think=1",
+    "c-cont_raw-kl32tail": "cont_raw=1",
 }
+# 另加尾部项（train.py --replay-kl-tail）：top-32 之外合成一个桶，目标概率为参考模型的剩余概率（用户 2026-11-25 决定加跑）。
+# 续写组参考模型 top-32 之外平均还有 7.2% 的概率，不加尾部时学生的这部分被压向 0。
+KL_TAIL_RUNS = {"c-cont_raw-kl32tail"}
 ALL_RUNS = {**RUNS, **KL_RUNS}
 SELECTED = [key for key in ENV.get("C71_RUNS", ",".join(RUNS)).split(",") if key]
 UNKNOWN = [key for key in SELECTED if key not in ALL_RUNS]
@@ -338,7 +342,7 @@ def train_command(out, extra):
     ] + extra
 
 
-def replay_arguments(spec, loss = "ntp"):
+def replay_arguments(spec, loss = "ntp", tail = False):
     if spec is None:
         return []
     return [
@@ -347,7 +351,7 @@ def replay_arguments(spec, loss = "ntp"):
         "--replay-ratio", RATIO,
         "--replay-loss", loss,
         "--replay-norm", REPLAY_NORM,
-    ]
+    ] + (["--replay-kl-tail"] if tail else [])
 
 
 def full_arguments(init):
@@ -676,11 +680,15 @@ def free_local(name):
 def phase_train(key):
     name = run_name(key = key)
     init = read_status()["projector_init"]
-    log(f"训练 {key}（{name}）：从 {init} 全量微调 {FULL_STEPS} 步，回放 {ALL_RUNS[key] or '无'}，损失 {replay_loss(key = key)}")
+    tail = key in KL_TAIL_RUNS
+    log(
+        f"训练 {key}（{name}）：从 {init} 全量微调 {FULL_STEPS} 步，回放 {ALL_RUNS[key] or '无'}，"
+        f"损失 {replay_loss(key = key)}{'（加尾部项）' if tail else ''}"
+    )
     set_status(phase = f"train:{key}")
     state = run_training(
         name = name,
-        extra = full_arguments(init = init) + replay_arguments(spec = ALL_RUNS[key], loss = replay_loss(key = key)),
+        extra = full_arguments(init = init) + replay_arguments(spec = ALL_RUNS[key], loss = replay_loss(key = key), tail = tail),
     )
     stats = train_stats(out = WORK / "runs" / name)
     runs = read_status().get("runs", {})

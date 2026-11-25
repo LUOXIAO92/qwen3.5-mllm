@@ -28,8 +28,8 @@ from pathlib import Path
 from pipeline.train.plot_curves import GRID, SERIES, SURFACE, TEXT_PRIMARY, TEXT_SECONDARY, read_jsonl, style
 
 PREFIX = "v2b-2b-cpt77-"
-# 第二轮的 kl32 运行排在后面（没有日志的运行不画，颜色仍按这里的顺序固定）
-RUNS = ["c0", "c-free_raw", "c-free_chat", "c-cont_raw", "c-cont_chat", "c-mix", "c-cont_raw-kl32", "c-cont_think-kl32"]
+# 默认画第一轮的六个运行；第二轮用 --runs 指定（最多 8 个，颜色按给出的顺序固定，没有日志的运行不画）
+RUNS = ["c0", "c-free_raw", "c-free_chat", "c-cont_raw", "c-cont_chat", "c-mix"]
 FINAL_PHASES = ("trained", "done", "done_with_failures", "blocked")
 # 训练与回放曲线的滑动平均点数（训练日志每 --log-every 步一行）
 SMOOTH = 20
@@ -73,7 +73,7 @@ def smooth(points: list, window: int) -> list:
     return out
 
 
-def draw(runs_dir: Path, status_path: Path, out: Path, tag: str = "") -> None:
+def draw(runs_dir: Path, status_path: Path, out: Path, tag: str = "", runs: list = RUNS) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -103,7 +103,7 @@ def draw(runs_dir: Path, status_path: Path, out: Path, tag: str = "") -> None:
     projector_axis.set_title("Projector from scratch (CPT format)", color = TEXT_PRIMARY, fontsize = 11, loc = "left")
 
     train_points, dev_points, replay_points = [], [], []
-    for index, run in enumerate(RUNS):
+    for index, run in enumerate(runs):
         directory = runs_dir / (PREFIX + run + tag)
         color = SERIES[index % len(SERIES)]
         rows = read_jsonl(path = directory / "train_log.jsonl")
@@ -159,17 +159,21 @@ def main() -> None:
     parser.add_argument("--out", required = True, type = Path)
     parser.add_argument("--tag", default = "", help = "运行名后缀（C71_TAG）")
     parser.add_argument("--interval", type = int, default = None, help = "每隔多少秒重画一次；不给时只画一次")
+    parser.add_argument("--runs", default = ",".join(RUNS), help = "逗号分隔的运行（最多 8 个），默认第一轮的六个")
     args = parser.parse_args()
+    runs = [run for run in args.runs.split(",") if run]
+    if len(runs) > len(SERIES):
+        parser.error(f"--runs 最多 {len(SERIES)} 个（颜色不循环）")
     while True:
         try:
-            draw(runs_dir = args.runs_dir, status_path = args.status, out = args.out, tag = args.tag)
+            draw(runs_dir = args.runs_dir, status_path = args.status, out = args.out, tag = args.tag, runs = runs)
         except Exception as error:  # 画图失败不影响训练，下次再试
             print(f"画图失败：{error!r}", flush = True)
         if args.interval is None:
             return
         status = json.loads(args.status.read_text(encoding = "utf-8")) if args.status.exists() else {}
         if status.get("phase") in FINAL_PHASES:
-            draw(runs_dir = args.runs_dir, status_path = args.status, out = args.out, tag = args.tag)
+            draw(runs_dir = args.runs_dir, status_path = args.status, out = args.out, tag = args.tag, runs = runs)
             return
         time.sleep(args.interval)
 
