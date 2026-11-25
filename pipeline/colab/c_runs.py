@@ -39,7 +39,7 @@
 环境变量（与 t71_cpt_run.py 相同）：REPO、WORK_DIR、DRIVE_DIR、DATASET、PY、INDEX、SHARDS_DRIVE、SHARDS_LOCAL；
 回放数据须已由 setup.sh 解到 $DATASET/text/qwen3.5-asr/replay-noloop，FLEURS test 已由 fleurs_prepare 准备在
 $WORK_DIR/data/T02。可选：C71_TAG（输出名后缀）、C71_RATIO（默认 0.5）、C71_REPLAY_NORM（asr 或 step，默认 asr，按 token 归一化）、
-C71_RUNS（逗号分隔，只跑这些运行，默认全部）、
+C71_RUNS（逗号分隔，只跑这些运行，默认第一轮的六个；第二轮的 kl32 运行 c-cont_raw-kl32、c-cont_think-kl32 要点名）、
 C71_SKIP_SMOKE=1、C71_THINK_MAX_NEW（默认 16384）、C71_THINK_ATTENTION（思考检查全注意力层的实现，默认 flash_attention_2）、
 C71_DEADLINE_HOURS、C71_CU_PER_HOUR（默认 10，#65 实测的 G4 消耗）、
 C71_STATE_SYNC_STEPS、C71_ESTIMATE_ONLY=1（只打印估计后退出）、C71_TRAIN_ONLY=1（只训练：跳过各运行的评测、参考模型的评测和
@@ -107,7 +107,22 @@ RUNS = {
     "c-cont_chat": "cont_chat=1",
     "c-mix": ALL_GROUPS,
 }
+# 第二轮：回放损失改用 kl32（参考模型 top-32 的截断前向 KL，不加尾部项，即有偏的近似 KL；用户 2026-11-25 决定试）。
+# c-cont_raw-kl32 与第一轮的 c-cont_raw 只差损失，c-cont_think-kl32 另加思考模式的自生成数据。只在 C71_RUNS 中点名时运行。
+KL_RUNS = {
+    "c-cont_raw-kl32": "cont_raw=1",
+    "c-cont_think-kl32": "cont_raw=1,free_chat_think=1",
+}
+ALL_RUNS = {**RUNS, **KL_RUNS}
 SELECTED = [key for key in ENV.get("C71_RUNS", ",".join(RUNS)).split(",") if key]
+UNKNOWN = [key for key in SELECTED if key not in ALL_RUNS]
+if UNKNOWN:
+    raise SystemExit(f"C71_RUNS 中有未知的运行：{UNKNOWN}，可选 {list(ALL_RUNS)}")
+
+
+def replay_loss(key):
+    """运行 key 的回放损失：KL_RUNS 中的为 kl32，其余为 ntp。"""
+    return "kl32" if key in KL_RUNS else "ntp"
 # 训练结束、停下后留给同步 trainer_state.pt（约 26 GB）和写状态的时间（分钟）。
 RESERVE_MINUTES = 40
 STARTED = time.time()
@@ -245,7 +260,7 @@ def estimate(train_minutes = None):
     per_eval = sum(ESTIMATE[key] for key in ESTIMATE if key.startswith("eval_"))
     stages = {"smoke": ESTIMATE["shards_first_copy"] + ESTIMATE["smoke"], "projector": ESTIMATE["projector"]}
     for key in SELECTED:
-        stages[f"train:{key}"] = train_c0 if RUNS[key] is None else train_replay
+        stages[f"train:{key}"] = train_c0 if ALL_RUNS[key] is None else train_replay
         if not TRAIN_ONLY:
             stages[f"eval:{key}"] = per_eval
     if not TRAIN_ONLY:
@@ -661,9 +676,12 @@ def free_local(name):
 def phase_train(key):
     name = run_name(key = key)
     init = read_status()["projector_init"]
-    log(f"训练 {key}（{name}）：从 {init} 全量微调 {FULL_STEPS} 步，回放 {RUNS[key] or '无'}")
+    log(f"训练 {key}（{name}）：从 {init} 全量微调 {FULL_STEPS} 步，回放 {ALL_RUNS[key] or '无'}，损失 {replay_loss(key = key)}")
     set_status(phase = f"train:{key}")
-    state = run_training(name = name, extra = full_arguments(init = init) + replay_arguments(spec = RUNS[key]))
+    state = run_training(
+        name = name,
+        extra = full_arguments(init = init) + replay_arguments(spec = ALL_RUNS[key], loss = replay_loss(key = key)),
+    )
     stats = train_stats(out = WORK / "runs" / name)
     runs = read_status().get("runs", {})
     runs[key] = {"name": name, "status": state.get("status"), "exit_code": state.get("exit_code"), **stats}

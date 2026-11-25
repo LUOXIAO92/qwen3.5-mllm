@@ -28,7 +28,8 @@ from pathlib import Path
 from pipeline.train.plot_curves import GRID, SERIES, SURFACE, TEXT_PRIMARY, TEXT_SECONDARY, read_jsonl, style
 
 PREFIX = "v2b-2b-cpt77-"
-RUNS = ["c0", "c-free_raw", "c-free_chat", "c-cont_raw", "c-cont_chat", "c-mix"]
+# 第二轮的 kl32 运行排在后面（没有日志的运行不画，颜色仍按这里的顺序固定）
+RUNS = ["c0", "c-free_raw", "c-free_chat", "c-cont_raw", "c-cont_chat", "c-mix", "c-cont_raw-kl32", "c-cont_think-kl32"]
 FINAL_PHASES = ("trained", "done", "done_with_failures", "blocked")
 # 训练与回放曲线的滑动平均点数（训练日志每 --log-every 步一行）
 SMOOTH = 20
