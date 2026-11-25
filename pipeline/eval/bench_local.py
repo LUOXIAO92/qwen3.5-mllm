@@ -603,7 +603,7 @@ def parse_args(argv = None):
         help = "IFEval 打分用的 python（需要 langdetect、nltk ≥ 3.9.1 与 punkt_tab 数据），默认环境变量 IFEVAL_PYTHON",
     )
     parser.add_argument("--gpu-lock", default = None, help = "GPU 锁文件，默认 <工作目录>/gpu.lock")
-    parser.add_argument("--runs", default = ",".join(c_runs.RUNS), help = "逗号分隔的运行，默认全部六个")
+    parser.add_argument("--runs", default = ",".join(c_runs.RUNS), help = "逗号分隔的运行，默认第一轮的六个；第二轮的 kl32 运行（c_runs.KL_RUNS）要点名")
     parser.add_argument("--no-ref", action = "store_true", help = "不评测参考模型")
     parser.add_argument("--benches", default = ",".join(BENCH_CHOICES), help = "逗号分隔的基准，默认全部")
     parser.add_argument("--gpqa-max-new-tokens", type = int, default = 16384, help = "GPQA 的生成上限（各模型要用同一个）")
@@ -640,9 +640,9 @@ def parse_args(argv = None):
     parser.add_argument("--dry-run", action = "store_true", help = "只检查输入、列出计划与时间估计")
     args = parser.parse_args(args = argv)
     args.keys = [key for key in args.runs.split(",") if key]
-    unknown = [key for key in args.keys if key not in c_runs.RUNS]
+    unknown = [key for key in args.keys if key not in c_runs.ALL_RUNS]
     if unknown:
-        parser.error(f"未知的运行：{unknown}，可选 {list(c_runs.RUNS)}")
+        parser.error(f"未知的运行：{unknown}，可选 {list(c_runs.ALL_RUNS)}")
     args.bench_list = [bench for bench in args.benches.split(",") if bench]
     unknown = [bench for bench in args.bench_list if bench not in BENCH_CHOICES]
     if unknown:

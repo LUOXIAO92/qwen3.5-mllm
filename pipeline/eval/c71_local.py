@@ -972,7 +972,7 @@ def parse_args(argv = None):
     parser.add_argument("--py-audio", default = None, help = "fleurs、probe 用的 python，默认 <工作目录>/envs/mllm-eval/bin/python")
     parser.add_argument("--py-text", default = None, help = "lm_ppl、replay_gap、think 用的 python，默认 <工作目录>/envs/mllm-train/bin/python")
     parser.add_argument("--gpu-lock", default = None, help = "GPU 锁文件，默认 <工作目录>/gpu.lock")
-    parser.add_argument("--runs", default = ",".join(c_runs.RUNS), help = "逗号分隔的运行，默认全部六个")
+    parser.add_argument("--runs", default = ",".join(c_runs.RUNS), help = "逗号分隔的运行，默认第一轮的六个；第二轮的 kl32 运行（c_runs.KL_RUNS）要点名")
     parser.add_argument("--no-ref", action = "store_true", help = "不评测参考模型")
     parser.add_argument(
         "--order",
@@ -1007,9 +1007,9 @@ def parse_args(argv = None):
     parser.add_argument("--dry-run", action = "store_true", help = "只检查输入、列出计划与时间估计")
     args = parser.parse_args(args = argv)
     keys = [key for key in args.runs.split(",") if key]
-    unknown = [key for key in keys if key not in c_runs.RUNS]
+    unknown = [key for key in keys if key not in c_runs.ALL_RUNS]
     if unknown:
-        parser.error(f"未知的运行：{unknown}，可选 {list(c_runs.RUNS)}")
+        parser.error(f"未知的运行：{unknown}，可选 {list(c_runs.ALL_RUNS)}")
     if not args.dataset and not args.replay_dir:
         parser.error("需要 --dataset（或环境变量 DATASET）或 --replay-dir")
     args.keys = keys
