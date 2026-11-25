@@ -52,7 +52,9 @@ top_p 0.95、top_k 20、presence_penalty 1.5），每批开始前按 --gpqa-seed
 FlashAttention-2（think_check.FLASH_ATTENTION），载入或生成出错时整项改用 sdpa，批大小按剩余显存估算（与思考检查的
 --fit-memory 相同，RTX 5090 上 3 批、每批 66 题），显存不足时对半拆开重试；题目按提示长度排序后分批，减少左填充。答案只在 </think> 之后找：`"answer": "X"`（键可以不带引号）与
 `\\boxed{X}` 两种写法中位置最靠后的一个。没有写完 </think>（unclosed）或者找不到答案（no_answer）都算错，单独报告。
-主指标是 198 题的准确率（模型卡思考模式 51.6）；每题只采样一次，198 题的标准误约 3.5 个百分点。
+主指标是 198 题的准确率（模型卡思考模式 51.6）；每题只采样一次，198 题的标准误约 3.5 个百分点。GPQA 也可以用 vLLM 的连续
+批处理生成（pipeline/eval/gpqa_vllm.py）：题目、提示、答案解析、指标和输出文件都调用这里的函数（gpqa_rows、gpqa_prompts、
+write_gpqa），只有生成和随机数的分配不同。
 
 输出（--out-dir）：每项基准 <基准>.json（汇总）与 <基准>.items.jsonl（逐题：编号、标准答案、模型答案、四个字母的对数概率
 或 GPQA 的状态），IFEval 另有 responses 与 generation 两个文件，GPQA 另有 gpqa.ids.i32。
@@ -497,63 +499,32 @@ def parse_choice(text: str) -> str | None:
     return max(found)[1] if found else None
 
 
-def run_gpqa(args, data_dir: Path, out_dir: Path, log) -> None:
-    """GPQA Diamond（思考模式），写 gpqa.json、gpqa.items.jsonl 与 gpqa.ids.i32（见开头）。"""
+def gpqa_rows(data_dir: Path, limit: int | None) -> list:
+    """GPQA Diamond 的题目（选项已打乱），limit 不为空时只取前这么多题（按 gpqa_diamond.csv 的顺序）。"""
+    rows = load_gpqa(path = data_dir / DATA["gpqa"])
+    return rows if limit is None else rows[:limit]
+
+
+def gpqa_prompts(tokenizer, rows: list) -> list:
+    """每题的提示：[(Record ID, 提示 token id)]，chat template 展开、enable_thinking = True。"""
+    return [(row["id"], chat_ids(tokenizer = tokenizer, text = gpqa_text(row = row), thinking = True)) for row in rows]
+
+
+def write_gpqa(rows: list, prompts: list, outputs: list, tokenizer, max_new_tokens: int, out_dir: Path, settings: dict) -> dict:
+    """解析每题的答案、统计指标，写 gpqa.ids.i32、gpqa.items.jsonl 与 gpqa.json（最后写，作为做完的标志），返回汇总。
+
+    outputs 与 rows、prompts 按同样的顺序，是每题新生成的 token（到第一个结束符为止，含结束符）；settings 是生成设置
+    （温度、种子、引擎与批的划分等），按给出的顺序写在汇总的答案分布之后。
+    """
     import numpy as np
-    import torch
 
     from pipeline.eval import think_check
 
-    rows = load_gpqa(path = data_dir / DATA["gpqa"])
-    if args.gpqa_limit is not None:
-        rows = rows[: args.gpqa_limit]
-
-    def load(attention):
-        return think_check.load_for_attention(
-            model_dir = args.model_dir,
-            language_model = args.language_model,
-            attention = attention,
-        )
-
-    tokenizer = tokenizer_of(model_dir = args.model_dir)
-    prompts = [
-        (row["id"], chat_ids(tokenizer = tokenizer, text = gpqa_text(row = row), thinking = True))
-        for row in rows
-    ]
-
-    def choose_batch_size(model, attention):
-        if not torch.cuda.is_available():
-            return args.gpqa_batch_size
-        return fitted_batch_size(
-            model = model,
-            prompts = prompts,
-            max_new_tokens = args.gpqa_max_new_tokens,
-            attention = attention,
-            requested = args.gpqa_batch_size,
-            reserve_gb = args.memory_reserve_gb,
-            log = log,
-        )
-
-    # 提示长度相差很大（中位数约 218 个 token，最长约 2,800），按长度排序后再分批，同一批左填充得少；结果按原顺序写出
-    order = sorted(range(len(prompts)), key = lambda index: (len(prompts[index][1]), index))
-    result = think_check.think_generate(
-        load = load,
-        prompts = [prompts[index] for index in order],
-        requested = args.gpqa_attention,
-        choose_batch_size = choose_batch_size,
-        max_new_tokens = args.gpqa_max_new_tokens,
-        temperature = args.gpqa_temperature,
-        seed = args.gpqa_seed,
-        log = log,
-    )
-    outputs = [None] * len(prompts)
-    for position, index in enumerate(order):
-        outputs[index] = result["outputs"][position]
     items = []
     generated = []
     offset = 0
     for row, (_, prompt), ids in zip(rows, prompts, outputs):
-        stats = think_check.analyze(ids = ids, max_new_tokens = args.gpqa_max_new_tokens)
+        stats = think_check.analyze(ids = ids, max_new_tokens = max_new_tokens)
         pred = None
         if stats["closed"]:
             ends = np.nonzero(np.asarray(a = ids) == think_check.THINK_END_ID)[0]
@@ -587,6 +558,68 @@ def run_gpqa(args, data_dir: Path, out_dir: Path, log) -> None:
         "unclosed": round(number = sum(item["status"] == "unclosed" for item in items) / count, ndigits = 4),
         "no_answer": round(number = sum(item["status"] == "no_answer" for item in items) / count, ndigits = 4),
         "pred_share": {letter: round(number = sum(item["pred"] == letter for item in items) / count, ndigits = 4) for letter in LETTERS},
+        **settings,
+        "card": CARD["gpqa"],
+        **think_check.summarize(rows = items, max_new_tokens = max_new_tokens),
+    }
+    write_atomic(path = out_dir / "gpqa.json", text = json.dumps(obj = summary, ensure_ascii = False, indent = 1) + "\n")
+    return summary
+
+
+def gpqa_log_line(summary: dict, engine: str) -> str:
+    return (
+        f"gpqa：{summary['n']} 题，准确率 {summary['accuracy']:.4f}，没写完 </think> {summary['unclosed']:.3f}，"
+        f"找不到答案 {summary['no_answer']:.3f}，{summary['seconds']} 秒（{engine}）"
+    )
+
+
+def run_gpqa(args, data_dir: Path, out_dir: Path, log) -> None:
+    """GPQA Diamond（思考模式），写 gpqa.json、gpqa.items.jsonl 与 gpqa.ids.i32（见开头）。"""
+    import torch
+
+    from pipeline.eval import think_check
+
+    rows = gpqa_rows(data_dir = data_dir, limit = args.gpqa_limit)
+
+    def load(attention):
+        return think_check.load_for_attention(
+            model_dir = args.model_dir,
+            language_model = args.language_model,
+            attention = attention,
+        )
+
+    tokenizer = tokenizer_of(model_dir = args.model_dir)
+    prompts = gpqa_prompts(tokenizer = tokenizer, rows = rows)
+
+    def choose_batch_size(model, attention):
+        if not torch.cuda.is_available():
+            return args.gpqa_batch_size
+        return fitted_batch_size(
+            model = model,
+            prompts = prompts,
+            max_new_tokens = args.gpqa_max_new_tokens,
+            attention = attention,
+            requested = args.gpqa_batch_size,
+            reserve_gb = args.memory_reserve_gb,
+            log = log,
+        )
+
+    # 提示长度相差很大（中位数约 218 个 token，最长约 2,800），按长度排序后再分批，同一批左填充得少；结果按原顺序写出
+    order = sorted(range(len(prompts)), key = lambda index: (len(prompts[index][1]), index))
+    result = think_check.think_generate(
+        load = load,
+        prompts = [prompts[index] for index in order],
+        requested = args.gpqa_attention,
+        choose_batch_size = choose_batch_size,
+        max_new_tokens = args.gpqa_max_new_tokens,
+        temperature = args.gpqa_temperature,
+        seed = args.gpqa_seed,
+        log = log,
+    )
+    outputs = [None] * len(prompts)
+    for position, index in enumerate(order):
+        outputs[index] = result["outputs"][position]
+    settings = {
         "temperature": args.gpqa_temperature,
         "seed": args.gpqa_seed,
         "option_seed": GPQA_OPTION_SEED,
@@ -596,14 +629,17 @@ def run_gpqa(args, data_dir: Path, out_dir: Path, log) -> None:
         "batch_size": result["batch_size"],
         "batches": result["batches"],
         "seconds": result["seconds"],
-        "card": CARD["gpqa"],
-        **think_check.summarize(rows = items, max_new_tokens = args.gpqa_max_new_tokens),
     }
-    write_atomic(path = out_dir / "gpqa.json", text = json.dumps(obj = summary, ensure_ascii = False, indent = 1) + "\n")
-    log(
-        f"gpqa：{count} 题，准确率 {summary['accuracy']:.4f}，没写完 </think> {summary['unclosed']:.3f}，"
-        f"找不到答案 {summary['no_answer']:.3f}，{summary['seconds']} 秒（{result['used']}）"
+    summary = write_gpqa(
+        rows = rows,
+        prompts = prompts,
+        outputs = outputs,
+        tokenizer = tokenizer,
+        max_new_tokens = args.gpqa_max_new_tokens,
+        out_dir = out_dir,
+        settings = settings,
     )
+    log(gpqa_log_line(summary = summary, engine = result["used"]))
 
 
 # ---------------------------------------------------------------- 输出与入口
