@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pipeline.train import muon, precision, shards
+from pipeline.train import lora, muon, precision, shards
 from pipeline.train.data import PackedRows
 from pipeline.train.sampling import EpochPlan
 from pipeline.train.train import (
@@ -200,10 +200,11 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(set(PLAN_KEYS) <= set(RESUME_KEYS))
         noise = {key for key in RESUME_KEYS if key.startswith("noise_")}
         replay = {key for key in RESUME_KEYS if key.startswith("replay_")}
-        # 混音、样本格式（--prompt-format）和训练范围、精度、优化器、自生成回放（#71，加在 ASR 批次之外）不改变每一步读哪些样本。
+        # 混音、样本格式（--prompt-format）和训练范围、精度、优化器、自生成回放（#71，加在 ASR 批次之外）、语言模型的 LoRA
+        # 不改变每一步读哪些样本。
         self.assertEqual(
             set(RESUME_KEYS) - set(PLAN_KEYS),
-            noise | replay | {"train_language_model", "prompt_format"} | set(precision.KEYS) | set(muon.KEYS),
+            noise | replay | {"train_language_model", "prompt_format"} | set(precision.KEYS) | set(muon.KEYS) | set(lora.KEYS),
         )
         self.assertEqual(len(replay), 7)
 

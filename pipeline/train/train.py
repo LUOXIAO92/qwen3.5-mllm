@@ -83,6 +83,13 @@ trainer_state.pt 的 replay 项中，续训后取到的样本与不中断时相�
 token，另有 objective（一步实际优化的损失）、replay_loss、replay_nll、各组的 replay_groups 和实际比例；每次取样记在
 <输出目录>/replay_log.jsonl。--replay-probe-longest（冒烟测试用）在这段运行的第一步另加一个只含最长回放样本的微批，
 看峰值显存。
+
+语言模型的 LoRA（任务 #71，lora.py）：--language-model-lora-rank R 给语言模型各解码层的线性层加秩为 R 的低秩增量，基座
+权重（连同词嵌入兼输出层）冻结，只训练 LoRA 参数和 projector；不能与 --train-language-model 同用，回放照常可用。
+--language-model-lora-alpha（默认等于秩）、--language-model-lora-targets（默认 all）改变训练的参数和损失，与秩一起在
+RESUME_KEYS 中（以前的配置按默认值「不用 LoRA」核对）。--language-model-lora-lr（默认 1e-4）是 LoRA 参数组的峰值学习率，
+与 --lr 一样不参与续训核对，续训沿用检查点中的数值。projector 与 LoRA 两组用 AdamW、同一条学习率曲线，梯度一起裁剪。
+检查点另存 lora.safetensors，并写出合并后的 language_model.safetensors（与全量微调的格式相同，评测程序直接使用）。
 """
 
 import argparse
@@ -114,7 +121,7 @@ from pipeline.train.data import (
     read_manifest,
     summarize_rows,
 )
-from pipeline.train import muon, precision
+from pipeline.train import lora, muon, precision
 from pipeline.train.master import DirectWeights, MasterWeights
 from pipeline.train.placement import LanguageModelUpdate
 from pipeline.train.mixing import BackgroundMixer, parse_category_weights
@@ -130,6 +137,7 @@ from pipeline.train.sampling import (
     sample_weights,
 )
 from pipeline.train.model import (
+    LANGUAGE_MODEL_PREFIXES,
     PACKED_ATTENTION,
     PROJECTOR_PREFIX,
     check_packing_kernels,
@@ -192,6 +200,8 @@ RESUME_KEYS = (
     *muon.KEYS,
     # 自生成回放（replay.py）：混入哪些文本、多少、什么损失、怎样归一化。
     *("replay_dir", "replay_groups", "replay_ratio", "replay_loss", "replay_kl_tail", "replay_split", "replay_norm"),
+    # 语言模型的 LoRA（lora.py）：秩、α、加在哪些线性层上。
+    *lora.KEYS,
 )
 # 决定训练计划（每一步读哪些样本）的配置，即 RESUME_KEYS 中混音、样本格式和训练范围以外的各项。音频分片按这个计划排列。
 PLAN_KEYS = (
@@ -484,6 +494,7 @@ def parse_args(argv = None):
     parser.add_argument("--no-frozen-check", action = "store_true", help = "跳过冻结参数前后一致的检查")
     parser.add_argument("--deterministic", action = "store_true", help = "使用确定性算法，同样的配置逐位复现")
     add_replay_arguments(parser = parser)
+    lora.add_arguments(parser = parser)
     precision.add_arguments(parser = parser)
     muon.add_arguments(parser = parser)
     add_optimize_arguments(parser = parser)
@@ -782,20 +793,26 @@ def append_jsonl(path, record):
 
 
 def check_language_model_args(args):
-    """--train-language-model 与 --language-model-lr 必须同时给出；精度选项与优化器选项的组合必须合法
-    （precision.validate、muon.validate）。"""
+    """--train-language-model 与 --language-model-lr 必须同时给出；精度选项、优化器选项与 LoRA 选项的组合必须合法
+    （precision.validate、muon.validate、lora.validate，后者把 LoRA 的 α 与学习率的默认值填入 args）。"""
     if args.train_language_model and args.language_model_lr is None:
         raise SystemExit("--train-language-model 需要同时给出语言模型的峰值学习率 --language-model-lr。")
     if args.language_model_lr is not None and not args.train_language_model:
-        raise SystemExit("--language-model-lr 只在 --train-language-model 时使用。")
+        raise SystemExit("--language-model-lr 只在 --train-language-model 时使用（LoRA 的学习率是 --language-model-lora-lr）。")
     try:
         precision.validate(
             options = precision.options_from_args(args = args),
             train_language_model = args.train_language_model,
         )
         muon.validate(args = args)
+        lora.validate(args = args)
     except ValueError as error:
         raise SystemExit(str(error)) from error
+
+
+def trains_language_model(args):
+    """语言模型是否得到更新：全量微调，或在它的线性层上训练 LoRA。"""
+    return args.train_language_model or lora.enabled(args = args)
 
 
 def check_replay_args(args):
@@ -822,8 +839,11 @@ def check_replay_args(args):
         raise SystemExit(str(error)) from error
     if not args.replay_ratio > 0:
         raise SystemExit(f"--replay-ratio 应大于 0：{args.replay_ratio}")
-    if not args.train_language_model:
-        raise SystemExit("回放只用于全量微调（--train-language-model）：只训练 projector 时文本样本不产生梯度。")
+    if not trains_language_model(args = args):
+        raise SystemExit(
+            "回放只用于全量微调（--train-language-model）或语言模型的 LoRA（--language-model-lora-rank）："
+            "只训练 projector 时文本样本不产生梯度。"
+        )
     if not args.pack_sequences:
         raise SystemExit("回放需要拼接批次（--pack-sequences）：短样本接在 ASR 拼接行后面，长样本另成拼接的纯文本微批。")
     if args.replay_kl_tail and args.replay_loss != "kl32":
@@ -928,12 +948,29 @@ def replay_record(window, replay, args):
     }
 
 
-def make_optimizer(args, params, language, muon_settings = None):
+def make_optimizer(
+    args,
+    params,
+    language,
+    muon_settings = None,
+    lora_params = (),
+):
     """AdamW：只训练 projector 时一个参数组；训练语言模型时 projector 与语言模型各一组（--lr、--language-model-lr），
     实现与语言模型组的精度见 precision.make_optimizer，参数放在哪里更新见 placement.py。
     --optimizer muon 时二维隐藏层权重矩阵改由 Muon 更新（muon.py）：只训练 projector 时为 muon.projector_optimizer，
     训练语言模型时由 placement.LanguageModelUpdate 组建。
+    LoRA 时 projector 与 LoRA 参数各一组（--lr、--language-model-lora-lr），两组都是 float32 参数，用 torch 的 AdamW。
     """
+    if lora_params:
+        return torch.optim.AdamW(
+            params = [
+                {"params": params},
+                {"params": list(lora_params), "lr": args.language_model_lora_lr},
+            ],
+            lr = args.lr,
+            betas = (0.9, 0.999),
+            weight_decay = args.weight_decay,
+        )
     if language is None and muon_settings is not None:
         return muon.projector_optimizer(
             params = params,
@@ -954,6 +991,8 @@ def make_optimizer(args, params, language, muon_settings = None):
 def peak_lrs(args, muon_settings):
     """各参数组的峰值学习率，按优化器 param_groups 的顺序（与 muon.lr_labels 对应）。"""
     values = [args.lr] + ([args.language_model_lr] if args.train_language_model else [])
+    if lora.enabled(args = args):
+        values.append(args.language_model_lora_lr)
     if muon_settings is not None:
         values += muon.peak_lrs(settings = muon_settings, train_language_model = args.train_language_model)
     return values
@@ -1036,6 +1075,21 @@ def main(argv = None):
         print(f"projector 从 {args.init_projector} 载入。", flush = True)
     elif args.init_projector:
         print("续训：--init-projector 不起作用，projector 取自续训的检查点。", flush = True)
+    # LoRA：在接管各层前向（梯度检查点、流式加载）之前给线性层加上低秩增量，A 的初始化用 --seed 单独的生成器。
+    lora_named = []
+    if lora.enabled(args = args):
+        lora_named = lora.attach(
+            model = model,
+            rank = args.language_model_lora_rank,
+            alpha = args.language_model_lora_alpha,
+            targets = args.language_model_lora_targets,
+            seed = args.seed,
+        )
+        lora.require_input_grads(model = model)
+    lora_names = [name for name, _ in lora_named]
+    lora_params = [parameter for _, parameter in lora_named]
+    # 合并后的 language_model.safetensors 应有的键与形状（与全量微调的检查点相同），每次保存时核对。
+    lora_base_shapes = lora.base_language_model_shapes(model = model, prefixes = LANGUAGE_MODEL_PREFIXES) if lora_named else {}
     feature_dtype = model.model.audio_tower.dtype
     optimized = apply_optimizations(
         model = model,
@@ -1056,9 +1110,9 @@ def main(argv = None):
     language_named = language_model_parameters(model = model) if args.train_language_model else []
     language_names = [name for name, _ in language_named]
     trainable = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
-    expected = [name for name, _ in model.named_parameters() if name.startswith(PROJECTOR_PREFIX)] + language_names
+    expected = [name for name, _ in model.named_parameters() if name.startswith(PROJECTOR_PREFIX)] + language_names + lora_names
     if not trainable or set(trainable) != set(expected):
-        scope = "projector 和语言模型" if args.train_language_model else "projector"
+        scope = "projector 和语言模型" if args.train_language_model else ("projector 和 LoRA" if lora_named else "projector")
         raise RuntimeError(f"可训练参数应当只有 {scope}：{sorted(set(trainable) ^ set(expected))[:10]}")
     # --optimizer muon：二维隐藏层权重矩阵用 Muon，其余用 AdamW（muon.classify）。
     projector_names = [name for name, _ in model.named_parameters() if name.startswith(PROJECTOR_PREFIX)]
@@ -1144,6 +1198,7 @@ def main(argv = None):
         params = params,
         language = language,
         muon_settings = muon_settings,
+        lora_params = lora_params,
     )
     # 同一条曲线作用于每个参数组：各组的学习率都是本组峰值乘以这个系数。
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -1173,6 +1228,8 @@ def main(argv = None):
     step = 0
     if trainer_state is not None:
         load_projector(model = model, state = read_projector(path = resume_dir))
+        if lora_named:
+            lora.load_state(model = model, state = lora.read_state(path = resume_dir))
         # 载入后不再留着这份引用：主机上的优化器直接使用其中的张量（placement.adopt），其余已复制到显存。
         optimizer.load_state_dict(state_dict = trainer_state.pop("optimizer"))
         scheduler.load_state_dict(state_dict = trainer_state["scheduler"])
@@ -1281,12 +1338,24 @@ def main(argv = None):
             if muon_settings is not None else None
         ),
         "language_model_placement": language.describe() if language is not None else None,
+        "language_model_lora": (
+            lora.describe(
+                model = model,
+                rank = args.language_model_lora_rank,
+                alpha = args.language_model_lora_alpha,
+                targets = args.language_model_lora_targets,
+                language_model_parameters = sum(
+                    math.prod(shape) for shape, _ in lora_base_shapes.values()
+                ),
+            )
+            if lora_named else None
+        ),
         "replay": replay.describe() if replay is not None else None,
     }, ensure_ascii = False))
 
     before = None
     if not args.no_frozen_check:
-        before = frozen_fingerprint(model = model, trainable = language_names)
+        before = frozen_fingerprint(model = model, trainable = language_names + lora_names)
 
     stop = {"reason": None}
 
@@ -1383,6 +1452,13 @@ def main(argv = None):
         if replay is not None:
             # 回放抽样器的状态（预算、各组已取 token 数、轮次与位置），续训后取到的样本与不中断时相同。
             state["replay"] = replay.state_dict()
+        language_model = language.model_state() if language is not None else None
+        lora_state = None
+        if lora_named:
+            # LoRA 参数（续训用）与合并后的语言模型（评测用，键、形状、精度与全量微调的检查点相同，写出前核对）。
+            lora_state = lora.state_dict(model = model)
+            language_model = lora.merged_state(model = model, prefixes = LANGUAGE_MODEL_PREFIXES)
+            lora.check_state(state = language_model, expected = lora_base_shapes)
         directory = save_checkpoint(
             output_dir = output_dir,
             step = step,
@@ -1390,7 +1466,9 @@ def main(argv = None):
             info = current_info(),
             trainer_state = state,
             keep_trainer_states = args.keep_trainer_states,
-            language_model = language.model_state() if language is not None else None,
+            language_model = language_model,
+            lora = lora_state,
+            keep_language_models = args.language_model_lora_keep_merged,
         )
         print(f"已保存 {directory}", flush = True)
         progress.write(step = step, last_checkpoint = directory.name)
@@ -1518,6 +1596,7 @@ def main(argv = None):
                 if leaked:
                     raise RuntimeError(f"冻结参数出现了梯度：{leaked[:5]}")
                 missing = language.without_grad() if language is not None else []
+                missing += [name for name, parameter in lora_named if parameter.grad is None]
                 if missing:
                     raise RuntimeError(f"语言模型的这些参数没有得到梯度：{missing[:5]}")
                 checked_grads = True
@@ -1526,7 +1605,8 @@ def main(argv = None):
                 # projector 和语言模型的梯度一起裁剪；语言模型的梯度可能在主机内存中（placement.py）。
                 grad_norm = language.clip_grad_norm(max_norm = args.max_grad_norm)
             else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(parameters = params, max_norm = args.max_grad_norm)
+                # LoRA 时 projector 与 LoRA 参数的梯度一起裁剪，与全量微调时 projector 与语言模型一起裁剪相同。
+                grad_norm = torch.nn.utils.clip_grad_norm_(parameters = params + lora_params, max_norm = args.max_grad_norm)
             if not math.isfinite(objective) or not torch.isfinite(input = grad_norm):
                 optimizer.zero_grad(set_to_none = True)
                 skipped_steps += 1
@@ -1617,8 +1697,8 @@ def main(argv = None):
                     "elapsed_s": round(number = progress.elapsed()),
                     "eta_s": round(number = eta) if eta is not None else None,
                 }
-                if language is not None:
-                    # 语言模型参数组的学习率；lr 是 projector 参数组的。
+                if language is not None or lora_named:
+                    # 语言模型参数组（全量微调）或 LoRA 参数组的学习率；lr 是 projector 参数组的。
                     record["lm_lr"] = float(scheduler.get_last_lr()[1])
                 if muon_settings is not None:
                     # Muon 各组的学习率：muon_lr（projector）、lm_muon_lr（语言模型）。

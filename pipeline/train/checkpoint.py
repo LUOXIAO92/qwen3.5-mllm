@@ -22,6 +22,14 @@
 --optimizer muon（任务 #78，muon.py）时 trainer_state.pt 的 optimizer 为 {"adamw": AdamW 部分, "muon": Muon 部分}，
 其余各项不变。
 
+语言模型用 LoRA 时（--language-model-lora-rank，任务 #71，lora.py）另有：
+
+- lora.safetensors：LoRA 参数（各线性层的 .lora_A、.lora_B，float32），续训时载入，每个检查点都有。
+- language_model.safetensors：合并了 LoRA 增量的语言模型权重，键名、形状、精度与全量微调的相同，评测程序直接使用。
+  --language-model-lora-keep-merged K 大于 0 时只在最近 K 个检查点中保留，较早的可以用 python -m pipeline.train.lora merge
+  从 lora.safetensors 重新生成（只删有 lora.safetensors 的检查点中的这个文件）。
+- trainer_state.pt 的 optimizer 是 projector 与 LoRA 两个参数组的 AdamW 状态。
+
 <output-dir>/latest 记录最近一个完整写出的检查点目录名。
 """
 
@@ -35,6 +43,7 @@ from pipeline.train.model import PROJECTOR_PREFIX, projector_state_dict
 
 PROJECTOR_FILE = "projector.safetensors"
 LANGUAGE_MODEL_FILE = "language_model.safetensors"
+LORA_FILE = "lora.safetensors"
 INFO_FILE = "projector.json"
 STATE_FILE = "trainer_state.pt"
 LATEST_FILE = "latest"
@@ -53,11 +62,15 @@ def save_checkpoint(
     trainer_state,
     keep_trainer_states = 1,
     language_model = None,
+    lora = None,
+    keep_language_models = 0,
 ):
     """写出一个检查点。先写到临时目录再改名，中途中断不会留下不完整的检查点。
 
     language_model 是全量微调时语言模型的 {名称: CPU 上的 bfloat16 张量}（master.py 中两个类的 model_state），
-    给出时写成 language_model.safetensors。
+    或 LoRA 时合并后的权重（lora.merged_state），给出时写成 language_model.safetensors。lora 是 LoRA 参数
+    {名称: CPU 上的 float32 张量}，给出时写成 lora.safetensors。keep_language_models 大于 0 时，有 lora.safetensors 的
+    较早检查点只在最近这么多个中保留 language_model.safetensors（全量微调的检查点不删）。
     """
     from safetensors.torch import save_file
 
@@ -94,6 +107,17 @@ def save_checkpoint(
             "parameters": sum(tensor.numel() for tensor in language_model.values()),
             "dtype": ",".join(dtypes),
         }
+    if lora is not None:
+        save_file(
+            tensors = lora,
+            filename = str(staging / LORA_FILE),
+            metadata = {"format": "pt"},
+        )
+        info["lora"] = {
+            "file": LORA_FILE,
+            "tensors": len(lora),
+            "parameters": sum(tensor.numel() for tensor in lora.values()),
+        }
     (staging / INFO_FILE).write_text(
         data = json.dumps(obj = info, ensure_ascii = False, indent = 2) + "\n",
         encoding = "utf-8",
@@ -112,6 +136,14 @@ def save_checkpoint(
         )
         for path in with_state[:-keep_trainer_states]:
             (path / STATE_FILE).unlink()
+    if keep_language_models > 0:
+        # 只删能从 lora.safetensors 重新合并出来的文件。
+        mergeable = sorted(
+            path for path in output_dir.glob(pattern = "checkpoint-*")
+            if (path / LORA_FILE).is_file() and (path / LANGUAGE_MODEL_FILE).is_file()
+        )
+        for path in mergeable[:-keep_language_models]:
+            (path / LANGUAGE_MODEL_FILE).unlink()
     return directory
 
 
