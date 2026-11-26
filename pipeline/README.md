@@ -97,6 +97,8 @@ pipeline/train/run.sh $DATASET/audio/qwen3.5-asr/v1/train/manifest-r1.jsonl orig
 
 全量微调时可以混入自生成回放（#71 C 组，数据见第 9 节）：加 `--replay-dir $DATASET/text/qwen3.5-asr/replay-noloop --replay-groups free_raw=1 --replay-ratio 0.5`（需要 `--train-language-model` 和 `--pack-sequences`）。ASR 批次、训练计划和步数都不变，每一步按「回放损失 token 数 / ASR 损失 token 数」的长期平均为 r 整条取回放样本（从不截断），短样本接在 ASR 拼接行后面，超过 `--replay-inline-max-tokens`（默认 2,048）的长样本另成同一步内的纯文本微批。损失只算参考模型生成的部分：无模板组是全部生成 token（cont_raw 不含人写的文档开头），带模板的组只算助手轮（含结尾的 `<|im_end|>`，free_chat_think 含推理和 `</think>`），模型自己写的用户轮只作上下文。`--replay-groups` 写多组时按 token 数混合（例如五组各 `=1`）；`--replay-loss ntp`（默认）是对采样 token 的交叉熵，`kl32` 是对参考模型 top-32 的截断前向 KL（`--replay-kl-tail` 加尾部项）；`--replay-norm step`（默认）把一步内 ASR 与回放的全部损失 token 一起取平均。开启回放时训练日志的 `loss` 只统计 ASR，另有回放的总损失、各组损失和实际比例，取样记录在输出目录的 `replay_log.jsonl`，续训时抽样器从检查点恢复。做法与长样本对实际权重的影响见 `pipeline/train/replay.py` 开头，Colab 上第一轮的无人值守流程见 [colab/README.md](colab/README.md) 单元格 7 的 #71 C 组。
 
+语言模型也可以用 LoRA 代替全量微调（#71）：加 `--language-model-lora-rank <秩>`（不加 `--train-language-model`），语言模型各解码层的全部线性层（Gated DeltaNet 层的 `in_proj_qkv`、`in_proj_z`、`in_proj_b`、`in_proj_a`、`out_proj`，全注意力层的 `q_proj`、`k_proj`、`v_proj`、`o_proj`，每层 MLP 的 `gate_proj`、`up_proj`、`down_proj`）加上低秩增量，基座权重、词嵌入兼输出层和归一化层都冻结，只训练增量和 projector。α 默认等于秩（`--language-model-lora-alpha`），LoRA 参数组的峰值学习率由 `--language-model-lora-lr` 给出（默认 1e-4），projector 仍用 `--lr`；回放、拼接批次、梯度检查点、续训和 dev 损失照常可用。每个检查点另存 `lora.safetensors`，并写出合并后的 `language_model.safetensors`，格式与全量微调的相同，评测程序直接使用；`python -m pipeline.train.lora merge` 从 `lora.safetensors` 重新生成它。2B 每个秩单位 1,051,200 个参数，秩 32 为 3,364 万个（语言模型参数的 1.79%），秩 90 为 9,461 万个（5.03%）。做法、显存和速度见 `pipeline/train/__init__.py`「语言模型的 LoRA」。
+
 ## 7. 评测
 
 ```bash

@@ -28,6 +28,8 @@
   （GroupStateMuon）与续训格式，见下文「Muon 优化器」。
 - placement.py：全量微调时语言模型参数在显存还是主机内存中更新：流式加载的层、卸载优化器（torchao 的
   CPUOffloadOptimizer）、CPU 上的 AdamW、合并成同一格式的续训状态（任务 #66，见下文「把语言模型参数放到主机内存」）。
+- lora.py：语言模型的 LoRA（任务 #71）：给各解码层的线性层加低秩增量，基座冻结；检查点中的 lora.safetensors 与合并后的
+  language_model.safetensors，以及从 lora.safetensors 重新合并、核对文件键与形状的命令，见下文「语言模型的 LoRA」。
 - train.py：训练入口，梯度累积、线性预热加余弦退火、定期 dev 损失、检查点与断点续训。
 - replay.py：全量微调时混入参考模型的自生成回放（任务 #71 C 组）：读回放数据（保存的 token id，按组区分计损失的部分）、
   按比例 r 整条取样的抽样器（状态随检查点保存）、短样本接在 ASR 拼接行后面、长样本另成纯文本微批，回放日志的核对；
@@ -54,7 +56,8 @@
   以及语言模型参数在主机内存中更新的测试（test_placement.py，需要 GPU 和 torchao），以及纯续写格式的标签、聊天格式
   与原实现逐位相同的测试（test_prompt_format.py，CPU），以及 Muon 的分组、计算与续训的测试（test_muon.py，CPU；
   卸载优化器的部分需要 GPU），以及回放的计损失范围、抽样比例与续训、长样本分批、混合拼接、kl32 与全词表直接计算一致的
-  测试（test_replay.py，CPU；拼接内核的部分需要 GPU 和 flash-attn、causal-conv1d、fla），
+  测试（test_replay.py，CPU；拼接内核的部分需要 GPU 和 flash-attn、causal-conv1d、fla），以及语言模型 LoRA 的初始化、
+  合并、参数量、梯度检查点、检查点往返与评测程序载入合并权重的测试（test_lora.py，CPU），
   在仓库根目录运行 python -m unittest discover -s pipeline/train/tests -t .。
 
 训练清单
@@ -75,7 +78,8 @@
   可以用 load_state_dict(strict = False) 直接载入完整模型。
 - projector.json：训练目标、步数、轮数、最近训练损失、dev 损失、冻结参数核对结果和完整训练配置。
 - trainer_state.pt：优化器、学习率调度器、随机数状态和数据位置，只在最近的检查点中保留。
-- language_model.safetensors：只在全量微调时有，见下文「全量微调」。
+- language_model.safetensors：只在全量微调时有，见下文「全量微调」；语言模型用 LoRA 时是合并后的权重，格式相同。
+- lora.safetensors：只在语言模型用 LoRA 时有（各线性层的 lora_A、lora_B，float32），见下文「语言模型的 LoRA」。
 
 <output-dir>/ 下另有 train_config.json、train_log.jsonl（每 --log-every 步一行，见下文）、
 eval_log.jsonl（dev 损失，按语言）、frozen_check.json（训练前后冻结参数逐张量的 SHA-256 比较）、
@@ -334,6 +338,40 @@ trainer_state.pt 用 map_location="cpu" 读入，主机上的状态直接使用�
 速度约为 Colab G4 的八分之一，只适合试跑或很短的训练。--offload-activations 在需要省下层边界的显存时打开，保持默认的
 提前上传。CPU 上的更新是瓶颈：以后如果要在小显存上长时间训练，可以让 CPU 更新流式加载的层与下一步前向中常驻的层重叠，
 或者只把一部分常驻参数的优化器卸载到主机。
+
+语言模型的 LoRA（任务 #71）
+=========================
+
+--language-model-lora-rank R（不加 --train-language-model）给语言模型各解码层的线性层加秩为 R 的低秩增量
+y = x Wᵀ + (α / R) (x Aᵀ) Bᵀ，基座权重、词嵌入兼输出层、归一化层、短卷积等全部冻结，只训练 A、B 和 projector。用途是与全量
+微调对照：同样的数据、回放和学习率曲线下，只训练低秩增量能否保住 ASR 能力、同时少遗忘原有的文本能力。实现、初始化、
+参数量和检查点格式见 lora.py 开头，要点如下。
+
+- 范围：默认（--language-model-lora-targets all）是每层的全部 nn.Linear。2B 有 186 个：18 层 Gated DeltaNet 各 5 个
+  （in_proj_qkv、in_proj_z、in_proj_b、in_proj_a、out_proj），6 层全注意力各 4 个（q_proj、k_proj、v_proj、o_proj），24 层
+  MLP 各 3 个（gate_proj、up_proj、down_proj）。每个秩单位 1,051,200 个参数：秩 32 为 33,638,400 个，是语言模型
+  1,881,825,088 个参数的 1.79%；秩 90 为 94,608,000 个（5.03%），是最接近 5% 的秩（精确值 89.5）。
+- 初始化与缩放：A 按 kaiming_uniform_(a = √5)（与 nn.Linear、PEFT 相同），B 为 0，开始时模型与原模型逐位相同；
+  α 默认等于秩，缩放 α / R = 1，与 moss-image-trainer 的默认设置（rank 32、alpha 32）一致，合并时 ΔW = B A。两个秩都按
+  α = R，所以秩 90 的增量在训练初期变化得比秩 32 快（随机的 A 使 ΔW 的更新幅度大致与 √R 成正比）。
+- 学习率：--language-model-lora-lr 默认 1e-4，是全量微调语言模型学习率 1e-5 的 10 倍（LoRA 的常用学习率比全量微调高约
+  一个数量级），也等于 projector 的 --lr；两组按同一条预热加余弦的曲线变化，梯度一起裁剪到 --max-grad-norm。
+- 精度：A、B 以 float32 保存并由 torch 的 AdamW 直接更新（相当于全量微调的 float32 主权重），前向转成 bfloat16 计算。
+  优化器状态只有 LoRA 和 projector 两组，2B 秩 32 的 trainer_state.pt 约 0.34 GB（全量微调约 22.6 GB）。
+- 回放：kl32 等损失照常可用，LinearCrossEntropy、LinearTopKL 拿到的输出层权重不需要梯度，只对隐状态求梯度。词嵌入冻结后
+  纯文本微批进入第 0 层时隐状态本来不需要梯度，lora.require_input_grads 让词嵌入的输出需要梯度，各层的梯度检查点照常生效。
+- 检查点：每个检查点有 lora.safetensors（续训用）和合并后的 language_model.safetensors（评测用，键、形状、精度与全量
+  微调的相同，写出前核对）。--language-model-lora-keep-merged K 只保留最近 K 个合并文件，删掉的用
+  python -m pipeline.train.lora merge 重新生成；python -m pipeline.train.lora check 用全量微调的文件或模型目录核对。
+
+本机实测（RTX 5090 32 GB，--memory-fraction 0.94；2B，c-cont_raw-kl32tail 的设置：每批 16 条、360 秒，拼接批次，回放
+cont_raw、r = 0.5、kl32 加尾部项，音频从 F 盘的分片读取，v2b 训练计划的第 1–550 步）：秩 32 不做梯度检查点时普通步的
+峰值约 25 GB，最长的回放样本（16,624 个 token，--replay-probe-longest）放不下，末尾 18 层做检查点时最长样本的峰值 29.9 GB，
+贴近上限；秩 90 全部 24 层做检查点（--gradient-checkpointing）时最长样本的峰值 10.2 GB，普通步 8–10 GB。速度主要受主进程的
+CPU 限制（GPU 利用率平均约七成），检查点多重算一次前向只慢约一成：全部层做检查点时秩 32 每秒 4.47 步、秩 90 每秒 4.23 步
+（第 201–500 步的平均），3 万步加上 12 次 dev 损失（每次约 21 秒）、检查点和启动（读清单约 3.5 分钟）各约 2.1、2.2 小时。
+断点续训：先训练到第 50 步再续训到第 100 步，与不中断地训练到第 100 步相比，各段训练损失相差约 1e-3，第 100 步的 LoRA
+权重之差与两次不中断训练之间的差（GPU 计算的不确定性）同一量级。
 
 Muon 优化器（任务 #78）
 ======================
