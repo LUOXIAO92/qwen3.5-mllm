@@ -7,6 +7,10 @@
 与 #71 第一轮 Colab 驱动（t71_cpt_run.py）中的计算相同，结果可以直接比较：每种语言取 test.jsonl 的 raw_transcription，
 32 条一批右填充、不加特殊标记，模型只看文字（不给音频），第一个 token 之后的每个 token 的负对数似然相加，除以去掉
 空白后的字符数，困惑度为它的指数。不给 --language-model 时是原始语言模型。
+
+vLLM 引擎（--engine vllm，任务 #71，见 pipeline/eval/vllm_host.py）：每条文字单独作为提示（与右填充的批中各条的 token 相同），
+只生成 1 个 token，prompt_logprobs = 0 返回每个位置实际 token 的对数概率（float32 的 log_softmax），第一个 token 之后的
+负对数似然相加，其余与上面相同。结果文件另有 engine 与 vllm 两项。
 """
 
 from __future__ import annotations
@@ -27,7 +31,18 @@ def main(argv = None):
     parser.add_argument("--langs", nargs = "+", default = LANGS)
     parser.add_argument("--batch-size", type = int, default = 32)
     parser.add_argument("--output", required = True, type = Path)
+    from pipeline.eval import vllm_host
+
+    vllm_host.add_arguments(parser = parser)
     args = parser.parse_args(args = argv)
+    vllm_host.check_arguments(
+        parser = parser,
+        args = args,
+        default_job_dir = args.output.parent / f"{args.output.stem}.vllm-job",
+        language_model = args.language_model,
+    )
+    if args.engine == "vllm":
+        return main_vllm(args = args)
 
     import torch
 
@@ -61,6 +76,62 @@ def main(argv = None):
             chars += sum(len("".join(text.split())) for text in batch)
         results[lang] = {"char_ppl": round(number = math.exp(nll / chars), ndigits = 3), "nats_per_char": round(number = nll / chars, ndigits = 4)}
         print(f"{lang}: 每字困惑度 {results[lang]['char_ppl']}", flush = True)
+    results["engine"] = "hf"
+    args.output.parent.mkdir(parents = True, exist_ok = True)
+    args.output.write_text(data = json.dumps(obj = results, ensure_ascii = False, indent = 1), encoding = "utf-8")
+    return 0
+
+
+def main_vllm(args):
+    """vLLM 引擎：全部语言的文字一起交给 vLLM（一个容器），按语言汇总。"""
+    import time
+
+    from pipeline.eval import vllm_host
+    from pipeline.eval.run_eval import load_processor
+    from pipeline.eval.think_check import STOP_IDS
+
+    def log(message):
+        print(f"{time.strftime('%H:%M:%S')} {message}", flush = True)
+
+    tokenizer = load_processor(model_dir = args.model_dir).tokenizer
+    requests = []
+    owners = []
+    chars = {}
+    for lang in args.langs:
+        with open(file = args.manifest_dir / lang / "test.jsonl", encoding = "utf-8") as handle:
+            texts = [json.loads(s = line)["raw_transcription"] for line in handle if line.strip()]
+        chars[lang] = sum(len("".join(text.split())) for text in texts)
+        for text in texts:
+            ids = tokenizer(text, add_special_tokens = False)["input_ids"]
+            owners.append(lang)
+            requests.append({"index": len(requests), "seed": 0, "prompt_token_ids": ids, "max_tokens": 1, "prompt_logprobs": 0})
+    settings = vllm_host.job_settings(
+        args = args,
+        max_model_len = max(len(request["prompt_token_ids"]) for request in requests) + 1,
+        max_tokens = 1,
+        temperature = 0.0,
+        stop_token_ids = list(STOP_IDS),
+    )
+    output_results, record = vllm_host.run_job(
+        args = args,
+        model_dir = args.model_dir,
+        language_model = args.language_model,
+        requests = requests,
+        settings = settings,
+        kind = "ppl",
+        label = args.output.parent.name,
+        log = log,
+    )
+    nll = {lang: 0.0 for lang in args.langs}
+    for request, lang in zip(requests, owners):
+        values = output_results[request["index"]]["prompt_logprobs"]
+        nll[lang] -= sum(value for value in values[1:])
+    results = {}
+    for lang in args.langs:
+        results[lang] = {"char_ppl": round(number = math.exp(nll[lang] / chars[lang]), ndigits = 3), "nats_per_char": round(number = nll[lang] / chars[lang], ndigits = 4)}
+        print(f"{lang}: 每字困惑度 {results[lang]['char_ppl']}", flush = True)
+    results["engine"] = "vllm"
+    results["vllm"] = record
     args.output.parent.mkdir(parents = True, exist_ok = True)
     args.output.write_text(data = json.dumps(obj = results, ensure_ascii = False, indent = 1), encoding = "utf-8")
     return 0

@@ -20,6 +20,12 @@
 
 输出 summary.json 与 summary.md：每组的样本数、token 数、NLL、参考 NLL、差距（前向 KL 估计），按语言（续写两组用文档
 语言 doc_lang，其余用生成文本的 lang）分开的同样几项；ALL 是各组差距的无权重平均，另给按 token 加权的平均。
+
+vLLM 引擎（--engine vllm，任务 #71，见 pipeline/eval/vllm_host.py）：每条样本整条作为提示交给 vLLM，只生成 1 个 token，
+prompt_logprobs = 0 返回提示中每个位置实际 token 的对数概率（bfloat16 的 logits 转成 float32 后对全词表做 log_softmax，
+与上面的计算相同），取计 NLL 的位置。样本、计 NLL 的位置、参考 NLL（仍是 teacher/lp.f32）与汇总都不变；summary.json 另有
+engine 与 vllm。两种引擎的 NLL 只差在内核的数值上（vLLM 的线性注意力与 FlashAttention 内核、批的组成），参考模型自己的
+差距因此不严格为 0。
 """
 
 from __future__ import annotations
@@ -117,38 +123,106 @@ def evaluate_group(model, root, group, split, max_batch_tokens, limit = None):
     reader = ReplayGroup(root = root, group = group, split = split)
     count = len(reader) if limit is None else min(limit, len(reader))
     lengths = [int(reader.totals[index]) for index in range(count)]
-    totals = {}
+    scored = []
     for indices in batches_by_tokens(lengths = lengths, max_batch_tokens = max_batch_tokens):
         samples = [reader.sample(index = index, reference = True) for index in indices]
-        for sample, nll in zip(samples, score_batch(model = model, samples = samples)):
-            ref = -sample["ref_lp"]
-            record = sample["record"]
-            lang = record.get("doc_lang") or record.get("lang") or "unknown"
-            add(
-                total = totals,
-                key = "ALL",
-                tokens = len(nll),
-                nll = nll.sum(),
-                ref = ref.sum(),
-            )
-            add(
-                total = totals,
-                key = f"lang:{lang}",
-                tokens = len(nll),
-                nll = nll.sum(),
-                ref = ref.sum(),
-            )
-            if group == "free_chat_think":
-                reasoning = think_parts(sample = sample)
-                for name, mask in (("reasoning", reasoning), ("answer", ~reasoning)):
-                    if mask.any():
-                        add(
-                            total = totals,
-                            key = f"part:{name}",
-                            tokens = mask.sum(),
-                            nll = nll[mask].sum(),
-                            ref = ref[mask].sum(),
-                        )
+        scored += list(zip(samples, score_batch(model = model, samples = samples)))
+    return aggregate_group(group = group, scored = scored)
+
+
+def group_samples(root, group, split, limit = None):
+    """一组要评测的样本（reader.sample，含参考对数概率）。"""
+    from pipeline.train.replay import ReplayGroup
+
+    reader = ReplayGroup(root = root, group = group, split = split)
+    count = len(reader) if limit is None else min(limit, len(reader))
+    return [reader.sample(index = index, reference = True) for index in range(count)]
+
+
+def nll_from_prompt_logprobs(sample, values):
+    """vLLM 的 prompt_logprobs（提示中每个位置实际 token 的对数概率，第一个位置为 None）在计 NLL 的位置上的负值（float32）。"""
+    import numpy as np
+
+    positions = np.nonzero(sample["labels"] != -100)[0]
+    if len(positions) and positions[0] < 1:
+        raise ValueError("第一个位置没有前文，不能计 NLL")
+    return -np.asarray(a = [values[int(position)] for position in positions], dtype = np.float32)
+
+
+def evaluate_vllm(args, log):
+    """vLLM 引擎：全部组的样本一起交给 vLLM（一个容器），返回 ({组: 结果}, vLLM 的记录)。"""
+    from pipeline.eval import vllm_host
+    from pipeline.eval.think_check import STOP_IDS
+
+    samples = {group: group_samples(root = args.replay_dir, group = group, split = args.split, limit = args.limit) for group in args.groups}
+    requests = []
+    owners = []
+    for group in args.groups:
+        for sample in samples[group]:
+            owners.append((group, sample))
+            requests.append({
+                "index": len(requests),
+                "seed": 0,
+                "prompt_token_ids": [int(token) for token in sample["ids"]],
+                "max_tokens": 1,
+                "prompt_logprobs": 0,
+            })
+    settings = vllm_host.job_settings(
+        args = args,
+        max_model_len = max(len(request["prompt_token_ids"]) for request in requests) + 1,
+        max_tokens = 1,
+        temperature = 0.0,
+        stop_token_ids = list(STOP_IDS),
+    )
+    log(f"{len(requests)} 条样本，{sum(len(request['prompt_token_ids']) for request in requests)} 个 token")
+    results, record = vllm_host.run_job(
+        args = args,
+        model_dir = args.model_dir,
+        language_model = args.language_model,
+        requests = requests,
+        settings = settings,
+        kind = "replay",
+        label = args.output_dir.parent.name,
+        log = log,
+    )
+    scored = {group: [] for group in args.groups}
+    for request, (group, sample) in zip(requests, owners):
+        scored[group].append((sample, nll_from_prompt_logprobs(sample = sample, values = results[request["index"]]["prompt_logprobs"])))
+    return {group: aggregate_group(group = group, scored = scored[group]) for group in args.groups}, record
+
+
+def aggregate_group(group, scored):
+    """[(样本, 逐 token NLL)] 汇总成一组的结果（整体、按语言、思考组的推理与回答）。"""
+    totals = {}
+    for sample, nll in scored:
+        ref = -sample["ref_lp"]
+        record = sample["record"]
+        lang = record.get("doc_lang") or record.get("lang") or "unknown"
+        add(
+            total = totals,
+            key = "ALL",
+            tokens = len(nll),
+            nll = nll.sum(),
+            ref = ref.sum(),
+        )
+        add(
+            total = totals,
+            key = f"lang:{lang}",
+            tokens = len(nll),
+            nll = nll.sum(),
+            ref = ref.sum(),
+        )
+        if group == "free_chat_think":
+            reasoning = think_parts(sample = sample)
+            for name, mask in (("reasoning", reasoning), ("answer", ~reasoning)):
+                if mask.any():
+                    add(
+                        total = totals,
+                        key = f"part:{name}",
+                        tokens = mask.sum(),
+                        nll = nll[mask].sum(),
+                        ref = ref[mask].sum(),
+                    )
     result = finish(entry = totals.pop("ALL"))
     result["per_lang"] = {key[5:]: finish(entry = value) for key, value in sorted(totals.items()) if key.startswith("lang:")}
     parts = {key[5:]: finish(entry = value) for key, value in totals.items() if key.startswith("part:")}
@@ -213,24 +287,40 @@ def main(argv = None):
         help = "每组只用前若干条（快速核对用）",
     )
     parser.add_argument("--output-dir", required = True, type = Path)
-    args = parser.parse_args(args = argv)
+    from pipeline.eval import vllm_host
 
-    from pipeline.eval.run_eval import load_model
+    vllm_host.add_arguments(parser = parser)
+    args = parser.parse_args(args = argv)
+    vllm_host.check_arguments(
+        parser = parser,
+        args = args,
+        default_job_dir = args.output_dir / "vllm-job",
+        language_model = args.language_model,
+    )
+
+    def log(message):
+        print(f"{time.strftime('%H:%M:%S')} {message}", flush = True)
 
     args.output_dir.mkdir(parents = True, exist_ok = True)
-    model, _ = load_model(model_dir = args.model_dir, projector_path = None, language_model_path = args.language_model)
     groups = {}
+    record = None
     start = time.perf_counter()
-    for group in args.groups:
-        groups[group] = evaluate_group(
-            model = model,
-            root = args.replay_dir,
-            group = group,
-            split = args.split,
-            max_batch_tokens = args.max_batch_tokens,
-            limit = args.limit,
-        )
-        item = groups[group]
+    if args.engine == "vllm":
+        groups, record = evaluate_vllm(args = args, log = log)
+    else:
+        from pipeline.eval.run_eval import load_model
+
+        model, _ = load_model(model_dir = args.model_dir, projector_path = None, language_model_path = args.language_model)
+        for group in args.groups:
+            groups[group] = evaluate_group(
+                model = model,
+                root = args.replay_dir,
+                group = group,
+                split = args.split,
+                max_batch_tokens = args.max_batch_tokens,
+                limit = args.limit,
+            )
+    for group, item in groups.items():
         print(f"{group}: {item['tokens']} token，NLL {item['nll']:.4f}，参考 {item['ref_nll']:.4f}，差距 {item['gap']:.4f}", flush = True)
     tokens = sum(item["tokens"] for item in groups.values())
     summary = {
@@ -241,6 +331,8 @@ def main(argv = None):
         "token_weighted_gap": round(number = sum(item["gap"] * item["tokens"] for item in groups.values()) / max(tokens, 1), ndigits = 5),
         "tokens": tokens,
         "seconds": round(number = time.perf_counter() - start, ndigits = 1),
+        "engine": args.engine,
+        **({"vllm": record} if record is not None else {}),
     }
     (args.output_dir / "summary.json").write_text(data = json.dumps(obj = summary, ensure_ascii = False, indent = 1) + "\n", encoding = "utf-8")
     (args.output_dir / "summary.md").write_text(data = format_markdown(summary = summary), encoding = "utf-8")

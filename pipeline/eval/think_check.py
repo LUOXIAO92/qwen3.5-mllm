@@ -56,6 +56,12 @@ bfloat16 舍入带来的差别。
   相同）的比例。
 - reasoning_tokens：写完 </think> 的样本中推理的 token 数（含 </think>）；answer_tokens：写完 </think> 且正常结束的样本中
   回答的 token 数（含结束符）。给出平均、中位数和 90% 分位数。
+
+vLLM 引擎（--engine vllm，用户 2026-11-27 决定本机评测改用 vLLM 的 docker 镜像，见 pipeline/eval/vllm_host.py）：提问、
+温度、上限、结束符、指标和输出文件都不变，生成换成 vLLM 的连续批处理（一条写完补进一条，不再按批等最长的样本）。每条
+提问有自己的种子（--seed 加提问的序号）：vLLM 的采样噪声只由种子和位置决定，与同时生成的其他提问无关；transformers 版
+每批共用一个随机数流，两版从同一个分布采样、随机数不同，逐条结果不同，统计量应在抽样误差之内一致。summary.json 中
+engine 为 vllm，vllm 记下设置与用时；注意力实现由 vLLM 自己选择（attn_implementation_used 为 None）。
 """
 
 from __future__ import annotations
@@ -648,10 +654,10 @@ def format_markdown(summary):
     def dist(item):
         return "—" if item is None else f"{item['mean']:.0f} / {item['median']:.0f} / {item['p90']:.0f}"
 
-    attention = summary.get("attn_implementation_used", "sdpa")
+    attention = "vLLM" if summary.get("engine") == "vllm" else f"全注意力层 {summary.get('attn_implementation_used', 'sdpa')}"
     return "\n".join([
         f"模型：{summary['model']}（{summary['samples']} 条提问，温度 {summary['temperature']}，上限 {summary['max_new_tokens']}，"
-        f"全注意力层 {attention}）",
+        f"{attention}）",
         "",
         "| 写完 </think> | 正常结束 | 到上限 | 循环 | 推理 token（平均 / 中位 / 90%） | 回答 token（平均 / 中位 / 90%） |",
         "| ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -731,7 +737,51 @@ def parse_args(argv = None):
         help = "冒烟比较最多生成的 token 数",
     )
     parser.add_argument("--output-dir", required = True, type = Path)
-    return parser.parse_args(args = argv)
+    from pipeline.eval import vllm_host
+
+    vllm_host.add_arguments(parser = parser)
+    args = parser.parse_args(args = argv)
+    vllm_host.check_arguments(
+        parser = parser,
+        args = args,
+        default_job_dir = args.output_dir / "vllm-job",
+        language_model = args.language_model,
+    )
+    if args.engine == "vllm" and args.smoke:
+        parser.error("--smoke 只比较 transformers 的两种注意力实现，不用 --engine vllm")
+    return args
+
+
+def vllm_generate_all(args, prompts, log):
+    """用 vLLM 生成全部提问（每条的种子为 --seed 加序号），返回 (按提问顺序的结果, vLLM 的设置与用时)。"""
+    from pipeline.eval import vllm_host
+
+    requests = [
+        {"index": index, "seed": args.seed + index, "prompt_token_ids": [int(token) for token in ids]}
+        for index, (_, ids) in enumerate(prompts)
+    ]
+    settings = vllm_host.job_settings(
+        args = args,
+        max_model_len = max(len(ids) for _, ids in prompts) + args.max_new_tokens,
+        max_tokens = args.max_new_tokens,
+        temperature = args.temperature,
+        top_p = 1.0,
+        top_k = 0,
+        min_p = 0.0,
+        stop_token_ids = list(STOP_IDS),
+        seed = args.seed,
+    )
+    results, record = vllm_host.run_job(
+        args = args,
+        model_dir = args.model_dir,
+        language_model = args.language_model,
+        requests = requests,
+        settings = settings,
+        kind = "think",
+        label = args.output_dir.parent.name,
+        log = log,
+    )
+    return [np.asarray(a = results[index]["token_ids"], dtype = np.int64) for index in range(len(prompts))], record
 
 
 def main(argv = None):
@@ -743,6 +793,21 @@ def main(argv = None):
 
     def log(message):
         print(message, flush = True)
+
+    if args.engine == "vllm":
+        outputs, record = vllm_generate_all(args = args, prompts = prompts, log = log)
+        engine_fields = {
+            "engine": "vllm",
+            "seed_scheme": "per prompt: seed + prompt index",
+            "attn_implementation_requested": None,
+            "attn_implementation_used": None,
+            "attn_fallback_reason": None,
+            "batch_size": None,
+            "batches": None,
+            "seconds": record.get("seconds"),
+            "vllm": record,
+        }
+        return write_outputs(args = args, prompts = prompts, outputs = outputs, engine_fields = engine_fields)
 
     def load(attention):
         return load_for_attention(
@@ -797,9 +862,23 @@ def main(argv = None):
         seed = args.seed,
         log = log,
     )
+    engine_fields = {
+        "engine": "hf",
+        "attn_implementation_requested": args.attn_implementation,
+        "attn_implementation_used": result["used"],
+        "attn_fallback_reason": result["reason"],
+        "batch_size": result["batch_size"],
+        "batches": result["batches"],
+        "seconds": result["seconds"],
+    }
+    return write_outputs(args = args, prompts = prompts, outputs = result["outputs"], engine_fields = engine_fields)
+
+
+def write_outputs(args, prompts, outputs, engine_fields):
+    """逐条指标、generations.jsonl、generations.ids.i32、summary.json 与 summary.md（两种引擎相同，engine_fields 为引擎的记录）。"""
     rows = []
     generated = []
-    for (sample_id, prompt), ids in zip(prompts, result["outputs"]):
+    for (sample_id, prompt), ids in zip(prompts, outputs):
         row = {"sample_id": sample_id, "prompt_tokens": len(prompt), **analyze(ids = ids, max_new_tokens = args.max_new_tokens)}
         rows.append(row)
         generated.append(np.asarray(a = ids, dtype = np.int32))
@@ -814,12 +893,7 @@ def main(argv = None):
         "model": str(args.language_model or args.model_dir),
         "temperature": args.temperature,
         "seed": args.seed,
-        "attn_implementation_requested": args.attn_implementation,
-        "attn_implementation_used": result["used"],
-        "attn_fallback_reason": result["reason"],
-        "batch_size": result["batch_size"],
-        "batches": result["batches"],
-        "seconds": result["seconds"],
+        **engine_fields,
         **summarize(rows = rows, max_new_tokens = args.max_new_tokens),
     }
     (args.output_dir / "summary.json").write_text(data = json.dumps(obj = summary, ensure_ascii = False, indent = 1) + "\n", encoding = "utf-8")

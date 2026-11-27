@@ -329,6 +329,32 @@ def mc_stats(items: list) -> dict:
 
 def run_mc(bench: str, model, tokenizer, data_dir: Path, limit: int | None, max_batch_tokens: int, log) -> tuple:
     """一项选择题基准，返回 (汇总, 逐题结果)。"""
+    rows, prompts = mc_prompts(
+        bench = bench,
+        tokenizer = tokenizer,
+        data_dir = data_dir,
+        limit = limit,
+    )
+    start = time.perf_counter()
+    logprobs = letter_logprobs(
+        model = model,
+        prompts = prompts,
+        letters = letter_ids(tokenizer = tokenizer),
+        max_batch_tokens = max_batch_tokens,
+    )
+    return mc_finish(
+        bench = bench,
+        rows = rows,
+        prompts = prompts,
+        logprobs = logprobs,
+        limit = limit,
+        seconds = time.perf_counter() - start,
+        log = log,
+    )
+
+
+def mc_prompts(bench: str, tokenizer, data_dir: Path, limit: int | None) -> tuple:
+    """一项选择题基准的题目与提示 token id：(rows, prompts)。"""
     root = data_dir / DATA[bench]
     if bench == "mmlu_redux":
         rows = spread(rows = load_mmlu_redux(root = root), limit = limit)
@@ -342,14 +368,12 @@ def run_mc(bench: str, model, tokenizer, data_dir: Path, limit: int | None, max_
         if limit is not None:
             rows = [row for lang in langs for row in spread(rows = [r for r in rows if r["group"] == lang], limit = limit)]
         template = EN_TEMPLATE
-    start = time.perf_counter()
     prompts = [chat_ids(tokenizer = tokenizer, text = mc_text(row = row, template = template), thinking = False) for row in rows]
-    logprobs = letter_logprobs(
-        model = model,
-        prompts = prompts,
-        letters = letter_ids(tokenizer = tokenizer),
-        max_batch_tokens = max_batch_tokens,
-    )
+    return rows, prompts
+
+
+def mc_finish(bench: str, rows: list, prompts: list, logprobs: list, limit: int | None, seconds: float, log, engine: dict | None = None) -> tuple:
+    """按四个字母的对数概率打分，返回 (汇总, 逐题结果)。engine 为 vLLM 引擎的记录（transformers 时为 None）。"""
     items, stats = mc_summary(rows = rows, logprobs = logprobs)
     summary = {"bench": bench, "mode": "non-thinking, letter logits", "prompt_tokens": sum(len(ids) for ids in prompts)}
     if bench == "mmlu_redux":
@@ -370,7 +394,10 @@ def run_mc(bench: str, model, tokenizer, data_dir: Path, limit: int | None, max_
         summary["micro_accuracy"] = summary["accuracy"]
         summary["accuracy"] = round(number = sum(group["accuracy"] for group in stats["groups"].values()) / len(stats["groups"]), ndigits = 4)
         summary["per_lang_sample"] = {"per_lang": MMMLU_PER_LANG if limit is None else limit, "seed": MMMLU_SEED}
-    summary["seconds"] = round(number = time.perf_counter() - start, ndigits = 1)
+    summary["seconds"] = round(number = seconds, ndigits = 1)
+    summary["engine"] = "hf" if engine is None else "vllm"
+    if engine is not None:
+        summary["vllm"] = engine
     summary["card"] = CARD[bench]
     log(f"{bench}：{summary['n']} 题，准确率 {summary['accuracy']:.4f}，字母概率和平均 {summary['letter_mass_mean']:.3f}，{summary['seconds']} 秒")
     return summary, items
@@ -430,16 +457,20 @@ def fitted_batch_size(model, prompts: list, max_new_tokens: int, attention: str,
     return size
 
 
-def run_ifeval(model, tokenizer, data_dir: Path, out_dir: Path, args, log) -> None:
-    """IFEval 的贪心生成，写 ifeval.responses.jsonl 与 ifeval.generation.json（打分见 pipeline.eval.ifeval.score）。"""
-    from pipeline.eval.run_eval import clean_output
-    from pipeline.eval.think_check import STOP_IDS, generate_all
-
+def ifeval_prompts(tokenizer, data_dir: Path, limit: int | None) -> tuple:
+    """IFEval 的题目与提示：(rows, [(key, 提示 token id)])。"""
     with open(file = data_dir / DATA["ifeval"], encoding = "utf-8") as handle:
         rows = [json.loads(s = line) for line in handle if line.strip()]
-    if args.ifeval_limit is not None:
-        rows = rows[: args.ifeval_limit]
-    prompts = [(row["key"], chat_ids(tokenizer = tokenizer, text = row["prompt"], thinking = False)) for row in rows]
+    if limit is not None:
+        rows = rows[: limit]
+    return rows, [(row["key"], chat_ids(tokenizer = tokenizer, text = row["prompt"], thinking = False)) for row in rows]
+
+
+def run_ifeval(model, tokenizer, data_dir: Path, out_dir: Path, args, log) -> None:
+    """IFEval 的贪心生成，写 ifeval.responses.jsonl 与 ifeval.generation.json（打分见 pipeline.eval.ifeval.score）。"""
+    from pipeline.eval.think_check import generate_all
+
+    rows, prompts = ifeval_prompts(tokenizer = tokenizer, data_dir = data_dir, limit = args.ifeval_limit)
     batch_size = fitted_batch_size(
         model = model,
         prompts = prompts,
@@ -460,12 +491,33 @@ def run_ifeval(model, tokenizer, data_dir: Path, out_dir: Path, args, log) -> No
         generate = greedy_batch,
         log = log,
     )
-    seconds = round(number = time.perf_counter() - start, ndigits = 1)
+    write_ifeval(
+        rows = rows,
+        outputs = outputs,
+        tokenizer = tokenizer,
+        out_dir = out_dir,
+        max_new_tokens = args.ifeval_max_new_tokens,
+        generation = {
+            "engine": "hf",
+            "attn_implementation": "sdpa",
+            "batch_size": batch_size,
+            "batches": batches,
+            "seconds": round(number = time.perf_counter() - start, ndigits = 1),
+        },
+        log = log,
+    )
+
+
+def write_ifeval(rows: list, outputs: list, tokenizer, out_dir: Path, max_new_tokens: int, generation: dict, log) -> None:
+    """写 ifeval.responses.jsonl 与 ifeval.generation.json；outputs 为每条新生成的 token（到第一个结束符为止，含结束符）。"""
+    from pipeline.eval.run_eval import clean_output
+    from pipeline.eval.think_check import STOP_IDS
+
     lines = []
     capped = 0
     for row, ids in zip(rows, outputs):
         ended = len(ids) > 0 and int(ids[-1]) in STOP_IDS
-        is_capped = not ended and len(ids) >= args.ifeval_max_new_tokens
+        is_capped = not ended and len(ids) >= max_new_tokens
         capped += is_capped
         text = clean_output(text = tokenizer.decode(token_ids = [int(token) for token in ids], skip_special_tokens = True))
         lines.append(json.dumps(
@@ -481,16 +533,13 @@ def run_ifeval(model, tokenizer, data_dir: Path, out_dir: Path, args, log) -> No
     generation = {
         "n": len(rows),
         "decoding": "greedy",
-        "max_new_tokens": args.ifeval_max_new_tokens,
-        "attn_implementation": "sdpa",
-        "batch_size": batch_size,
-        "batches": batches,
-        "seconds": seconds,
+        "max_new_tokens": max_new_tokens,
+        **generation,
         "capped_count": int(capped),
     }
     (out_dir / "ifeval.generation.json").write_text(data = json.dumps(obj = generation, indent = 1) + "\n", encoding = "utf-8")
     write_atomic(path = out_dir / "ifeval.responses.jsonl", text = "\n".join(lines) + "\n")
-    log(f"ifeval：{len(rows)} 条，写到上限 {capped} 条，{seconds} 秒")
+    log(f"ifeval：{len(rows)} 条，写到上限 {capped} 条，{generation['seconds']} 秒（{generation['engine']}）")
 
 
 def parse_choice(text: str) -> str | None:
@@ -701,7 +750,109 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--memory-reserve-gb", default = 2.0, type = float, help = "按剩余显存估算批大小时留出的显存（GiB）")
     parser.add_argument("--force", action = "store_true", help = "已有结果也重做")
-    return parser.parse_args(args = argv)
+    from pipeline.eval import vllm_host
+
+    vllm_host.add_arguments(parser = parser)
+    args = parser.parse_args(args = argv)
+    vllm_host.check_arguments(
+        parser = parser,
+        args = args,
+        default_job_dir = args.out_dir / "vllm-job",
+        language_model = args.language_model,
+    )
+    if args.engine == "vllm" and "gpqa" in args.benches:
+        parser.error("GPQA 的 vLLM 版是 pipeline.eval.gpqa_vllm（bench_local --gpqa-engine vllm），这里的 --engine vllm 只做其余四项")
+    return args
+
+
+def run_vllm(args, benches: list, log) -> list:
+    """用 vLLM 做选择题与 IFEval（一个容器、一次载入）。返回出错的基准。
+
+    选择题每题一条请求：贪心、只生成 1 个 token，logprob_token_ids 为 A–D，vLLM 返回这四个 token 在全词表上的对数概率
+    （raw_logprobs：bfloat16 的 logits 转成 float32 后做 log_softmax，与 transformers 版的 letter_logprobs 相同）。IFEval
+    每条贪心生成最多 --ifeval-max-new-tokens 个 token，在 <|im_end|> 或 <|endoftext|> 处停止。提示与 transformers 版相同。
+    """
+    from pipeline.eval import vllm_host
+    from pipeline.eval.think_check import STOP_IDS
+
+    tokenizer = tokenizer_of(model_dir = args.model_dir)
+    letters = letter_ids(tokenizer = tokenizer)
+    stop_ids = vllm_host.stop_ids_of(tokenizer = tokenizer)
+    requests = []
+    parts = {}
+    for bench in benches:
+        if bench == "ifeval":
+            rows, prompts = ifeval_prompts(tokenizer = tokenizer, data_dir = args.data_dir, limit = args.ifeval_limit)
+            ids = [prompt for _, prompt in prompts]
+            extra = {"max_tokens": args.ifeval_max_new_tokens}
+        else:
+            rows, ids = mc_prompts(
+                bench = bench,
+                tokenizer = tokenizer,
+                data_dir = args.data_dir,
+                limit = args.limit,
+            )
+            prompts = ids
+            extra = {"max_tokens": 1, "logprob_token_ids": letters}
+        first = len(requests)
+        for prompt in ids:
+            requests.append({"index": len(requests), "seed": 0, "prompt_token_ids": [int(token) for token in prompt], **extra})
+        parts[bench] = (rows, prompts, list(range(first, len(requests))))
+    settings = vllm_host.job_settings(
+        args = args,
+        max_model_len = max(len(request["prompt_token_ids"]) + request["max_tokens"] for request in requests),
+        max_tokens = 1,
+        temperature = 0.0,
+        stop_token_ids = stop_ids,
+        logprob_steps = 1,
+    )
+    results, record = vllm_host.run_job(
+        args = args,
+        model_dir = args.model_dir,
+        language_model = args.language_model,
+        requests = requests,
+        settings = settings,
+        kind = "bench",
+        label = args.label,
+        log = log,
+    )
+    failed = []
+    for bench, (rows, prompts, indices) in parts.items():
+        try:
+            if bench == "ifeval":
+                write_ifeval(
+                    rows = rows,
+                    outputs = [results[index]["token_ids"] for index in indices],
+                    tokenizer = tokenizer,
+                    out_dir = args.out_dir,
+                    max_new_tokens = args.ifeval_max_new_tokens,
+                    generation = {"engine": "vllm", "seconds": record.get("seconds"), "vllm": record},
+                    log = log,
+                )
+                continue
+            logprobs = []
+            for index in indices:
+                step = dict((int(token), value) for token, value in results[index]["logprobs"][0])
+                logprobs.append([float(step[letter]) for letter in letters])
+            summary, items = mc_finish(
+                bench = bench,
+                rows = rows,
+                prompts = prompts,
+                logprobs = logprobs,
+                limit = args.limit,
+                seconds = record.get("seconds") or 0.0,
+                log = log,
+                engine = record,
+            )
+            summary["model"] = args.label or str(args.language_model or args.model_dir)
+            write_items(path = args.out_dir / f"{bench}.items.jsonl", items = items)
+            write_atomic(path = marker(bench = bench, out_dir = args.out_dir), text = json.dumps(obj = summary, ensure_ascii = False, indent = 1) + "\n")
+        except Exception:
+            failed.append(bench)
+            log(f"{bench} 出错：\n{traceback.format_exc()}")
+    if STOP_IDS != tuple(stop_ids):
+        raise RuntimeError("结束符与 think_check.STOP_IDS 不同")
+    return failed
 
 
 def main(argv: list | None = None) -> int:
@@ -716,7 +867,13 @@ def main(argv: list | None = None) -> int:
         log("缺少数据：" + "，".join(f"{bench}（{args.data_dir / DATA[bench]}）" for bench in missing))
         return 2
     pending = [bench for bench in dict.fromkeys(args.benches) if args.force or not marker(bench = bench, out_dir = args.out_dir).exists()]
-    log(f"模型 {args.label or args.language_model or args.model_dir}；要做 {pending or '无'}")
+    log(f"模型 {args.label or args.language_model or args.model_dir}；要做 {pending or '无'}（{args.engine}）")
+    if args.engine == "vllm":
+        failed = run_vllm(args = args, benches = pending, log = log) if pending else []
+        if failed:
+            log(f"出错的基准：{failed}")
+            return 1
+        return 0
     failed = []
     model = None
     tokenizer = None

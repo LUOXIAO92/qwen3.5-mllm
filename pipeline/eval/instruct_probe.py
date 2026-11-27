@@ -48,6 +48,11 @@ chat 与 cpt 探测，就能比较两种格式。
   `probe_config.json` 记下模型、检查点和级联与否，同一个输出目录换了这些时停止，避免混入另一个模型的结果。
 - `items.jsonl`：逐条结果与分数：任务、指令、语言、样本、参考、输出、生成 token 数，以及各项分数。
 - `summary.json` 与 `summary.md`：按任务、指令和语言汇总，ALL 是各语言数值的无权重平均。
+
+vLLM 引擎（--engine vllm，任务 #71）：与 run_eval.py 的 vLLM 引擎相同（宿主机按同样的批算音频向量，容器中的 vLLM 贪心生成，
+每条的 max_tokens 为它所在批的 max_new_tokens；见 run_eval.py 开头与 pipeline/eval/vllm_host.py）。请求、分批、打分与输出
+文件都不变；probe_config.json 另记 engine，同一个输出目录不混用两种引擎的结果；summary.json 的 config 中记下 engine 与
+vLLM 的设置。级联参照（--cascade）只用 transformers。
 """
 
 from __future__ import annotations
@@ -602,7 +607,60 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
     parser.add_argument("--tokens-per-second", default = 12.0, type = float, help = "max_new_tokens 估算：每秒音频的 token 上限")
     parser.add_argument("--extra-tokens", default = 64, type = int, help = "max_new_tokens 估算：额外余量")
     parser.add_argument("--device", default = "cuda", help = "推理设备，默认 cuda（cpu 只用来核对流程）")
-    return parser.parse_args(argv)
+    from pipeline.eval import vllm_host
+
+    vllm_host.add_arguments(parser = parser)
+    args = parser.parse_args(argv)
+    vllm_host.check_arguments(
+        parser = parser,
+        args = args,
+        default_job_dir = args.output_dir / "vllm-job",
+        language_model = args.language_model,
+    )
+    if args.engine == "vllm" and args.cascade:
+        parser.error("--cascade 只用 transformers（--engine hf）")
+    return args
+
+
+def generate_vllm(args, pending: list, audio_root: Path) -> tuple:
+    """vLLM 引擎：pending 已按 (时长, 请求标识) 排好，每 --batch-size 条一批，max_new_tokens 按批内最长的时长估算（与
+    transformers 版相同）。返回 ([(输出, n_new_tokens)]，vLLM 的记录)。"""
+    import time
+
+    from pipeline.eval.run_eval import build_prompt, load_processor, vllm_generate_batches
+
+    def log(message):
+        print(f"{time.strftime('%H:%M:%S')} {message}", flush = True)
+
+    processor = load_processor(model_dir = args.model_dir)
+    batches = []
+    for start in range(0, len(pending), args.batch_size):
+        batch = pending[start:start + args.batch_size]
+        longest = max(request["duration_s"] for request in batch)
+        max_new_tokens = int(math.ceil(longest * args.tokens_per_second) + args.extra_tokens)
+        group = []
+        for request in batch:
+            paths = [str((Path(audio_root) / path).resolve()) for path in request["audio_paths"]]
+            group.append({
+                "prompt": build_prompt(
+                    processor = processor,
+                    audio_path = paths[0],
+                    prompt_format = request["prompt_format"],
+                    instruction = request["instruction"],
+                ),
+                "audio_paths": paths,
+                "gap_s": request.get("gap_s"),
+                "segment_bounds": request.get("segment_bounds"),
+            })
+        batches.append((max_new_tokens, group))
+    outputs, record = vllm_generate_batches(
+        args = args,
+        batches = batches,
+        processor = processor,
+        log = log,
+        kind = "probe",
+    )
+    return [(text, count) for text, count, _, _ in outputs], record
 
 
 def main(argv: list | None = None) -> int:
@@ -644,6 +702,8 @@ def main(argv: list | None = None) -> int:
         "language_model": None if args.language_model is None else str(args.language_model),
         "cascade": args.cascade,
     }
+    if args.engine == "vllm":
+        identity["engine"] = "vllm"
     identity_path = args.output_dir / "probe_config.json"
     if identity_path.exists():
         saved = json.loads(s = identity_path.read_text(encoding = "utf-8"))
@@ -655,6 +715,16 @@ def main(argv: list | None = None) -> int:
     pending = [request for request in requests if request_key(request = request) not in done]
     print(f"共 {len(requests)} 条请求，已完成 {len(requests) - len(pending)} 条", flush = True)
 
+    record = None
+    if pending and args.engine == "vllm":
+        pending.sort(key = lambda request: (request["duration_s"], request_key(request = request)))
+        outputs, record = generate_vllm(args = args, pending = pending, audio_root = audio_root)
+        with open(file = generations_path, mode = "a", encoding = "utf-8") as handle:
+            for request, (output, count) in zip(pending, outputs):
+                entry = {"key": request_key(request = request), "output": output, "n_new_tokens": count}
+                done[entry["key"]] = entry
+                handle.write(json.dumps(obj = entry, ensure_ascii = False) + "\n")
+        pending = []
     if pending:
         from pipeline.eval.run_eval import generate, load_model
 
@@ -706,6 +776,8 @@ def main(argv: list | None = None) -> int:
             "per_lang": args.per_lang,
             "seed": args.seed,
             "verbatim_threshold": args.verbatim_threshold,
+            "engine": args.engine,
+            **({"vllm": record} if record is not None else {}),
         },
         **summarize(items = items),
     }
