@@ -35,7 +35,8 @@ free_raw 默认用换行开头。试运行中两种开头各采样 600 条：换
 语言给出这么多条提示，每条提示另有 `meta_ids`，即「用户轮为元指令、助手轮按 `enable_thinking = False` 打开」的渲染；模型在
 这个上下文中写出的回答就是系统提示。`prompt_ids` 仍是 `<|im_start|>system\n`，保存的样本从这里开始，不含元指令这一轮。
 每行另记 `meta_lang`、`meta_kind`（措辞）、`meta_domain`（主题）、`meta_rule`（是否要求可检查的规则）、`meta_version` 和
-`meta_text`。
+`meta_text`。保留的样本不足时，`--meta-append train --meta-append-counts ja=80,ko=60` 在已有的提示清单后面按这些条数补上
+提示（编号接着往后排，不改动已有的行），generate 再次运行时会接着生成新加的提示。
 
 文档开头的长度：每篇文档先在 [64, 256] 中均匀抽一个目标 token 数，再在不超过目标的位置中选最靠后的句末或行末
 （没有时退到词边界），切下的文本去掉结尾空白后重新分词。至少 64 token 才能定下语言、话题和文体；
@@ -247,6 +248,21 @@ def meta_rows(tokenizer, start_ids, per_lang, seed):
     return rows
 
 
+def append_meta_rows(tokenizer, path, counts, seed):
+    """在已有的提示清单后面按语言补上元指令提示，编号接着往后排；先写临时文件再替换，正在运行的 generate 下次运行时读到。"""
+    with open(path, encoding = "utf-8") as handle:
+        existing = [json.loads(line) for line in handle]
+    start_ids = existing[0]["prompt_ids"]
+    rows = meta_rows(tokenizer = tokenizer, start_ids = start_ids, per_lang = counts, seed = f"{seed}-{path.parent.parent.name}-{path.parent.name}-append-{len(existing)}")
+    for number, row in enumerate(rows):
+        row["prompt_index"] = len(existing) + number
+        row["appended"] = True
+    tmp = path.with_suffix(".jsonl.tmp")
+    write_jsonl(path = tmp, rows = existing + rows)
+    tmp.replace(path)
+    print(f"{path}: 原有 {len(existing)} 条，补上 {len(rows)} 条", flush = True)
+
+
 def write_jsonl(path, rows):
     path.parent.mkdir(parents = True, exist_ok = True)
     with open(path, "w", encoding = "utf-8") as handle:
@@ -268,6 +284,8 @@ def main():
         help = "带系统提示的组改用元指令写系统提示（meta_prompts.py），每个划分每种语言的提示条数，例如 eval=20,train=703；"
         "给出时这两组不用 --free-count",
     )
+    parser.add_argument("--meta-append", choices = list(SPLITS), default = None, help = "在这个划分已有的提示清单后面补提示（只改这一个划分）")
+    parser.add_argument("--meta-append-counts", default = None, help = "补提示的条数，按语言给出，例如 ja=80,ko=60")
     parser.add_argument("--seed", type = int, default = 0)
     args = parser.parse_args()
 
@@ -275,6 +293,17 @@ def main():
     # 文档开头按原始 Qwen3.5 的规则分词（#77）
     check_tokenizer(tokenizer = tokenizer, source = args.model)
     replay_dir = Path(args.replay_dir)
+    if args.meta_append:
+        counts = {key: int(value) for key, value in (item.split("=") for item in args.meta_append_counts.split(","))}
+        for group in args.groups:
+            assert group in SELF_SYSTEM_GROUPS, "--meta-append 只用于带系统提示的组"
+            append_meta_rows(
+                tokenizer = tokenizer,
+                path = replay_dir / group / args.meta_append / "prompts.jsonl",
+                counts = counts,
+                seed = args.seed,
+            )
+        return
     prefixes_dir = Path(args.prefixes_dir) if args.prefixes_dir else replay_dir / "prefixes"
     segments = chat_segments(tokenizer = tokenizer)
     free_count = {key: int(value) for key, value in (item.split("=") for item in args.free_count.split(","))}

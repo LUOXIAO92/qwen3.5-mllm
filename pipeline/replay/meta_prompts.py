@@ -573,22 +573,24 @@ def meta_text(lang, kind, domain, rule = False):
 
 
 def assign(per_lang, seed):
-    """按语言均衡地分配元指令：每种语言 per_lang 条，措辞、主题、是否加 RULE 在语言内轮流使用后各自打乱（组合随机），
-    再按轮次交错各语言（每一轮每种语言一条，语言顺序每轮打乱），于是提示清单的任何前缀都大致按语言均衡。
-    返回 [{"meta_lang", "meta_kind", "meta_domain", "meta_rule"}]。"""
+    """按语言均衡地分配元指令：每种语言 per_lang 条（也可以是 {语言: 条数}，用于给保留不足的语言补提示），措辞、主题、
+    是否加 RULE 在语言内轮流使用后各自打乱（组合随机），再按轮次交错各语言（每一轮每种还有剩余的语言一条，语言顺序每轮
+    打乱），于是提示清单的任何前缀都大致按语言均衡。返回 [{"meta_lang", "meta_kind", "meta_domain", "meta_rule"}]。"""
     rng = random.Random(seed)
+    counts = per_lang if isinstance(per_lang, dict) else {lang: per_lang for lang in LANGS}
     columns = {}
     for lang in LANGS:
-        kinds = [KINDS[number % len(KINDS)] for number in range(per_lang)]
-        domains = [DOMAINS[number % len(DOMAINS)] for number in range(per_lang)]
-        rules = [number % 2 == 0 for number in range(per_lang)]
+        count = counts.get(lang, 0)
+        kinds = [KINDS[number % len(KINDS)] for number in range(count)]
+        domains = [DOMAINS[number % len(DOMAINS)] for number in range(count)]
+        rules = [number % 2 == 0 for number in range(count)]
         rng.shuffle(kinds)
         rng.shuffle(domains)
         rng.shuffle(rules)
         columns[lang] = list(zip(kinds, domains, rules))
     rows = []
-    for number in range(per_lang):
-        order = list(LANGS)
+    for number in range(max(counts.values(), default = 0)):
+        order = [lang for lang in LANGS if number < counts.get(lang, 0)]
         rng.shuffle(order)
         for lang in order:
             kind, domain, rule = columns[lang][number]

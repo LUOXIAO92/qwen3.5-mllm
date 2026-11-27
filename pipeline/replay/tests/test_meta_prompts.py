@@ -74,6 +74,10 @@ class MetaTextTest(unittest.TestCase):
             self.assertEqual(sorted(row["meta_lang"] for row in rows[start: start + len(LANGS)]), sorted(LANGS))
         self.assertEqual(rows, assign(per_lang = 20, seed = "x"))
         self.assertNotEqual(rows, assign(per_lang = 20, seed = "y"))
+        # 按语言给出条数（补提示）：只有给出的语言，条数相符，前缀按语言交错
+        extra = assign(per_lang = {"ja": 5, "ko": 2}, seed = "z")
+        self.assertEqual(Counter(row["meta_lang"] for row in extra), {"ja": 5, "ko": 2})
+        self.assertEqual(sorted(row["meta_lang"] for row in extra[:2]), ["ja", "ko"])
 
 
 class CheckTest(unittest.TestCase):
@@ -147,6 +151,14 @@ class MetaPromptsTest(unittest.TestCase):
             templates = json.loads((replay_dir / "templates.json").read_text(encoding = "utf-8"))
             self.assertEqual(templates["free_sys_chat"]["start_ids"], SYSTEM_START)
             self.assertEqual(templates["free_sys_chat"]["meta"]["kinds"], list(KINDS))
+            # 补提示：编号接着往后排，已有的行不变
+            before = read_jsonl(path = replay_dir / "free_sys_chat" / "eval" / "prompts.jsonl")
+            append_prompts(model_dir = model_dir, replay_dir = replay_dir, split = "eval", counts = "ja=3,fa=1")
+            after = read_jsonl(path = replay_dir / "free_sys_chat" / "eval" / "prompts.jsonl")
+            self.assertEqual(after[: len(before)], before)
+            self.assertEqual([row["prompt_index"] for row in after], list(range(len(before) + 4)))
+            self.assertEqual(Counter(row["meta_lang"] for row in after[len(before):]), {"ja": 3, "fa": 1})
+            self.assertTrue(all(row["appended"] and row["prompt_ids"] == SYSTEM_START for row in after[len(before):]))
             # 不带 --meta-per-lang 时与以前相同
             write_prompts(model_dir = model_dir, replay_dir = Path(tmp) / "plain", groups = ["free_sys_chat"], count = 2)
             plain = read_jsonl(path = Path(tmp) / "plain" / "free_sys_chat" / "eval" / "prompts.jsonl")
@@ -169,6 +181,29 @@ def write_meta_prompts(model_dir, replay_dir, groups, per_lang):
         *groups,
         "--meta-per-lang",
         f"eval={per_lang},train=0",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+        prompts_main()
+
+
+def append_prompts(model_dir, replay_dir, split, counts):
+    import sys
+    from unittest import mock
+
+    from pipeline.replay.prompts import main as prompts_main
+
+    argv = [
+        "prompts",
+        "--model",
+        str(model_dir),
+        "--replay-dir",
+        str(replay_dir),
+        "--groups",
+        "free_sys_chat",
+        "--meta-append",
+        split,
+        "--meta-append-counts",
+        counts,
     ]
     with mock.patch.object(sys, "argv", argv):
         prompts_main()
