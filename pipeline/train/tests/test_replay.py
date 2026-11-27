@@ -3,8 +3,9 @@
 CPU 上运行（在临时目录中按回放数据的格式写出五组小样本）：
 
 - MaskTest：各组计损失的 token：free_raw 全部生成 token；cont_raw 不含文档开头；free_chat、cont_chat 只有助手轮（含结尾
-  <|im_end|>），模型自己写的用户轮不计；free_chat_think 的助手轮含推理和 </think>。keep 为假的样本不用；top-32 的行与
-  计损失的位置一一对应。设置环境变量 REPLAY_DIR（回放数据目录）时另在真实数据上检查每组第一条样本的边界。
+  <|im_end|>），模型自己写的用户轮不计；free_sys_chat、free_sys_chat_think 模型自己写的系统轮也不计；思考模式的助手轮含推理
+  和 </think>。keep 为假的样本不用；top-32 的行与计损失的位置一一对应。设置环境变量 REPLAY_DIR（回放数据目录）时另在真实
+  数据上检查每组第一条样本的边界（目录中没有的组跳过）。
 - SamplerTest：比例的累计误差不超过一条样本的长度，各组的 token 份额按权重收敛，取完一遍重新打乱，结果只由种子决定；
   中途保存状态（经过 torch.save / torch.load）再续上，与不中断时取到的样本相同。
 - RouteTest：超过阈值的长样本另成纯文本微批，不超过上限地装在一起，单条超过上限的自己一个微批，样本不截断。
@@ -51,6 +52,9 @@ from pipeline.train.tests.test_packing import kernels_available
 HAS_MODEL = (MODEL_DIR / "config.json").exists()
 IM_START, IM_END, ENDOFTEXT, THINK, THINK_END = 248045, 248046, 248044, 248068, 248069
 USER_START = [IM_START, 846, 198]
+SYSTEM_START = [IM_START, 8678, 198]
+SYSTEM_BETWEEN = [198, IM_START, 846, 198]
+THINK_GROUPS = ("free_chat_think", "free_sys_chat_think")
 CHAT_BETWEEN = [198, IM_START, 74455, 198, THINK, 271, THINK_END, 271]
 THINK_BETWEEN = [198, IM_START, 74455, 198, THINK, 198]
 
@@ -115,7 +119,7 @@ class FakeReplay:
         return expected, top_ids, top_lp
 
     def write_all(self, count = 6, split = "train", long_every = 0):
-        """五组各 count 条，第 1 条 keep 为假；long_every > 0 时每隔几条放一条长样本。"""
+        """每组各 count 条，第 1 条 keep 为假；long_every > 0 时每隔几条放一条长样本。"""
         expected = {}
         for group in GROUP_CODES:
             specs = []
@@ -132,6 +136,15 @@ class FakeReplay:
                 elif group == "cont_chat":
                     prompt = USER_START + self.tokens(count = 15) + [IM_END] + CHAT_BETWEEN
                     description = [("ids", prompt), ("assistant", body + [IM_END])]
+                elif group == "free_sys_chat":
+                    description = [("ids", SYSTEM_START), ("system", self.tokens(count = 9) + [IM_END]), ("ids", SYSTEM_BETWEEN),
+                                   ("user", self.tokens(count = 7) + [IM_END]), ("ids", CHAT_BETWEEN), ("assistant", body + [IM_END])]
+                elif group == "free_sys_chat_think":
+                    reasoning = body[: len(body) // 2]
+                    answer = body[len(body) // 2:]
+                    description = [("ids", SYSTEM_START), ("system", self.tokens(count = 9) + [IM_END]), ("ids", SYSTEM_BETWEEN),
+                                   ("user", self.tokens(count = 5) + [IM_END]), ("ids", THINK_BETWEEN),
+                                   ("assistant", reasoning + [THINK_END, 271] + answer + [IM_END])]
                 else:
                     reasoning = body[: len(body) // 2]
                     answer = body[len(body) // 2:]
@@ -167,15 +180,19 @@ class MaskTest(unittest.TestCase):
                     self.assertEqual(supervised, ids[1:])
                 if group == "cont_raw":
                     self.assertEqual(supervised, ids[12:])
-                if group in ("free_chat", "cont_chat", "free_chat_think"):
-                    # 只有助手轮：从模板之后开始，以 <|im_end|> 结束；用户轮的 <|im_end|> 不计
+                if group in ("free_chat", "cont_chat") + THINK_GROUPS + ("free_sys_chat",):
+                    # 只有助手轮：从模板之后开始，以 <|im_end|> 结束；系统轮、用户轮的 <|im_end|> 不计
                     self.assertEqual(supervised[-1], IM_END)
                     self.assertEqual(supervised.count(IM_END), 1)
-                    between = THINK_BETWEEN if group == "free_chat_think" else CHAT_BETWEEN
+                    between = THINK_BETWEEN if group in THINK_GROUPS else CHAT_BETWEEN
                     start = len(ids) - len(supervised)
                     self.assertEqual(ids[start - len(between): start], between)
-                if group == "free_chat_think":
+                if group in THINK_GROUPS:
                     self.assertIn(THINK_END, supervised)
+                if group.startswith("free_sys_chat"):
+                    # 系统轮在最前面，三个 <|im_end|> 中只有助手轮的一个计损失
+                    self.assertEqual(ids[: len(SYSTEM_START)], SYSTEM_START)
+                    self.assertEqual(ids.count(IM_END), 3)
                 self.assertEqual(sample["teacher_ids"].shape, (len(supervised), 32))
                 self.assertEqual(sample["ref_lp"].shape, (len(supervised),))
             # top-32 的行就是这些生成 token 在 raw shard 中的位置
@@ -192,6 +209,8 @@ class MaskTest(unittest.TestCase):
     def test_real_data_boundaries(self):
         root = os.environ["REPLAY_DIR"]
         for group in GROUP_CODES:
+            if not (Path(root) / group / "eval" / "samples.jsonl").exists():
+                continue
             reader = ReplayGroup(root = root, group = group, split = "eval")
             sample = reader.sample(index = 0, teacher = True, reference = True)
             ids, labels = sample["ids"], sample["labels"]
@@ -199,9 +218,13 @@ class MaskTest(unittest.TestCase):
             self.assertTrue((labels[first:] != IGNORE_INDEX).all(), msg = group)
             if group in ("free_chat", "cont_chat"):
                 self.assertEqual(ids[first - len(CHAT_BETWEEN): first].tolist(), CHAT_BETWEEN)
-            if group == "free_chat_think":
+            if group == "free_sys_chat":
+                self.assertEqual(ids[first - len(CHAT_BETWEEN): first].tolist(), CHAT_BETWEEN)
+            if group in THINK_GROUPS:
                 self.assertEqual(ids[first - len(THINK_BETWEEN): first].tolist(), THINK_BETWEEN)
                 self.assertIn(THINK_END, ids[first:].tolist())
+            if group.startswith("free_sys_chat"):
+                self.assertEqual(ids[: len(SYSTEM_START)].tolist(), SYSTEM_START)
             hits = sample["teacher_ids"] == ids[first:][:, None]
             # 参考模型给实际 token 的对数概率与 top-32 中同一个 token 的值相同（float16 误差以内）
             self.assertLess(float(np.abs(sample["teacher_lp"][hits] - sample["ref_lp"][hits.any(axis = 1)]).max()), 0.01)
@@ -476,7 +499,8 @@ class PackingTest(unittest.TestCase):
         self.assertTrue(torch.equal(mixed["input_ids"][0, mixed["loss_index"] + 1], mixed["loss_targets"]))
         self.assertEqual(mixed["loss_source"][:positions].tolist(), [0] * positions)
         self.assertEqual(mixed["loss_source"][positions:].tolist(), [2] * 25 + [5] * 16)
-        self.assertEqual(mixed["source_tokens"], [positions, 0, 25, 0, 0, 16])
+        # 来源依次为 ASR、free_raw、free_chat、cont_raw、cont_chat、free_chat_think、free_sys_chat、free_sys_chat_think
+        self.assertEqual(mixed["source_tokens"], [positions, 0, 25, 0, 0, 16, 0, 0])
         self.assertEqual(mixed["loss_rows"][positions:].tolist(), [rows] * 25 + [rows + 1] * 16)
         self.assertEqual(mixed["empty_rows"].tolist(), before["empty_rows"].tolist() + [False, False])
         # kl32：从 kl_start 起是回放位置，top-32 与之一一对应

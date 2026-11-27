@@ -4,8 +4,9 @@
 
 - 损失只算模型生成的部分。无模板两组（free_raw、cont_raw）是全部生成 token（cont_raw 的人写文档开头只作上下文）；
   带模板的组只算助手轮：生成的助手内容和结尾的 <|im_end|>。free_chat、free_chat_think 中模型自己写的用户轮只作上下文，
-  不计损失；free_chat_think 的助手轮包括推理和 </think>（<think>\\n 属于模板）。按回放数据的存放格式，就是 role 为
-  text 或 assistant 的生成片段（LOSS_ROLES）计损失，role 为 user 的生成片段和直接给定的 token（提示、模板）不计。
+  不计损失；free_sys_chat、free_sys_chat_think 中模型自己写的系统轮和用户轮同样只作上下文；思考模式的助手轮包括推理和
+  </think>（<think>\\n 属于模板）。按回放数据的存放格式，就是 role 为 text 或 assistant 的生成片段（LOSS_ROLES）计损失，
+  role 为 system、user 的生成片段和直接给定的 token（提示、模板）不计。
 - 样本整条使用，从不截断。训练时直接用保存的 token id（提示片段的 ids 加生成片段的 [offset, offset + keep)），不重新分词。
 - 比例 r = 回放损失 token 数 / ASR 转写损失 token 数，按长期平均控制（ReplaySampler）。ASR 批次与不加回放时完全相同
   （同一批分片、同一读取顺序、同样的步数），回放额外加在同一步里。
@@ -92,9 +93,11 @@ GROUP_CODES = {
     "cont_raw": 3,
     "cont_chat": 4,
     "free_chat_think": 5,
+    "free_sys_chat": 6,
+    "free_sys_chat_think": 7,
 }
 SOURCE_COUNT = 1 + len(GROUP_CODES)
-# 计损失的生成片段：无模板组的 text，带模板组的 assistant。user（模型自己写的用户轮）只作上下文。
+# 计损失的生成片段：无模板组的 text，带模板组的 assistant。system、user（模型自己写的系统轮、用户轮）只作上下文。
 LOSS_ROLES = ("text", "assistant")
 TOP_K = 32
 # 每组样本顺序的随机数流编号，与 data.py 的 STREAM_* 区分开。
