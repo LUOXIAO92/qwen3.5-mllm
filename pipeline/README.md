@@ -166,7 +166,17 @@ WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid <工作目录>/en
     --runs-root <运行目录> --py-ifeval <python> >> <工作目录>/data/T71c/bench/launch.out 2>&1 < /dev/null &
 ```
 
-用户 2026-11-27 决定本机评测一律改用 vLLM 的 docker 镜像（`vllm/vllm-openai:nightly-x86_64`，vLLM 0.34），把 GPU 用满、尽快出结果。各评测程序（`think_check`、`text_bench` 的选择题与 IFEval、`run_eval`、`instruct_probe`、`lm_ppl`、`replay_gap`）都有 `--engine {hf,vllm}`：提示、打分和输出文件不变，只把模型的计算交给容器中的 `pipeline/eval/vllm_generate.py`，结果中另记 `engine` 与 vLLM 的设置；共用的部分（导出语言模型、写任务目录、启动容器）在 `pipeline/eval/vllm_host.py`，做法与 GPQA 的 vLLM 版相同。生成类评测用 vLLM 的连续批处理；选择题用 `logprob_token_ids` 取 A–D 四个 token 在全词表上的对数概率；困惑度与回放差距用 `prompt_logprobs` 取提示中每个位置实际 token 的对数概率。读音频的两项先在宿主机上按 transformers 版同样的批用音频塔与 projector 算出音频向量（`pipeline/eval/audio_embeds.py`），再以混合输入交给 vLLM：音频占位符的位置用这些向量，其余位置按 token id 查词嵌入；音频 token 与文字一样按顺序排位置，与融合模型相同。两个驱动程序的 `--engine` 默认为 vllm（`bench_local` 的 `--gpqa-engine` 也默认 vllm），默认顺序改为一个模型做完全部项目再做下一个，每个运行的语言模型只导出一次、做完删除；`c71_local` 另做严格版指令探针（`probe_strict/`）。思考检查按每条提问的种子采样（`--seed` 加序号），与 transformers 版统计上一致、逐条不同；贪心类评测两种引擎的差别只来自内核的 bfloat16 舍入，与 transformers 自身换注意力实现时的差别相当。核对结果与用时见 #71。
+用户 2026-11-27 决定本机评测一律改用 vLLM 的 docker 镜像（`vllm/vllm-openai:nightly-x86_64`，vLLM 0.34），把 GPU 用满、尽快出结果。各评测程序（`think_check`、`text_bench` 的选择题与 IFEval、`run_eval`、`instruct_probe`、`lm_ppl`、`replay_gap`）都有 `--engine {hf,vllm}`：提示、打分和输出文件不变，只把模型的计算交给容器中的 `pipeline/eval/vllm_generate.py`，结果中另记 `engine` 与 vLLM 的设置；共用的部分（导出语言模型、写任务目录、启动容器）在 `pipeline/eval/vllm_host.py`，做法与 GPQA 的 vLLM 版相同。生成类评测用 vLLM 的连续批处理；选择题用 `logprob_token_ids` 取 A–D 四个 token 在全词表上的对数概率；困惑度与回放差距用 `prompt_logprobs` 取提示中每个位置实际 token 的对数概率。读音频的两项先在宿主机上按 transformers 版同样的批用音频塔与 projector 算出音频向量（`pipeline/eval/audio_embeds.py`），再以混合输入交给 vLLM：音频占位符的位置用这些向量，其余位置按 token id 查词嵌入；音频 token 与文字一样按顺序排位置，与融合模型相同。两个驱动程序的 `--engine` 默认为 vllm（`bench_local` 的 `--gpqa-engine` 也默认 vllm），默认顺序改为一个模型做完全部项目再做下一个，每个运行的语言模型只导出一次、做完删除；`c71_local` 另做严格版指令探针（`probe_strict/`）。思考检查按每条提问的种子采样（`--seed` 加序号），与 transformers 版统计上一致、逐条不同；贪心类评测两种引擎的差别只来自内核的 bfloat16 舍入，与 transformers 自身换注意力实现时的差别相当。核对结果与用时见 #71。在 RTX 5090 上每个运行的六项约 20 分钟（transformers 约 1.6 小时，其中思考检查 40 分钟、探针 27 分钟），四项简单基准连导出约 3 分钟。两个驱动程序共用导出目录（`<工作目录>/tmp/T71c/vllm-lm/<标签>`），要先后运行，不要同时运行：
+
+```bash
+RUNS=c0,c-free_raw,c-free_chat,c-cont_raw,c-cont_chat,c-mix,c-cont_raw-kl32,c-cont_think-kl32,c-cont_raw-kl32tail,c-cont_raw-kl32tail-lr5e-6,c-cont_raw-kl32tail-lr1e-6,c-cont_raw-kl32tail-lora32,c-cont_raw-kl32tail-lora90
+mkdir -p <输出目录>/bench
+WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid bash -c "
+    <工作目录>/envs/mllm-eval/bin/python -m pipeline.eval.c71_local --runs-root <运行目录> --runs $RUNS --out-dir <输出目录>
+    <工作目录>/envs/mllm-train/bin/python -m pipeline.eval.bench_local --runs-root <运行目录> --runs $RUNS \
+        --out-dir <输出目录>/bench --benches mmlu_redux,ceval,mmmlu,ifeval --py-ifeval <python>
+" >> <输出目录>/launch.out 2>&1 < /dev/null &
+```
 
 ## 8. 在 Google Colab 上训练
 
