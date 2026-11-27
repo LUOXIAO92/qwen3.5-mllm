@@ -8,7 +8,10 @@
 - 轮换 8 种措辞（KINDS），分别要求不同类型的系统提示：角色或人物、任务助手、可检查的格式规则、语气与风格、安全与拒绝
   规则、分步辅导、具体机构的助手、很短的系统提示；
 - 每条元指令配一个主题（DOMAINS，34 个日常与专业领域，编程只是其中之一），写在第一行「主题：…」中，避免语法变格；
-- 明确要求不以「你是一位专家」开头，只输出系统提示本身，不加标题和解释。
+- 明确要求不以「你是一位专家」开头，只输出系统提示本身，不加标题和解释；
+- 一半的元指令（每种语言内各半，`meta_rule`）在措辞之后再加一句 RULE，要求系统提示至少写一条能从回答中检查的规则（字数或
+  句数上限、规定格式、回答语言、固定的开头或结尾句）。第 1 轮检查（每种语言 40 条）中只有 format 措辞稳定写出这类规则，
+  人工判读 72 条中只有 15 条带可验证约束，低于三分之一，所以第 2 轮加了这一句。
 
 元指令只是一小段手写的提示，系统提示、用户消息和回答都由参考模型写出，不用任何外部数据。元指令这一轮（用户轮为元指令，
 助手轮按 `enable_thinking = False` 打开）只用于生成，不进入保存的训练序列：保存的样本就是
@@ -16,10 +19,10 @@
 
 生成时的筛选（`generate --resample-system/--resample-user`，finalize 再检查一遍）：
 
-- 系统提示为空、含 `<think>` / `</think>`、以代码围栏开头，或第一行写着「系统提示」之类的标签（多是「这是一段系统提示：」
-  一类的说明），见 `system_problem`；
-- 用户消息为空，或抄写系统提示（用户消息至少 20 个字符，并且是系统提示的一部分，或其中 60% 以上的 5 字符片段出现在系统
-  提示中），见 `user_problem`。
+- 系统提示为空、少于 8 个字母（例如只有「7/10」）、含 `<think>` / `</think>`、以代码围栏开头，或第一行写着「系统提示」
+  之类的标签（多是「这是一段系统提示：」一类的说明），见 `system_problem`；
+- 用户消息为空、含 `<think>` / `</think>`（模型把助手的思考写进了用户轮），或抄写系统提示（用户消息至少 20 个字符，并且是
+  系统提示的一部分，或其中 60% 以上的 5 字符片段出现在系统提示中），见 `user_problem`。
 
 出现这些情况时重新采样这一段（同样的上下文，次数有上限），用完次数仍不合格的样本整条不用。
 """
@@ -28,7 +31,7 @@ import random
 import re
 import unicodedata
 
-META_VERSION = "1"
+META_VERSION = "2"
 LANGS = ("zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it", "id", "ms", "th", "vi", "fil", "ar", "tr", "fa")
 KINDS = ("persona", "task", "format", "style", "safety", "tutor", "organization", "short")
 DOMAINS = (
@@ -479,6 +482,28 @@ TEXT = {
     },
 }
 
+# 一半的元指令在措辞之后加上这一句，要求至少一条能从回答中检查的规则（第 2 轮加入）
+RULE = {
+    "zh": "至少写一条可以从回答中检查的规则，例如字数或句数上限、规定的格式（列表、表格或编号步骤）、回答使用的语言，或者回答开头或结尾必须出现的固定句子。",
+    "en": "Include at least one rule about the answers that can be checked, for example a maximum number of words or sentences, a required format (a list, a table or numbered steps), the language of the answer, or a fixed sentence at the start or end.",
+    "ja": "回答から確認できるルールを少なくとも一つ入れてください。例えば、語数や文の数の上限、決まった形式（箇条書き、表、番号付きの手順）、回答の言語、回答の最初や最後に必ず入れる決まった文などです。",
+    "ko": "답변에서 확인할 수 있는 규칙을 하나 이상 넣으세요. 예를 들어 단어 수나 문장 수의 상한, 정해진 형식(목록, 표, 번호를 붙인 단계), 답변 언어, 답변의 처음이나 끝에 반드시 넣을 고정 문장 등입니다.",
+    "de": "Nimm mindestens eine überprüfbare Regel für die Antworten auf, zum Beispiel eine Höchstzahl an Wörtern oder Sätzen, ein vorgeschriebenes Format (Liste, Tabelle oder nummerierte Schritte), die Sprache der Antwort oder einen festen Satz am Anfang oder Ende.",
+    "fr": "Ajoute au moins une règle vérifiable sur les réponses, par exemple un nombre maximal de mots ou de phrases, un format imposé (liste, tableau ou étapes numérotées), la langue de la réponse, ou une phrase fixe au début ou à la fin.",
+    "ru": "Добавь хотя бы одно проверяемое правило для ответов: например, максимальное число слов или предложений, обязательный формат (список, таблица или пронумерованные шаги), язык ответа или фиксированную фразу в начале или в конце.",
+    "pt": "Inclua pelo menos uma regra verificável sobre as respostas, por exemplo um número máximo de palavras ou frases, um formato obrigatório (lista, tabela ou passos numerados), o idioma da resposta ou uma frase fixa no início ou no fim.",
+    "es": "Incluye al menos una regla comprobable sobre las respuestas, por ejemplo un número máximo de palabras o frases, un formato obligatorio (lista, tabla o pasos numerados), el idioma de la respuesta o una frase fija al principio o al final.",
+    "it": "Includi almeno una regola verificabile sulle risposte, per esempio un numero massimo di parole o di frasi, un formato obbligatorio (elenco, tabella o passaggi numerati), la lingua della risposta o una frase fissa all'inizio o alla fine.",
+    "id": "Sertakan setidaknya satu aturan tentang jawaban yang dapat diperiksa, misalnya jumlah kata atau kalimat maksimal, format wajib (daftar, tabel, atau langkah bernomor), bahasa jawaban, atau kalimat tetap di awal atau akhir jawaban.",
+    "ms": "Sertakan sekurang-kurangnya satu peraturan tentang jawapan yang boleh disemak, contohnya bilangan perkataan atau ayat maksimum, format wajib (senarai, jadual atau langkah bernombor), bahasa jawapan, atau ayat tetap pada awal atau akhir jawapan.",
+    "th": "ใส่กฎเกี่ยวกับคำตอบที่ตรวจสอบได้อย่างน้อยหนึ่งข้อ เช่น จำนวนคำหรือจำนวนประโยคสูงสุด รูปแบบที่กำหนด (รายการ ตาราง หรือขั้นตอนที่มีหมายเลข) ภาษาที่ใช้ตอบ หรือประโยคที่ต้องมีตอนต้นหรือตอนท้ายของคำตอบ",
+    "vi": "Hãy đưa vào ít nhất một quy tắc về câu trả lời có thể kiểm tra được, ví dụ số từ hoặc số câu tối đa, định dạng bắt buộc (danh sách, bảng hoặc các bước đánh số), ngôn ngữ trả lời, hoặc một câu cố định ở đầu hay cuối câu trả lời.",
+    "fil": "Maglagay ng kahit isang patakaran tungkol sa mga sagot na madaling suriin, halimbawa pinakamaraming bilang ng salita o pangungusap, kinakailangang anyo (listahan, talahanayan o may bilang na mga hakbang), ang wika ng sagot, o isang takdang pangungusap sa simula o dulo ng sagot.",
+    "ar": "أضف قاعدة واحدة على الأقل تخص الإجابات ويمكن التحقق منها، مثل حد أقصى لعدد الكلمات أو الجمل، أو شكل إلزامي (قائمة أو جدول أو خطوات مرقمة)، أو لغة الإجابة، أو جملة ثابتة في بداية الإجابة أو نهايتها.",
+    "tr": "Cevaplar için kontrol edilebilen en az bir kural ekle; örneğin en fazla kelime ya da cümle sayısı, zorunlu bir biçim (liste, tablo ya da numaralı adımlar), cevabın dili veya cevabın başında ya da sonunda bulunması gereken sabit bir cümle.",
+    "fa": "دست کم یک قاعده قابل بررسی برای پاسخ ها بگذار، مثلا حداکثر تعداد کلمه یا جمله، قالبی اجباری (فهرست، جدول یا مراحل شماره دار)، زبان پاسخ، یا جمله ای ثابت در آغاز یا پایان پاسخ.",
+}
+
 # 系统提示第一行中出现这些词（不区分大小写）时，多半是「这是一段系统提示：」一类的说明或标题，不是系统提示本身
 SYSTEM_PROMPT_LABELS = (
     "system prompt",
@@ -495,6 +520,8 @@ SYSTEM_PROMPT_LABELS = (
     "prompt del sistema",
     "prompt di sistema",
     "prompt sistem",
+    "sistem prompt",
+    "sistem isteği",
     "พรอมต์ระบบ",
     "พรอมท์ระบบ",
     "lời nhắc hệ thống",
@@ -507,35 +534,40 @@ SYSTEM_PROMPT_LABELS = (
     "پرامپت سیستم",
 )
 MIN_COPY_CHARS = 20
+# 系统提示至少要有这么多个字母（各种文字的字母都算），否则只是「7/10」一类的碎片
+MIN_SYSTEM_LETTERS = 8
 COPY_SHARE = 0.6
 
 
-def meta_text(lang, kind, domain):
-    """一条元指令：主题行、措辞、结尾要求，各占一行。"""
+def meta_text(lang, kind, domain, rule = False):
+    """一条元指令：主题行、措辞、（rule 为真时）可检查规则的要求、结尾要求，各占一行。"""
     text = TEXT[lang]
     topic = text["topic"].format(domain = text["domains"][DOMAINS.index(domain)])
-    return "\n".join([topic, text["kinds"][kind], text["suffix"]])
+    lines = [topic, text["kinds"][kind]] + ([RULE[lang]] if rule else []) + [text["suffix"]]
+    return "\n".join(lines)
 
 
 def assign(per_lang, seed):
-    """按语言均衡地分配元指令：每种语言 per_lang 条，措辞和主题在语言内轮流使用后打乱（两者分别打乱，组合随机），
+    """按语言均衡地分配元指令：每种语言 per_lang 条，措辞、主题、是否加 RULE 在语言内轮流使用后各自打乱（组合随机），
     再按轮次交错各语言（每一轮每种语言一条，语言顺序每轮打乱），于是提示清单的任何前缀都大致按语言均衡。
-    返回 [{"meta_lang", "meta_kind", "meta_domain"}]。"""
+    返回 [{"meta_lang", "meta_kind", "meta_domain", "meta_rule"}]。"""
     rng = random.Random(seed)
     columns = {}
     for lang in LANGS:
         kinds = [KINDS[number % len(KINDS)] for number in range(per_lang)]
         domains = [DOMAINS[number % len(DOMAINS)] for number in range(per_lang)]
+        rules = [number % 2 == 0 for number in range(per_lang)]
         rng.shuffle(kinds)
         rng.shuffle(domains)
-        columns[lang] = list(zip(kinds, domains))
+        rng.shuffle(rules)
+        columns[lang] = list(zip(kinds, domains, rules))
     rows = []
     for number in range(per_lang):
         order = list(LANGS)
         rng.shuffle(order)
         for lang in order:
-            kind, domain = columns[lang][number]
-            rows.append({"meta_lang": lang, "meta_kind": kind, "meta_domain": domain})
+            kind, domain, rule = columns[lang][number]
+            rows.append({"meta_lang": lang, "meta_kind": kind, "meta_domain": domain, "meta_rule": rule})
     return rows
 
 
@@ -551,27 +583,33 @@ def shingles(text, n = 5):
 
 
 def system_problem(text):
-    """系统提示不能用的原因（没有问题时返回 None）：empty_system、think_tag、special_token、code_fence、meta_label。"""
+    """系统提示不能用的原因（没有问题时返回 None）：empty_system、fragment、think_tag、special_token、code_fence、meta_label。"""
     stripped = (text or "").strip()
     if not stripped:
         return "empty_system"
+    if sum(char.isalpha() for char in stripped) < MIN_SYSTEM_LETTERS:
+        return "fragment"
     if "<think>" in stripped or "</think>" in stripped:
         return "think_tag"
     if "<|im_start|>" in stripped or "<|im_end|>" in stripped or "<|endoftext|>" in stripped:
         return "special_token"
     if stripped.startswith("```"):
         return "code_fence"
-    first_line = normalize(stripped.split("\n", 1)[0])
+    # 土耳其语的大写 İ 规范化后带一个组合点，比较标签时去掉
+    first_line = normalize(stripped.split("\n", 1)[0]).replace("\u0307", "")
     if any(label in first_line for label in SYSTEM_PROMPT_LABELS):
         return "meta_label"
     return None
 
 
 def user_problem(system, user):
-    """用户消息不能用的原因（没有问题时返回 None）：empty_user（为空或只有空白）、copied_user（抄写系统提示）。"""
+    """用户消息不能用的原因（没有问题时返回 None）：empty_user（为空或只有空白）、user_think_tag（含思考标签）、
+    copied_user（抄写系统提示）。"""
     user_norm = normalize(user)
     if not user_norm:
         return "empty_user"
+    if "<think>" in user_norm or "</think>" in user_norm:
+        return "user_think_tag"
     if len(user_norm) < MIN_COPY_CHARS:
         return None
     system_norm = normalize(system)

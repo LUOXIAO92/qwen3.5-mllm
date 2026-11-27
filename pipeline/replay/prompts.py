@@ -34,7 +34,8 @@ free_raw 默认用换行开头。试运行中两种开头各采样 600 条：换
 `--meta-per-lang eval=20,train=703` 时（用户 2026-11-28 决定），带系统提示的组改用元指令（`meta_prompts.py`）：每个划分每种
 语言给出这么多条提示，每条提示另有 `meta_ids`，即「用户轮为元指令、助手轮按 `enable_thinking = False` 打开」的渲染；模型在
 这个上下文中写出的回答就是系统提示。`prompt_ids` 仍是 `<|im_start|>system\n`，保存的样本从这里开始，不含元指令这一轮。
-每行另记 `meta_lang`、`meta_kind`（措辞）、`meta_domain`（主题）、`meta_version` 和 `meta_text`。
+每行另记 `meta_lang`、`meta_kind`（措辞）、`meta_domain`（主题）、`meta_rule`（是否要求可检查的规则）、`meta_version` 和
+`meta_text`。
 
 文档开头的长度：每篇文档先在 [64, 256] 中均匀抽一个目标 token 数，再在不超过目标的位置中选最靠后的句末或行末
 （没有时退到词边界），切下的文本去掉结尾空白后重新分词。至少 64 token 才能定下语言、话题和文体；
@@ -226,7 +227,12 @@ def meta_rows(tokenizer, start_ids, per_lang, seed):
     rows = []
     cache = {}
     for item in assign(per_lang = per_lang, seed = seed):
-        text = meta_text(lang = item["meta_lang"], kind = item["meta_kind"], domain = item["meta_domain"])
+        text = meta_text(
+            lang = item["meta_lang"],
+            kind = item["meta_kind"],
+            domain = item["meta_domain"],
+            rule = item["meta_rule"],
+        )
         if text not in cache:
             cache[text] = encode(tokenizer = tokenizer, text = render_prompt(tokenizer = tokenizer, user = text))
         rows.append(

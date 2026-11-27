@@ -33,8 +33,8 @@ free_sys_chat_think）中没有写出 `</think>` 的样本（含用户消息没�
 
 带系统提示的两组另做两项检查（`meta_prompts.py`，生成时 `--resample-system/--resample-user` 已按同样的规则重新采样，这里通常
 为 0 条）：系统提示不能用（空、含 `<think>`、以代码围栏开头、第一行是「系统提示」之类的标签）时 `drop_reason` 为对应原因；
-用户消息为空或抄写系统提示时为 `empty_user`、`copied_user`。按元指令写系统提示的样本另记 `meta_lang`、`meta_kind`、
-`meta_domain`、`meta_version`（取自提示清单），生成时重新采样过的记 `resampled`。
+用户消息为空、含思考标签或抄写系统提示时为 `empty_user`、`user_think_tag`、`copied_user`。按元指令写系统提示的样本另记
+`meta_lang`、`meta_kind`、`meta_domain`、`meta_rule`、`meta_version`（取自提示清单），生成时重新采样过的记 `resampled`。
 
 `--lang-quota eval=17,train=611,free_sys_chat_think:train=111` 时，带元指令的样本按提示清单的顺序，每种元指令语言（`meta_lang`）
 只用前这么多条保留的样本，多出的 `keep` 为假、`drop_reason` 为 `lang_quota`。提示清单按语言交错排列，样本是否保留与长度无关，
@@ -97,7 +97,7 @@ def prompt_meta(row, prompt, group):
             row[key] = prompt[key]
         row["doc_lang"] = prompt["lang"]
     if group in SELF_SYSTEM_GROUPS:
-        for key in ("meta_lang", "meta_kind", "meta_domain", "meta_version"):
+        for key in ("meta_lang", "meta_kind", "meta_domain", "meta_rule", "meta_version"):
             if key in prompt:
                 row[key] = prompt[key]
     if group == "prompt_chat":
