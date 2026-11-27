@@ -107,8 +107,10 @@ PYTHON_OF_ITEM = {"fleurs": "audio", "probe": "audio", "probe_strict": "audio", 
 ENGINES = ("hf", "vllm")
 # 严格版指令探针（只在 --engine vllm 时加入计划）在 c_runs 的 probe 命令上换掉的参数。
 STRICT_PROBE_ARGS = ["--instruction-set", "strict", "--tasks", "transcribe", "translate", "timestamps"]
-# vLLM 引擎的估计用时（分钟，RTX 5090，2026-11-27 核对时实测，含启动容器与载入约 1 分钟），不含运行的导出（VLLM_EXPORT_MINUTES）。
-VLLM_MINUTES = {"replay_gap": 4.0, "lm_ppl": 1.5, "fleurs": 5.0, "probe": 4.0, "probe_strict": 3.0, "think": 3.5}
+# vLLM 引擎的估计用时（分钟，RTX 5090），不含运行的导出（VLLM_EXPORT_MINUTES）。2026-11-27 核对时 c-cont_raw-kl32tail 的实测
+# （含启动容器与载入约 45 秒）：FLEURS 3.9（其中算音频向量 1.9）、探针 3.4、严格版探针 2.5、困惑度 1.0–1.6、回放差距 3.0、
+# 思考检查 2.5–3.3（参考模型 2.4）。
+VLLM_MINUTES = {"replay_gap": 3.2, "lm_ppl": 1.5, "fleurs": 4.0, "probe": 3.5, "probe_strict": 2.5, "think": 3.5}
 # 运行的导出：从运行目录读 3.76 GB 的检查点（LM_LOAD_MINUTES）、写 3.8 GB，c0 实测共 41 秒
 VLLM_EXPORT_MINUTES = 1.0
 # 本机在 c_runs 的命令之后追加的参数。
@@ -995,8 +997,11 @@ def dry_run(paths, keys, order, include_ref, think_attention = "auto"):
     if paths["engine"] == "vllm":
         for name in ("ref_lm", "vllm_image", "vllm_export_root", "vllm_job_root", "vllm_home", "gpu_memory_utilization"):
             print(f"  {name}: {paths[name]}")
-        think_attention = "flash_attention_2" if think_attention == "auto" else think_attention
-    planned = planned_think_attention(requested = think_attention, paths = paths)
+    if paths["engine"] == "vllm":
+        # 注意力由 vLLM 选择；命令中的 --attn-implementation 只对 transformers 版有用，保持 c_runs 的默认
+        planned = (c_runs.THINK_ATTENTION, "--engine vllm：不用这项设置，注意力由 vLLM 选择，不做冒烟比较")
+    else:
+        planned = planned_think_attention(requested = think_attention, paths = paths)
     if planned is None:
         paths["think_attention"] = c_runs.THINK_ATTENTION
         print(
@@ -1067,13 +1072,19 @@ def dry_run(paths, keys, order, include_ref, think_attention = "auto"):
     full = smoke + sum(entry["minutes"] for entry in plan_full if not entry["marker"].exists())
     per_run = sum(entry["minutes"] for entry in plan_full if entry["label"] == BASE)
     per_ref = sum(entry["minutes"] for entry in plan_full if entry["label"] == REF)
-    think = local_minutes(
-        item = "think",
-        think_max_new = paths["think_max_new"],
-        think_attention = paths["think_attention"],
-    )
-    print(f"\n时间估计（RTX 5090）：每个运行约 {per_run:.0f} 分钟（其中思考检查约 {think:.0f} 分钟，{paths['think_attention']}；"
-          f"sdpa 时约 {think_minutes(max_new = paths['think_max_new'], attention = 'sdpa'):.0f} 分钟），参考模型约 {per_ref:.0f} 分钟"
+    if paths["engine"] == "vllm":
+        detail = f"vLLM，含导出语言模型约 {VLLM_EXPORT_MINUTES + LM_LOAD_MINUTES:.1f} 分钟"
+    else:
+        think = local_minutes(
+            item = "think",
+            think_max_new = paths["think_max_new"],
+            think_attention = paths["think_attention"],
+        )
+        detail = (
+            f"其中思考检查约 {think:.0f} 分钟，{paths['think_attention']}；"
+            f"sdpa 时约 {think_minutes(max_new = paths['think_max_new'], attention = 'sdpa'):.0f} 分钟"
+        )
+    print(f"\n时间估计（RTX 5090）：每个运行约 {per_run:.0f} 分钟（{detail}），参考模型约 {per_ref:.0f} 分钟"
           + (f"，冒烟比较约 {SMOKE_MINUTES} 分钟" if smoke else "") + "；"
           f"现在能做的 {len([e for e in plan_now if not e['marker'].exists()])} 项约 {now / 60:.1f} 小时，"
           f"全部下载后共 {len([e for e in plan_full if not e['marker'].exists()])} 项约 {full / 60:.1f} 小时")
