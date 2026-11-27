@@ -44,6 +44,14 @@ free_sys_chat、free_sys_chat_think（#71）分三段生成：先从 `<|im_start
 `\\n<|im_start|>user\\n`，再生成用户消息，之后与 free_chat、free_chat_think 相同（补上的 token 都取自 `templates.json`）。三段合计
 不超过 16,384 个 token；系统提示没有以 `<|im_end|>` 结束的样本记为 `no_system_end`，系统提示中出现循环（筛选模式）记为
 `system_loop`。每一段的提示都是前面全部片段（提示、已生成的 token、补上的模板）依次拼接。
+
+元指令（#71，用户 2026-11-28 决定，见 `meta_prompts.py`）：提示清单中有 `meta_ids` 的样本，系统提示一段的请求改用 `meta_ids`
+（用户轮为元指令、助手轮已打开）作提示，模型写出的回答（以 `<|im_end|>` 结束）作为系统提示片段存下，片段记
+`"context": "meta"`（它的对数概率是在元指令上下文中采样时的值）；之后各段的提示仍按保存的片段拼接，即
+`<|im_start|>system\\n` + 系统提示 + 补上的用户轮开头……，不含元指令。`--resample-system N`、`--resample-user N` 时，系统提示
+或用户消息正常结束、但按 `meta_prompts.system_problem`、`user_problem` 不能用（空、含思考标签、标签式说明、抄写系统提示等）
+时，丢掉这一段、用同样的上下文重新采样，每条样本每种角色最多 N 次；次数用完仍不能用的样本记为该原因（例如 `empty_user`），
+不再生成后面的段，整条不用。重新采样的次数和原因记在索引的 `resampled` 中。
 """
 
 import argparse
@@ -58,6 +66,7 @@ import numpy as np
 
 from pipeline.replay.degeneration import degeneration_onset, loop_onset, near_loop_onset
 from pipeline.replay.groups import CHAT_GROUPS, SELF_SYSTEM_GROUPS, THINK_GROUPS, self_roles
+from pipeline.replay.meta_prompts import system_problem, user_problem
 from pipeline.replay.store import TOP_K, ShardReader, ShardWriter, read_all_records, repair
 from pipeline.tokenizer_fix import check_tokenizer
 
@@ -167,6 +176,8 @@ class Generator:
         tokenizer = self.llm.get_tokenizer()
         # 提示是 prompts 一步写好的 token 编号；这里确认参考模型目录的分词器也已修正（#77）
         check_tokenizer(tokenizer = tokenizer, source = args.model)
+        # 检查系统提示、用户消息能否使用时解码（--resample-system、--resample-user）
+        self.tokenizer = tokenizer
         self.stop_ids = [tokenizer.convert_tokens_to_ids("<|im_end|>"), tokenizer.convert_tokens_to_ids("<|endoftext|>")]
         self.im_end = self.stop_ids[0]
         self.think_end = tokenizer.convert_tokens_to_ids("</think>")
@@ -243,10 +254,24 @@ class Generator:
             if group in SELF_SYSTEM_GROUPS:
                 after_ids["system"] = templates[group]["system_between_ids"]
         main_role = "assistant" if group in CHAT_GROUPS else "text"
+        # 系统提示、用户消息不能用时重新采样的次数上限（只用于带系统提示的组）
+        resample_limit = {}
+        if group in SELF_SYSTEM_GROUPS:
+            resample_limit = {"system": getattr(args, "resample_system", 0), "user": getattr(args, "resample_user", 0)}
 
         writer = None
         streams = {}
-        counters = {"samples": 0, "gen_tokens": 0, "decoded": 0, "loop_aborts": 0, "dropped": 0, "resumed": len(suspended), "suspended": 0}
+        counters = {
+            "samples": 0,
+            "gen_tokens": 0,
+            "decoded": 0,
+            "loop_aborts": 0,
+            "dropped": 0,
+            "resumed": len(suspended),
+            "suspended": 0,
+            "resampled": 0,
+            "resampled_tokens": 0,
+        }
         prior = parse_targets(text = args.prior_mean).get(group, 1000) if "=" in args.prior_mean else float(args.prior_mean)
         default_inflight = int(args.max_num_seqs * 1.5)
         if "=" in args.max_inflight:
@@ -289,8 +314,9 @@ class Generator:
                     ids.extend(piece["ids"])
             return ids
 
-        def submit(state, phase, prompt_ids, max_tokens, role, first = None):
-            request_id = f"{state['row']['prompt_index']}-{phase}"
+        def submit(state, phase, prompt_ids, max_tokens, role, first = None, attempt = 0):
+            # 重新采样的请求在编号后加上第几次，避免与刚结束的请求同名
+            request_id = f"{state['row']['prompt_index']}-{phase}" + (f"-{attempt}" if attempt else "")
             stream = Stream(
                 state = state,
                 role = role,
@@ -312,14 +338,16 @@ class Generator:
             ids = arrays[0]
             stream.state["arrays"].append(arrays)
             stream.state["roles"].append(stream.role)
-            stream.state["pieces"].append(
-                {
-                    "gen": stream.role,
-                    "length": int(len(ids)),
-                    "finish_reason": finish_reason,
-                    "stop_token": int(ids[-1]) if finish_reason == "stop" and len(ids) else None,
-                }
-            )
+            piece = {
+                "gen": stream.role,
+                "length": int(len(ids)),
+                "finish_reason": finish_reason,
+                "stop_token": int(ids[-1]) if finish_reason == "stop" and len(ids) else None,
+            }
+            if stream.role == "system" and "meta_ids" in stream.state["row"]:
+                # 系统提示是在元指令上下文中写出的，记录的对数概率不是保存的序列中的条件概率
+                piece["context"] = "meta"
+            stream.state["pieces"].append(piece)
             counters["gen_tokens"] += len(ids)
             return ids
 
@@ -355,6 +383,8 @@ class Generator:
             if loop is not None:
                 record["loop"] = loop
                 counters["dropped"] += 1
+            if state.get("resampled"):
+                record["resampled"] = state["resampled"]
             counted = kept
             if group in THINK_GROUPS and loop is None:
                 # 助手回答（思考 + 回答）中是否写出了 </think>；没有助手回答的样本记为否
@@ -369,11 +399,55 @@ class Generator:
             # 按全部已完成样本的平均值估计在途样本；短样本先完成，滑动平均会偏低，导致投放过多
             mean_kept = (kept_total + prior * PRIOR_SAMPLES) / (finished_samples + PRIOR_SAMPLES)
 
+        def decode(ids):
+            return self.tokenizer.decode([int(token) for token in ids], skip_special_tokens = False)
+
+        def rejection(stream, finish_reason):
+            """系统提示或用户消息正常以 <|im_end|> 结束、但不能用时返回原因（meta_prompts 的检查），否则返回 None。"""
+            if not resample_limit.get(stream.role) or finish_reason != "stop":
+                return None
+            if not stream.token_ids or stream.token_ids[-1] != self.im_end:
+                return None
+            text = decode(ids = stream.token_ids[:-1])
+            if stream.role == "system":
+                return system_problem(text = text)
+            state = stream.state
+            system_ids = [arrays[0] for arrays, role in zip(state["arrays"], state["roles"]) if role == "system"][0]
+            return user_problem(system = decode(ids = system_ids[:-1]), user = text)
+
         def piece_done(request_id, finish_reason):
             """请求结束（正常停止、达到上限或因循环中止）后的处理：模型自己写的系统提示、用户消息正常结束时补上模板，
-            接着生成下一段，否则样本完成。"""
+            接着生成下一段，否则样本完成。系统提示或用户消息不能用时重新采样这一段（--resample-system、--resample-user）。"""
             stream = streams.pop(request_id)
             state = stream.state
+            problem = rejection(stream = stream, finish_reason = finish_reason)
+            if problem is not None:
+                tries = state.setdefault("resampled", {}).setdefault(stream.role, {})
+                attempt = sum(tries.values())
+                if attempt < resample_limit[stream.role]:
+                    # 丢掉这一段，用同样的上下文重新采样
+                    tries[problem] = tries.get(problem, 0) + 1
+                    counters["resampled"] += 1
+                    counters["resampled_tokens"] += stream.length
+                    if stream.role == "system":
+                        prompt_ids = state["row"].get("meta_ids") or context_ids(state = state)
+                        budget = args.max_new_tokens
+                    else:
+                        prompt_ids = context_ids(state = state)
+                        budget = args.max_new_tokens - state.get("used", 0)
+                    submit(
+                        state = state,
+                        phase = phase_of(role = stream.role),
+                        prompt_ids = prompt_ids,
+                        max_tokens = budget,
+                        role = stream.role,
+                        attempt = attempt + 1,
+                    )
+                    return
+                # 次数用完：样本记为这个原因，不再生成后面的段
+                close_piece(stream = stream, finish_reason = finish_reason)
+                finish_sample(state = state, status = problem, kept = 0)
+                return
             ids = close_piece(stream = stream, finish_reason = finish_reason)
             if args.drop_loops:
                 # 用 finalize 的同一套规则检查这一段；有循环（原样或近似）就整条丢弃，只记元数据
@@ -439,7 +513,8 @@ class Generator:
                 submit(
                     state = state,
                     phase = 1,
-                    prompt_ids = row["prompt_ids"],
+                    # 按元指令写系统提示的样本，第一段的提示是元指令一轮（不进入保存的片段）
+                    prompt_ids = row.get("meta_ids") or row["prompt_ids"],
                     max_tokens = args.max_new_tokens,
                     role = role,
                     first = row.get("first"),
@@ -505,6 +580,8 @@ class Generator:
                 "decoded_tokens": counters["decoded"],
                 "loop_aborts": counters["loop_aborts"],
                 "dropped": counters["dropped"],
+                "resampled": counters["resampled"],
+                "resampled_tokens": counters["resampled_tokens"],
                 "resumed": counters["resumed"],
                 "suspended": counters["suspended"],
                 "seconds": round(elapsed, 1),
@@ -560,6 +637,18 @@ def main():
         action = "store_true",
         help = "思考模式的组（free_chat_think、free_sys_chat_think）的进度只计写出 </think> 的样本；没有写出的样本照样保留，"
         "索引中 think_closed 为假",
+    )
+    parser.add_argument(
+        "--resample-system",
+        type = int,
+        default = 0,
+        help = "带系统提示的组：系统提示不能用（meta_prompts.system_problem）时重新采样，每条样本最多这么多次",
+    )
+    parser.add_argument(
+        "--resample-user",
+        type = int,
+        default = 0,
+        help = "带系统提示的组：用户消息为空或抄写系统提示（meta_prompts.user_problem）时重新采样，每条样本最多这么多次",
     )
     parser.add_argument("--topk", type = int, default = TOP_K, help = f"每个生成位置另存的 top-k 对数概率个数，只能取 {TOP_K} 或 0（不存）")
     parser.add_argument("--max-new-tokens", type = int, default = MAX_NEW_TOKENS)

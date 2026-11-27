@@ -482,10 +482,11 @@ def main():
     parser = argparse.ArgumentParser(description = __doc__, formatter_class = argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--replay-dir", required = True)
     parser.add_argument("--out-dir", required = True, help = "summary.json 与 summary.md 的输出目录")
+    parser.add_argument("--groups", nargs = "+", default = list(ALL_GROUPS), help = "只汇总这些组（默认全部）")
     args = parser.parse_args()
     summary = {}
     for split in SPLITS:
-        for group in ALL_GROUPS:
+        for group in args.groups:
             item = split_summary(replay_dir = args.replay_dir, group = group, split = split)
             if item is not None:
                 summary[f"{group}/{split}"] = item

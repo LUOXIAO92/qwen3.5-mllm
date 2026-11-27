@@ -15,6 +15,9 @@
 # token 数与磁盘需求，teacher 再用参考模型前向一遍，保存保留样本每个生成位置的 top-32 分布。
 # 带系统提示的两组 free_sys_chat、free_sys_chat_think（#71，模型先自己写系统提示，再写用户消息和回答）不在默认计划中：
 # 先用 sys_prompts 一步写出提示（条数由 SYS_COUNT 给出），再加上 PLAN=...,free_sys_chat:train,free_sys_chat_think:train 和对应的 TARGET。
+# 给出 SYS_META（free_sys_chat 每个划分每种语言的条数，例如 eval=20,train=703）与 SYS_THINK_META（free_sys_chat_think 的条数）时，
+# 系统提示改由模型按元指令写出（meta_prompts.py，用户 2026-11-28 决定），生成时不能用的系统提示、用户消息重新采样（RESAMPLE 次），
+# finalize 可以按 LANG_QUOTA（例如 eval=17,train=611,free_sys_chat_think:train=111）截取每种语言的条数。
 # 第五组 prompt_chat（数据集中的真人提问，参考模型写回答）的提示可以用 user_prompts 一步写出，但暂不生成（用户
 # 2026-11-22 决定），默认计划不含这一组；需要时加上 PLAN=...,prompt_chat:eval@instruct,prompt_chat:train@instruct 和对应的 TARGET。
 # 不给参数时执行当前模式的全部步骤。每一步都可以单独重跑；generate 与 teacher 每次持有 GPU 锁约 TIME_BUDGET 秒，
@@ -46,8 +49,9 @@ elif [ "$FILTER" = noloop ]; then
     # 每条投放的提示平均保留的 token 数（有循环的样本按 0 计），由不筛选目录估计
     PRIOR_MEAN="${PRIOR_MEAN:-free_raw=700,free_chat=750,cont_raw=800,cont_chat=400,free_chat_think=1500,prompt_chat=400,free_sys_chat=750,free_sys_chat_think=1500}"
     MAX_INFLIGHT="${MAX_INFLIGHT:-0}"
-    # free_chat_think 的进度只计写出 </think> 的样本（没有写出的照样保留，是否使用由训练决定）
-    GEN_FLAGS=(--drop-loops --topk 0 --count-closed-think)
+    # free_chat_think 的进度只计写出 </think> 的样本（没有写出的照样保留，是否使用由训练决定）；
+    # 带系统提示的组中不能用的系统提示、用户消息重新采样，至多 RESAMPLE 次（其他组不受影响）
+    GEN_FLAGS=(--drop-loops --topk 0 --count-closed-think --resample-system "${RESAMPLE:-4}" --resample-user "${RESAMPLE:-4}")
     PLAN_DEFAULT="cont_raw:train,cont_chat:train,free_raw:eval,free_chat:eval,cont_raw:eval,cont_chat:eval,free_chat:train,free_raw:train"
     PLAN_DEFAULT="$PLAN_DEFAULT,free_chat_think:eval,free_chat_think:train"
     DEFAULT_STEPS=(import think_prompts generate finalize langid estimate teacher verify report)
@@ -81,17 +85,21 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 mkdir -p "$OUT/logs" "$REPLAY"
 cd "$REPO_DIR"
 
+# 其他程序（例如空闲的 ComfyUI）占用的显存超过 GPU_BUSY_MIB（默认 3,072 MiB）时视为 GPU 被占用
+GPU_BUSY_MIB="${GPU_BUSY_MIB:-3072}"
+export GPU_BUSY_MIB
+
 gpu_busy() {
-    [ -n "$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader)" ]
+    [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d ' ')" -gt "$GPU_BUSY_MIB" ]
 }
 
 # 在 GPU 锁内运行命令；拿到锁后若发现 GPU 仍被占用（锁外的进程），放弃本次，返回 75
 run_on_gpu() {
     while gpu_busy; do
-        echo "$(date '+%F %T') GPU 上有其他进程，5 分钟后再看"
+        echo "$(date '+%F %T') GPU 显存已被其他程序占用超过 ${GPU_BUSY_MIB} MiB，5 分钟后再看"
         sleep 300
     done
-    flock "$GPU_LOCK" bash -c 'if [ -n "$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader)" ]; then exit 75; fi; exec "$@"' _ "$@"
+    flock "$GPU_LOCK" bash -c 'used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d " "); if [ "$used" -gt "$GPU_BUSY_MIB" ]; then exit 75; fi; exec "$@"' _ "$@"
 }
 
 # 反复在 GPU 上运行一个可续跑的命令（退出码 0 完成，3 时间用完待续跑），直到完成
@@ -153,11 +161,19 @@ step_think_prompts() {
 }
 
 step_sys_prompts() {
-    # 带系统提示的两组的提示，不在默认步骤中；SYS_COUNT 为每个划分的条数（生成在达到 token 目标时停止）
-    if [ ! -f "$REPLAY/free_sys_chat/train/prompts.jsonl" ]; then
-        "$EVAL_ENV" -m pipeline.replay.prompts --groups free_sys_chat free_sys_chat_think --model "$REF" --replay-dir "$REPLAY" \
-            --free-count "${SYS_COUNT:-eval=8000,train=60000}"
+    # 带系统提示的两组的提示，不在默认步骤中。SYS_META、SYS_THINK_META 给出时按元指令写系统提示（每个划分每种语言的条数），
+    # 否则从空的系统轮开始，SYS_COUNT 为每个划分的条数（生成在达到 token 目标时停止）
+    if [ -f "$REPLAY/free_sys_chat/train/prompts.jsonl" ]; then
+        return 0
     fi
+    if [ -n "${SYS_META:-}" ]; then
+        "$EVAL_ENV" -m pipeline.replay.prompts --groups free_sys_chat --model "$REF" --replay-dir "$REPLAY" --meta-per-lang "$SYS_META"
+        "$EVAL_ENV" -m pipeline.replay.prompts --groups free_sys_chat_think --model "$REF" --replay-dir "$REPLAY" \
+            --meta-per-lang "${SYS_THINK_META:-$SYS_META}"
+        return 0
+    fi
+    "$EVAL_ENV" -m pipeline.replay.prompts --groups free_sys_chat free_sys_chat_think --model "$REF" --replay-dir "$REPLAY" \
+        --free-count "${SYS_COUNT:-eval=8000,train=60000}"
 }
 
 step_user_prompts() {
@@ -181,7 +197,11 @@ step_finalize() {
     local flags=()
     [ "$FILTER" = 0 ] && flags=(--no-filter)
     [ "$FILTER" = noloop ] && flags=(--drop-loops)
-    "$EVAL_ENV" -m pipeline.replay.finalize --model "$REF" --replay-dir "$REPLAY" "${flags[@]}"
+    # 带元指令的组每种语言的条数上限（按提示清单的顺序取）
+    [ -n "${LANG_QUOTA:-}" ] && flags+=(--lang-quota "$LANG_QUOTA")
+    # FINALIZE_GROUPS 可以只整理其中几组
+    # shellcheck disable=SC2086
+    "$EVAL_ENV" -m pipeline.replay.finalize --model "$REF" --replay-dir "$REPLAY" "${flags[@]}" ${FINALIZE_GROUPS:+--groups $FINALIZE_GROUPS}
 }
 
 step_langid() {

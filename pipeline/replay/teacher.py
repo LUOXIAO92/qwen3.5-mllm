@@ -290,7 +290,8 @@ class Teacher:
 
     def verify(self, group, split, count, seed = 0, per_sample = 1024):
         """抽 count 条已完成的样本单条前向（不填充），每条随机取至多 per_sample 个生成位置，在 float64 上算整个词表的
-        log softmax，与保存的数对照；同时在同一份隐状态上重算保存算法（float32 输出层），单独检查输出层与 top-32 的计算。"""
+        log softmax，与保存的数对照；同时在同一份隐状态上重算保存算法（float32 输出层），单独检查输出层与 top-32 的计算。
+        与 vLLM 采样时记录的对数概率对照时，跳过在元指令上下文中写出的系统提示片段。"""
         torch = self.torch
         split_dir = Path(self.args.replay_dir) / group / split
         raw_dir = split_dir / "raw"
@@ -317,8 +318,11 @@ class Teacher:
             # 序列中全部生成位置，以及它们在 teacher 数组中的行号
             positions = np.concatenate([np.arange(start, start + length) for _, length, start in pieces])
             rows = np.concatenate([np.arange(offset, offset + length) for offset, length, _ in pieces])
+            # 按元指令写出的系统提示（片段记 "context": "meta"）采样时的上下文与保存的序列不同，不与 vLLM 的对数概率对照
+            gen_pieces = [piece for piece in record["pieces"] if "gen" in piece]
+            same_context = np.concatenate([np.full(length, "context" not in piece) for piece, (_, length, _) in zip(gen_pieces, pieces)])
             chosen = np.sort(rng.choice(len(positions), size = min(per_sample, len(positions)), replace = False))
-            positions, rows = positions[chosen], rows[chosen]
+            positions, rows, same_context = positions[chosen], rows[chosen], same_context[chosen]
             stored = {name: np.asarray(data) for name, data in self.stored(teacher_dir = teacher_dir, number = record["shard"]).items()}
             stored = {name: data[rows] for name, data in stored.items()}
             index = torch.as_tensor(positions, device = "cuda")
@@ -354,7 +358,7 @@ class Teacher:
             for key, (a, b) in pairs.items():
                 diffs.setdefault(key, []).append(np.abs(a.astype(np.float64) - b).ravel())
             sampled_lp = np.asarray(reader.arrays(number = record["shard"])["lp"])[rows]
-            vllm_diff.append(stored["lp"] - sampled_lp)
+            vllm_diff.append((stored["lp"] - sampled_lp)[same_context])
             checked += len(rows)
         vllm_diff = np.concatenate(vllm_diff)
         diffs = {key: np.concatenate(values) for key, values in diffs.items()}

@@ -31,6 +31,11 @@ free_raw 默认用换行开头。试运行中两种开头各采样 600 条：换
 三轮对话逐个 token 相同（`pipeline/replay/tests/test_system_prompts.py`）。系统提示和用户消息只作上下文，训练时只对助手
 内容和结尾的 `<|im_end|>` 计算损失。
 
+`--meta-per-lang eval=20,train=703` 时（用户 2026-11-28 决定），带系统提示的组改用元指令（`meta_prompts.py`）：每个划分每种
+语言给出这么多条提示，每条提示另有 `meta_ids`，即「用户轮为元指令、助手轮按 `enable_thinking = False` 打开」的渲染；模型在
+这个上下文中写出的回答就是系统提示。`prompt_ids` 仍是 `<|im_start|>system\n`，保存的样本从这里开始，不含元指令这一轮。
+每行另记 `meta_lang`、`meta_kind`（措辞）、`meta_domain`（主题）、`meta_version` 和 `meta_text`。
+
 文档开头的长度：每篇文档先在 [64, 256] 中均匀抽一个目标 token 数，再在不超过目标的位置中选最靠后的句末或行末
 （没有时退到词边界），切下的文本去掉结尾空白后重新分词。至少 64 token 才能定下语言、话题和文体；
 至多 256 token 让人写的前缀只占样本的一小部分，样本的主体是参考模型自己写的续写。
@@ -51,6 +56,7 @@ import numpy as np
 from transformers import AutoTokenizer
 
 from pipeline.replay.first_token import first_token_logprobs, sample_first
+from pipeline.replay.meta_prompts import DOMAINS, KINDS, LANGS, META_VERSION, assign, meta_text
 from pipeline.replay.groups import (  # noqa: F401（其他模块从这里导入）
     ALL_GROUPS,
     CHAT_GROUPS,
@@ -215,6 +221,26 @@ def cut_prefix(tokenizer, text, target):
     return text[:end].rstrip()
 
 
+def meta_rows(tokenizer, start_ids, per_lang, seed):
+    """按元指令写系统提示的提示清单：每种语言 per_lang 条（meta_prompts.assign 交错排列），meta_ids 为元指令一轮的渲染。"""
+    rows = []
+    cache = {}
+    for item in assign(per_lang = per_lang, seed = seed):
+        text = meta_text(lang = item["meta_lang"], kind = item["meta_kind"], domain = item["meta_domain"])
+        if text not in cache:
+            cache[text] = encode(tokenizer = tokenizer, text = render_prompt(tokenizer = tokenizer, user = text))
+        rows.append(
+            {
+                "prompt_ids": start_ids,
+                "meta_ids": cache[text],
+                **item,
+                "meta_version": META_VERSION,
+                "meta_text": text,
+            }
+        )
+    return rows
+
+
 def write_jsonl(path, rows):
     path.parent.mkdir(parents = True, exist_ok = True)
     with open(path, "w", encoding = "utf-8") as handle:
@@ -230,6 +256,12 @@ def main():
     parser.add_argument("--groups", nargs = "+", default = list(GROUPS), help = "free_chat_think、free_sys_chat、free_sys_chat_think 只用于丢弃循环的回放目录，需要显式给出")
     parser.add_argument("--free-count", default = "eval=8000,train=60000", help = "自由生成两组每个划分的提示条数（生成在达到 token 目标时停止）")
     parser.add_argument("--free-raw-start", choices = ["newline", "random"], default = "newline")
+    parser.add_argument(
+        "--meta-per-lang",
+        default = None,
+        help = "带系统提示的组改用元指令写系统提示（meta_prompts.py），每个划分每种语言的提示条数，例如 eval=20,train=703；"
+        "给出时这两组不用 --free-count",
+    )
     parser.add_argument("--seed", type = int, default = 0)
     args = parser.parse_args()
 
@@ -240,6 +272,9 @@ def main():
     prefixes_dir = Path(args.prefixes_dir) if args.prefixes_dir else replay_dir / "prefixes"
     segments = chat_segments(tokenizer = tokenizer)
     free_count = {key: int(value) for key, value in (item.split("=") for item in args.free_count.split(","))}
+    meta_per_lang = None
+    if args.meta_per_lang:
+        meta_per_lang = {key: int(value) for key, value in (item.split("=") for item in args.meta_per_lang.split(","))}
     templates_path = replay_dir / "templates.json"
     cuts = {}
     templates = json.loads(templates_path.read_text(encoding = "utf-8")) if templates_path.exists() else {}
@@ -282,7 +317,15 @@ def main():
                 thinking = group in THINK_GROUPS
                 system_parts = system_chat_segments(tokenizer = tokenizer, thinking = thinking)
                 start_ids = encode(tokenizer = tokenizer, text = system_parts["system_start"])
-                rows = [{"prompt_ids": start_ids} for _ in range(free_count[split])]
+                if meta_per_lang is None:
+                    rows = [{"prompt_ids": start_ids} for _ in range(free_count[split])]
+                else:
+                    rows = meta_rows(
+                        tokenizer = tokenizer,
+                        start_ids = start_ids,
+                        per_lang = meta_per_lang[split],
+                        seed = f"{args.seed}-{group}-{split}-meta",
+                    )
                 templates[group] = {
                     "start_text": system_parts["system_start"],
                     "start_ids": start_ids,
@@ -295,6 +338,15 @@ def main():
                     "end_text": system_parts["end"],
                     "template": f"apply_chat_template(add_generation_prompt = True, enable_thinking = {thinking})，系统消息与用户消息都由模型自己写",
                 }
+                if meta_per_lang is not None:
+                    templates[group]["meta"] = {
+                        "version": META_VERSION,
+                        "template": "系统提示由模型按元指令写出：用户轮为元指令，apply_chat_template(add_generation_prompt = True, "
+                        "enable_thinking = False)，模型的回答就是系统提示；元指令这一轮不进入保存的样本",
+                        "langs": list(LANGS),
+                        "kinds": list(KINDS),
+                        "domains": list(DOMAINS),
+                    }
             else:
                 with open(prefixes_dir / f"{split}.jsonl", encoding = "utf-8") as handle:
                     prefixes = [json.loads(line) for line in handle]
