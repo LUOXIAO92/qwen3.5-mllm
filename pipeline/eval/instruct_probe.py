@@ -53,6 +53,12 @@ vLLM 引擎（--engine vllm，任务 #71）：与 run_eval.py 的 vLLM 引擎相
 每条的 max_tokens 为它所在批的 max_new_tokens；见 run_eval.py 开头与 pipeline/eval/vllm_host.py）。请求、分批、打分与输出
 文件都不变；probe_config.json 另记 engine，同一个输出目录不混用两种引擎的结果；summary.json 的 config 中记下 engine 与
 vLLM 的设置。级联参照（--cascade）只用 transformers。
+
+指令的位置（--instruction-placement，任务 #71 的系统提示遵循评测，见 pipeline/eval/sysprompt_local.py）：user（默认）为上面
+的做法，指令在用户回合中音频之后；system 时指令是系统消息，用户回合只有音频（chat template 展开为
+`<|im_start|>system\\n指令<|im_end|>\\n<|im_start|>user\\n<音频><|im_end|>\\n<|im_start|>assistant\\n` 加空的思考块）。只影响
+聊天格式；样本、指令文字、分批与打分都不变，两种位置的结果可以逐条比较。probe_config.json 另记 instruction_placement
+（只在 system 时记，已有的 user 结果目录不受影响），summary.json 的 config 中都记下。级联参照只用 user。
 """
 
 from __future__ import annotations
@@ -117,6 +123,8 @@ STRICT_INSTRUCTIONS = {
 INSTRUCTION_SETS = {"default": INSTRUCTIONS, "strict": STRICT_INSTRUCTIONS}
 # cpt 格式只有音频标记，没有指令。
 CPT_INSTRUCTION = {"id": "transcribe_cpt", "text": None}
+# 聊天格式中指令的位置：user 为用户回合中音频之后，system 为系统消息（用户回合只有音频）。
+PLACEMENTS = ("user", "system")
 # 级联参照中代替音频的文字：参考转写放在指令之前，与音频在指令之前的位置相同。
 CASCADE_TEMPLATE = "Audio transcript:\n{transcript}\n\n{instruction}"
 SAMPLING_RATE = 16000
@@ -518,9 +526,38 @@ def cascade_prompt(processor, transcript: str, instruction: str) -> str:
     )
 
 
-def batch_inputs(processor, requests: list, audio_root: Path):
+def system_messages(audio_path: str, instruction: str) -> list:
+    """指令作为系统消息、用户回合只有音频的对话（--instruction-placement system）。"""
+    return [
+        {"role": "system", "content": [{"type": "text", "text": instruction}]},
+        {"role": "user", "content": [{"type": "audio", "audio": audio_path}]},
+    ]
+
+
+def probe_prompt(processor, request: dict, audio_path: str, placement: str = "user") -> str:
+    """一条音频请求的提示：cpt 只有音频标记；聊天格式的指令按 placement 放在用户回合中音频之后（user）或系统消息中（system）。"""
+    from pipeline.eval.run_eval import build_prompt
+
+    if placement not in PLACEMENTS:
+        raise ValueError(f"未知的指令位置：{placement}，可选 {PLACEMENTS}")
+    if request["prompt_format"] == "chat" and placement == "system":
+        return processor.apply_chat_template(
+            conversation = system_messages(audio_path = audio_path, instruction = request["instruction"]),
+            tokenize = False,
+            add_generation_prompt = True,
+            enable_thinking = False,
+        )
+    return build_prompt(
+        processor = processor,
+        audio_path = audio_path,
+        prompt_format = request["prompt_format"],
+        instruction = request["instruction"],
+    )
+
+
+def batch_inputs(processor, requests: list, audio_root: Path, placement: str = "user"):
     """一批请求的模型输入：音频请求读入（时间段任务按 gap_s 拼接）后与提示一起交给 processor；级联请求只有文字。"""
-    from pipeline.eval.run_eval import build_prompt, load_waveform
+    from pipeline.eval.run_eval import load_waveform
 
     if requests[0]["mode"] == "cascade":
         prompts = [
@@ -539,11 +576,11 @@ def batch_inputs(processor, requests: list, audio_root: Path):
             if [list(bound) for bound in bounds] != request["segment_bounds"]:
                 raise ValueError(f"{request['item_id']} 读入的音频长度与文件头记录的长度不一致")
             waveforms.append(wave)
-        prompts.append(build_prompt(
+        prompts.append(probe_prompt(
             processor = processor,
+            request = request,
             audio_path = paths[0],
-            prompt_format = request["prompt_format"],
-            instruction = request["instruction"],
+            placement = placement,
         ))
     return processor(
         text = prompts,
@@ -598,6 +635,12 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
         help = "chat：聊天格式提问（全部任务）；cpt：只有音频标记的转写（只用于 transcribe）；可以两者都给",
     )
     parser.add_argument("--cascade", action = "store_true", help = "级联参照：参考转写代替音频，只用语言模型回答")
+    parser.add_argument(
+        "--instruction-placement",
+        default = "user",
+        choices = PLACEMENTS,
+        help = "聊天格式中指令的位置：user 为用户回合中音频之后（默认）；system 为系统消息，用户回合只有音频",
+    )
     parser.add_argument("--per-lang", default = 30, type = int, help = "每种语言抽多少条音频（时间段任务也是这么多组）")
     parser.add_argument("--seed", default = 0, type = int, help = "抽样的随机数种子")
     parser.add_argument("--gap-seconds", default = 0.5, type = float, help = "时间段任务中各段之间的静音（秒）")
@@ -619,6 +662,8 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
     )
     if args.engine == "vllm" and args.cascade:
         parser.error("--cascade 只用 transformers（--engine hf）")
+    if args.cascade and args.instruction_placement != "user":
+        parser.error("--cascade 只用 --instruction-placement user")
     return args
 
 
@@ -627,7 +672,7 @@ def generate_vllm(args, pending: list, audio_root: Path) -> tuple:
     transformers 版相同）。返回 ([(输出, n_new_tokens)]，vLLM 的记录)。"""
     import time
 
-    from pipeline.eval.run_eval import build_prompt, load_processor, vllm_generate_batches
+    from pipeline.eval.run_eval import load_processor, vllm_generate_batches
 
     def log(message):
         print(f"{time.strftime('%H:%M:%S')} {message}", flush = True)
@@ -642,11 +687,11 @@ def generate_vllm(args, pending: list, audio_root: Path) -> tuple:
         for request in batch:
             paths = [str((Path(audio_root) / path).resolve()) for path in request["audio_paths"]]
             group.append({
-                "prompt": build_prompt(
+                "prompt": probe_prompt(
                     processor = processor,
+                    request = request,
                     audio_path = paths[0],
-                    prompt_format = request["prompt_format"],
-                    instruction = request["instruction"],
+                    placement = args.instruction_placement,
                 ),
                 "audio_paths": paths,
                 "gap_s": request.get("gap_s"),
@@ -704,6 +749,8 @@ def main(argv: list | None = None) -> int:
     }
     if args.engine == "vllm":
         identity["engine"] = "vllm"
+    if args.instruction_placement != "user":
+        identity["instruction_placement"] = args.instruction_placement
     identity_path = args.output_dir / "probe_config.json"
     if identity_path.exists():
         saved = json.loads(s = identity_path.read_text(encoding = "utf-8"))
@@ -715,10 +762,11 @@ def main(argv: list | None = None) -> int:
     pending = [request for request in requests if request_key(request = request) not in done]
     print(f"共 {len(requests)} 条请求，已完成 {len(requests) - len(pending)} 条", flush = True)
 
-    record = None
+    # vLLM 的设置与用时（写进 summary.json 的 config）；下面逐条结果的变量用别的名字，不覆盖它
+    vllm_record = None
     if pending and args.engine == "vllm":
         pending.sort(key = lambda request: (request["duration_s"], request_key(request = request)))
-        outputs, record = generate_vllm(args = args, pending = pending, audio_root = audio_root)
+        outputs, vllm_record = generate_vllm(args = args, pending = pending, audio_root = audio_root)
         with open(file = generations_path, mode = "a", encoding = "utf-8") as handle:
             for request, (output, count) in zip(pending, outputs):
                 entry = {"key": request_key(request = request), "output": output, "n_new_tokens": count}
@@ -744,14 +792,19 @@ def main(argv: list | None = None) -> int:
                 outputs, n_new, elapsed, peak = generate(
                     model = model,
                     processor = processor,
-                    inputs = batch_inputs(processor = processor, requests = batch, audio_root = audio_root),
+                    inputs = batch_inputs(
+                        processor = processor,
+                        requests = batch,
+                        audio_root = audio_root,
+                        placement = args.instruction_placement,
+                    ),
                     max_new_tokens = max_new_tokens,
                     device = args.device,
                 )
                 for request, output, count in zip(batch, outputs, n_new):
-                    record = {"key": request_key(request = request), "output": output, "n_new_tokens": count}
-                    done[record["key"]] = record
-                    handle.write(json.dumps(obj = record, ensure_ascii = False) + "\n")
+                    entry = {"key": request_key(request = request), "output": output, "n_new_tokens": count}
+                    done[entry["key"]] = entry
+                    handle.write(json.dumps(obj = entry, ensure_ascii = False) + "\n")
                 handle.flush()
                 print(
                     f"{start + len(batch)}/{len(pending)} 条，{elapsed:.1f}s，max_new_tokens {max_new_tokens}，"
@@ -761,10 +814,10 @@ def main(argv: list | None = None) -> int:
 
     items = []
     for request in requests:
-        record = done[request_key(request = request)]
+        generated = done[request_key(request = request)]
         item = dict(request)
-        item["output"] = record["output"]
-        item["n_new_tokens"] = record["n_new_tokens"]
+        item["output"] = generated["output"]
+        item["n_new_tokens"] = generated["n_new_tokens"]
         items.append(score_item(item = item, threshold = args.verbatim_threshold))
     with open(file = args.output_dir / "items.jsonl", mode = "w", encoding = "utf-8") as handle:
         for item in items:
@@ -777,7 +830,8 @@ def main(argv: list | None = None) -> int:
             "seed": args.seed,
             "verbatim_threshold": args.verbatim_threshold,
             "engine": args.engine,
-            **({"vllm": record} if record is not None else {}),
+            "instruction_placement": args.instruction_placement,
+            **({"vllm": vllm_record} if vllm_record is not None else {}),
         },
         **summarize(items = items),
     }
