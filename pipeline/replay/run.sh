@@ -199,13 +199,14 @@ step_finalize() {
     [ "$FILTER" = noloop ] && flags=(--drop-loops)
     # 带元指令的组每种语言的条数上限（按提示清单的顺序取）
     [ -n "${LANG_QUOTA:-}" ] && flags+=(--lang-quota "$LANG_QUOTA")
-    # FINALIZE_GROUPS 可以只整理其中几组
+    # ONLY_GROUPS 可以只整理其中几组（langid 同样）
     # shellcheck disable=SC2086
-    "$EVAL_ENV" -m pipeline.replay.finalize --model "$REF" --replay-dir "$REPLAY" "${flags[@]}" ${FINALIZE_GROUPS:+--groups $FINALIZE_GROUPS}
+    "$EVAL_ENV" -m pipeline.replay.finalize --model "$REF" --replay-dir "$REPLAY" "${flags[@]}" ${ONLY_GROUPS:+--groups $ONLY_GROUPS}
 }
 
 step_langid() {
-    "$TEXT_ENV" -m pipeline.replay.langid --replay-dir "$REPLAY" --langid-model "$LANGID_MODEL"
+    # shellcheck disable=SC2086
+    "$TEXT_ENV" -m pipeline.replay.langid --replay-dir "$REPLAY" --langid-model "$LANGID_MODEL" ${ONLY_GROUPS:+--groups $ONLY_GROUPS}
 }
 
 step_nll() {

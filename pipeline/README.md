@@ -224,6 +224,23 @@ FILTER=noloop WORK_DIR=<工作目录> DATASET=$DATASET MLLM=<2B 融合模型目�
 
 为了保持对系统提示的遵循（#71 的系统提示评测中，用对话模板回放的运行在系统提示上比用户轮多掉 10–14 个百分点，原有的带模板组都没有系统轮），另有两组从系统轮开始的回放：free_sys_chat 与 free_sys_chat_think（用户 2026-11-27 加入，没有系统轮的各组不变）。提示只有 `<|im_start|>system\n`，参考模型自己写系统提示，写到 `<|im_end|>` 后程序补上 `\n<|im_start|>user\n`，模型再写用户消息，写到 `<|im_end|>` 后按 chat template 的生成提示打开助手轮（free_sys_chat 补上 `\n<|im_start|>assistant\n<think>\n\n</think>\n\n`，free_sys_chat_think 补上 `\n<|im_start|>assistant\n<think>\n`），模型写回答（思考组先写思考和 `</think>`）。补上的各段由 `prompts.system_chat_segments` 从 chat template 对系统消息加用户消息的渲染切出，拼出的 token 与 chat template 渲染完整三轮对话的结果逐个相同（`pipeline/replay/tests/test_system_prompts.py`）。三段合计不超过 16k token，采样设置、循环检查和整条丢弃的规则与 free_chat 相同；系统提示或用户消息没有以 `<|im_end|>` 结束的样本没有回答，整条不用（`drop_reason` 为 `no_system_end` 或 `no_user_end`）。训练时系统提示和用户消息只作上下文，只对助手内容和结尾的 `<|im_end|>` 计算损失（`pipeline/train/replay.py` 中两组的来源编号为 6、7）。提示由 `run.sh sys_prompts` 写出，不在默认计划中。
 
+从空的系统轮开始时，试运行（每组 400 条）中 42% 的系统提示只有 1–3 个词，20% 的用户消息为空。用户 2026-11-28 决定改为先让参考模型回答一句手写的元指令，把它写出的回答当作系统提示（`meta_prompts.py`）。元指令用项目的 18 种语言分别写成，并要求用该语言写；每条由主题行（34 个日常与专业领域，编程只是其中之一）、8 种措辞之一（人物或角色、任务助手、可检查的格式规则、语气与风格、安全与拒绝规则、分步辅导、具体机构的助手、很短的系统提示）、写成对助手的指示的要求和结尾要求组成，结尾要求不以「你是一位专家」开头、只输出系统提示本身；每种语言一半的元指令另加一句，要求至少一条能从回答中检查的规则。元指令这一轮只用于生成：系统提示一段的请求以「用户轮为元指令、助手轮按 `enable_thinking = False` 打开」为提示，写出的内容作为系统提示片段存下（记 `"context": "meta"`，它的对数概率是在元指令上下文中采样的），之后各段的提示和保存的样本都只有 `<|im_start|>system\n` 开始的三轮对话，与上面相同。每条样本记下元指令的语言、措辞、主题和是否要求规则（`meta_lang`、`meta_kind`、`meta_domain`、`meta_rule`、`meta_version`）。生成时系统提示为空、内容太少、含思考标签、以代码围栏开头或第一行是「系统提示」之类的标签，以及用户消息为空、含思考标签或抄写系统提示的，丢掉这一段、用同样的上下文重新采样（`generate --resample-system 4 --resample-user 4`），次数用完的样本整条不用，`finalize` 按同样的规则再检查一遍。
+
+正式生成之前在 free_sys_chat 上做了三轮小规模检查（每种语言 40 条），通过标准事先写好：系统提示的语言与要求一致 ≥ 80%（GlotLID），最常见的开头 ≤ 10%（每种语言内 ≤ 25%），以被禁止的开头开始的 ≤ 3%，近似重复（字符 5-gram Jaccard > 0.7）< 5%，过滤后空的或抄写的用户消息为 0，人工判读 72 条中至少三分之一带可验证约束，人工判读 40 条中至少 70% 的回答按系统提示作答。第 1 轮只有可验证约束不达标（15/72），第 2 轮加了要求规则的一句后约束达标（38/72），回答按系统提示作答的比例差一条（27/40），第 3 轮加了写成对助手的指示的要求、碎片的判定改为按文字加权的字母数不足 20 后全部达标（语言一致 94.9%，最常见开头 0.6%，约束 24/72，按系统提示作答 28/40）。不达标的样本多是菲律宾语、阿拉伯语、土耳其语、马来语等语言中不成文的文本，这是参考模型本身的能力。
+
+正式数据每种语言 free_sys_chat 的训练用 703 条、评测用 20 条提示，free_sys_chat_think 训练用 128 条、评测用 20 条，比目标多约 15%，用来补足丢弃的样本；`finalize --lang-quota eval=17,train=611,free_sys_chat_think:train=111` 按提示清单的顺序在每种语言中只用前这么多条保留的样本（提示清单按语言交错排列，截取与长度无关），多出的 `drop_reason` 为 `lang_quota`。两组放在 F 盘的 `<F 盘数据集目录>/text/qwen3.5-asr/replay-noloop/` 下，`$DATASET/text/qwen3.5-asr/replay-noloop/` 中的两个组目录是指向它们的符号链接，训练照常用 `--replay-dir $DATASET/text/qwen3.5-asr/replay-noloop` 读取；上传到 Colab 的打包方法见 [colab/README.md](colab/README.md)。命令：
+
+```bash
+FILTER=noloop SYS_META=eval=20,train=703 SYS_THINK_META=eval=20,train=128 \
+    PLAN=free_sys_chat:eval,free_sys_chat_think:eval,free_sys_chat:train,free_sys_chat_think:train \
+    TARGET=eval=1000000000,train=1000000000 LANG_QUOTA=eval=17,train=611,free_sys_chat_think:train=111 \
+    ONLY_GROUPS="free_sys_chat free_sys_chat_think" \
+    WORK_DIR=<工作目录> DATASET=$DATASET MLLM=<2B 融合模型目录> ORIGINAL=<原始 Qwen3.5-2B 目录> \
+    bash pipeline/replay/run.sh sys_prompts generate finalize langid estimate teacher verify
+```
+
+目标 token 数设得很大，生成在提示清单用完时结束，条数由提示清单决定。
+
 丢弃循环的目录中还准备了第五组 prompt_chat 的提示，暂不生成（用户 2026-11-22 决定先集中做模态对齐）：用户消息是指令数据集中真人写的提问，由参考模型写回答，提示由 `user_prompts.py` 写出（来源与用法见 `datasets.md`「回放文本的用户提问」）。提问来自 CohereLabs/aya_dataset 的 `inputs` 和 OpenAssistant/oasst2 每棵对话树的第一条用户消息，只取项目的 18 种语言，评测用取自两者的 test / validation 划分（1,840 条），训练用取自 train 划分（71,995 条），两者没有相同的提问；按规范化文本去重，少于 3 个 token 或多于 2,048 个 token 的丢弃，每个划分中任何一种语言最多占 25%。对话格式与 cont_chat 相同。提示文件在 `replay-noloop/prompt_chat/<划分>/prompts.jsonl`，需要时用 `PLAN=prompt_chat:eval@instruct,prompt_chat:train@instruct` 生成（`@` 后面是提示清单的 `part` 字段，进度按这一部分计）。
 
 `estimate` 统计各划分保留的生成 token 数和下一步需要的磁盘空间；`teacher` 再用参考模型把每条保留的样本（提示加生成，就是保存的 token id）整条前向一遍，在每个生成位置保存参考模型概率最高的 32 个 token，供以后试 top-k 截断的近似 KL 损失。`teacher` 用 transformers 加载融合模型（与训练同一套实现），输出层用 bfloat16 输入、float32 输出计算全部 248,320 个 logit，再取 log-sum-exp 和前 32 个；`verify` 抽几条样本单独前向，在 float64 上算整个词表的 log softmax 与保存的数对照。结果放在每个划分的 `teacher/` 目录，与 `raw/` 的 shard 一一对应，第 i 行就是 raw shard 中第 i 个生成 token 的位置：
