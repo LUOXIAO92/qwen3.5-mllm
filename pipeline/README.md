@@ -178,6 +178,14 @@ WORK_DIR=<工作目录> DATASET=<数据集目录> nohup setsid bash -c "
 " >> <输出目录>/launch.out 2>&1 < /dev/null &
 ```
 
+系统提示遵循评测（#71）看全量微调后的模型是否还听从系统消息。C 组的训练数据都没有系统回合（ASR 为不套模板的续写格式，回放的对话组从 `<|im_start|>user` 开始），上面的评测也都把要求写在用户回合，所以另做这一项。文本部分（`pipeline/eval/sysprompt_bench.py`）用本仓库编写的 100 个中性英文开放问题（`pipeline/eval/sysprompt/tasks.jsonl`），每条加一个 IFEval 指令注册表中的约束：约束原文由注册表的 `build_description` 写出，打分用同一个类的检查与官方的 strict、loose 判定，不用其他外部指令数据。共 21 类、每类 14 条，按固定种子生成 294 条（`pipeline/eval/sysprompt/items.jsonl`，`build` 子命令可以原样重新生成；各类的参数范围与排除的 4 类及原因见脚本开头）。每条在三种条件下贪心生成（非思考模式，最多 1,280 个新 token）：A 不提要求，B 约束作为系统消息、问题作为用户消息，C 没有系统消息、约束接在问题之后。A 是碰巧满足约束的比例，主要看各模型的 B 与参考模型的 B 之差，以及 B − C。语音部分在 `instruct_probe` 上加 `--instruction-placement system`：严格版的转写与翻译指令放在系统消息中，用户回合只有音频，样本与严格版探针相同，与已有的 `probe_strict/`（指令在用户回合）对照；参考模型的语音用原始语言模型加 projector 只训练时的检查点（全量微调的起点），两种位置都在这里做。`pipeline/eval/sysprompt_local.py` 对参考模型和各运行依次做这几项（文本生成后用 `--py-ifeval` 打分），GPU 锁、显存等待与进程组的处理与 `c71_local.py` 相同，导出目录单独放在 `<工作目录>/tmp/T71e-sysprompt/` 下。结果在 `<输出目录>/sysprompt/`，`summary.md` 列出全部模型的表格。在 RTX 5090 上每个运行约 5 分钟（含导出），14 个模型约 1.2 小时：
+
+```bash
+WORK_DIR=<工作目录> python -m pipeline.eval.sysprompt_local --runs-root <运行目录> --py-ifeval <python> --dry-run
+WORK_DIR=<工作目录> nohup setsid <工作目录>/envs/mllm-eval/bin/python -m pipeline.eval.sysprompt_local \
+    --runs-root <运行目录> --py-ifeval <python> >> <输出目录>/sysprompt/launch.out 2>&1 < /dev/null &
+```
+
 ## 8. 在 Google Colab 上训练
 
 本机的训练可以在 Colab 上续训。训练音频按训练计划打包成约 1 GB 的 tar 分片上传到 Google Drive，Colab 上只在本地保留常驻分片和一段滚动窗口，训练程序按位置读出原始字节再解码（`--audio-shards`）。打包、上传、Colab 单元格和存储桶测试的步骤见 [colab/README.md](colab/README.md)。
