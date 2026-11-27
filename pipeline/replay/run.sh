@@ -13,6 +13,8 @@
 # import think_prompts generate finalize langid estimate teacher verify report：import 把不筛选目录中没有循环的样本复制
 # 过来、有循环的只记元数据；think_prompts 写出 free_chat_think（与 free_chat 相同，助手轮按思考模式打开）的提示；generate 发现循环就中止并整条丢弃，其余样本原样保留，目标按保留的 token 数计；estimate 统计保留的
 # token 数与磁盘需求，teacher 再用参考模型前向一遍，保存保留样本每个生成位置的 top-32 分布。
+# 带系统提示的两组 free_sys_chat、free_sys_chat_think（#71，模型先自己写系统提示，再写用户消息和回答）不在默认计划中：
+# 先用 sys_prompts 一步写出提示（条数由 SYS_COUNT 给出），再加上 PLAN=...,free_sys_chat:train,free_sys_chat_think:train 和对应的 TARGET。
 # 第五组 prompt_chat（数据集中的真人提问，参考模型写回答）的提示可以用 user_prompts 一步写出，但暂不生成（用户
 # 2026-11-22 决定），默认计划不含这一组；需要时加上 PLAN=...,prompt_chat:eval@instruct,prompt_chat:train@instruct 和对应的 TARGET。
 # 不给参数时执行当前模式的全部步骤。每一步都可以单独重跑；generate 与 teacher 每次持有 GPU 锁约 TIME_BUDGET 秒，
@@ -42,7 +44,7 @@ elif [ "$FILTER" = noloop ]; then
     # 无模板两组的训练用目标降为 1,000 万保留 token（用户 2026-11-22）
     TARGET="${TARGET:-eval=1000000,train=30000000,free_raw:train=10000000,cont_raw:train=10000000,free_chat_think:train=10000000}"
     # 每条投放的提示平均保留的 token 数（有循环的样本按 0 计），由不筛选目录估计
-    PRIOR_MEAN="${PRIOR_MEAN:-free_raw=700,free_chat=750,cont_raw=800,cont_chat=400,free_chat_think=1500,prompt_chat=400}"
+    PRIOR_MEAN="${PRIOR_MEAN:-free_raw=700,free_chat=750,cont_raw=800,cont_chat=400,free_chat_think=1500,prompt_chat=400,free_sys_chat=750,free_sys_chat_think=1500}"
     MAX_INFLIGHT="${MAX_INFLIGHT:-0}"
     # free_chat_think 的进度只计写出 </think> 的样本（没有写出的照样保留，是否使用由训练决定）
     GEN_FLAGS=(--drop-loops --topk 0 --count-closed-think)
@@ -147,6 +149,14 @@ step_prompts() {
 step_think_prompts() {
     if [ ! -f "$REPLAY/free_chat_think/train/prompts.jsonl" ]; then
         "$EVAL_ENV" -m pipeline.replay.prompts --groups free_chat_think --model "$REF" --replay-dir "$REPLAY"
+    fi
+}
+
+step_sys_prompts() {
+    # 带系统提示的两组的提示，不在默认步骤中；SYS_COUNT 为每个划分的条数（生成在达到 token 目标时停止）
+    if [ ! -f "$REPLAY/free_sys_chat/train/prompts.jsonl" ]; then
+        "$EVAL_ENV" -m pipeline.replay.prompts --groups free_sys_chat free_sys_chat_think --model "$REF" --replay-dir "$REPLAY" \
+            --free-count "${SYS_COUNT:-eval=8000,train=60000}"
     fi
 }
 
