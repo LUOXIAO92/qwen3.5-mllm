@@ -166,6 +166,35 @@ def score_text(paths, label, log):
 # ---------------------------------------------------------------- 汇总
 
 
+# 「译文用目标语言的文字写成」的判定：译中只看源语言不是中文、日语的条目，输出的字母中汉字超过一半算中文；译英只看源语言用
+# 非拉丁文字的条目，输出的字母中 ASCII 字母超过 90% 算英文。与识别得准不准无关，只看模型是否照指令换了语言。
+NON_LATIN_LANGS = ("zh", "ja", "ko", "ru", "th", "ar", "fa")
+
+
+def target_script(item):
+    """一条翻译输出是否用目标语言的文字写成；不在判定范围内的条目为 None。"""
+    chars = [char for char in item["output"] if char.isalpha()]
+    if item["instruction_id"].startswith("translate_zh") and item["lang"] not in ("zh", "ja"):
+        return bool(chars) and sum("一" <= char <= "鿿" for char in chars) / len(chars) > 0.5
+    if item["instruction_id"].startswith("translate_en") and item["lang"] in NON_LATIN_LANGS:
+        return bool(chars) and sum(char.isascii() for char in chars) / len(chars) > 0.9
+    return None
+
+
+def target_script_shares(items_path):
+    """探针 items.jsonl 中译中、译英输出用目标语言文字写成的比例：{"translate_zh_target": 比例, "translate_en_target": 比例}。"""
+    found = {"translate_zh_target": [], "translate_en_target": []}
+    if not Path(items_path).exists():
+        return {key: None for key in found}
+    for row in read_jsonl(path = items_path):
+        if row.get("task") != "translate":
+            continue
+        value = target_script(item = row)
+        if value is not None:
+            found["translate_zh_target" if row["instruction_id"].startswith("translate_zh") else "translate_en_target"].append(value)
+    return {key: (sum(values) / len(values) if values else None) for key, values in found.items()}
+
+
 def audio_values(summary):
     """严格版探针 summary.json 中汇总用的各项（各语言平均，ALL）与条数：({键: 数值}, {键: 条数})。"""
     values, counts = {}, {}
@@ -255,6 +284,7 @@ def collect(paths, labels):
             if summary is None:
                 continue
             values, counts = audio_values(summary = summary)
+            values.update(target_script_shares(items_path = Path(path).with_name("items.jsonl")))
             audio[name] = {"values": values, "n": counts, "source": str(path), "engine": (summary.get("config") or {}).get("engine")}
         if text is None and not audio:
             continue
@@ -324,18 +354,30 @@ def summary_lines(data, paths):
             "",
             "语音：严格版指令（只输出答案），FLEURS test 18 种语言各 30 条，数值为各语言的平均。user 为指令在用户回合中音频之后（各运行取"
             "已有的 probe_strict 结果），system 为指令在系统消息、用户回合只有音频。参考模型的语音为原始语言模型加 projector 只训练时的"
-            "检查点（全量微调的起点）。转写为基础规范化后的错误率（WER，中、日、韩、泰等按字符），翻译为 chrF 与照抄原文（输出几乎逐字"
-            "是源语言转写）的比例。",
+            "检查点（全量微调的起点）。转写为基础规范化后的错误率（WER，中、日、韩、泰等按字符），翻译为 chrF、照抄原文（输出几乎逐字"
+            "是源语言转写）的比例，以及译文用目标语言文字写成的比例（译中：源语言不是中、日的 16 种语言，输出的字母中汉字过半；译英："
+            "源语言为中、日、韩、俄、泰、阿、波 7 种，输出的字母中 ASCII 字母超过 90%；与识别准不准无关，只看是否照指令换了语言。"
+            "参考模型的 projector 只训练了 2,700 步，识别很差，它的错误率与 chrF 只能看两种位置之间的差别）。",
             "",
-            "| 模型 | 转写·英文指令 user | system | 转写·中文指令 user | system | 译英 chrF user | system | 译英照抄 user | system | 译中 chrF user | system | 译中照抄 user | system |",
-            "| --- |" + " ---: |" * 12,
+            "| 模型 | 转写·英文指令 user | system | 转写·中文指令 user | system | 译英 chrF user | system | 译英照抄 user | system | 译英为英文 user | system | 译中 chrF user | system | 译中照抄 user | system | 译中为中文 user | system |",
+            "| --- |" + " ---: |" * 16,
         ]
         for label in audio_labels:
             audio = data["audio"][label]
             user = (audio.get("user") or {}).get("values") or {}
             system = (audio.get("system") or {}).get("values") or {}
             cells = []
-            for key in ("transcribe_en", "transcribe_zh", "translate_en_chrf", "translate_en_copy", "translate_zh_chrf", "translate_zh_copy"):
+            keys = (
+                "transcribe_en",
+                "transcribe_zh",
+                "translate_en_chrf",
+                "translate_en_copy",
+                "translate_en_target",
+                "translate_zh_chrf",
+                "translate_zh_copy",
+                "translate_zh_target",
+            )
+            for key in keys:
                 for values in (user, system):
                     value = values.get(key)
                     cells.append(number(value = value) if key.endswith("chrf") else percent(value = value))
@@ -404,7 +446,7 @@ def resolve_paths(args):
         "model_dir": Path(args.model_dir),
         "items": Path(args.items),
         "fleurs": Path(args.fleurs_dir) if args.fleurs_dir else work / "data" / "T02",
-        "runs_root": Path(args.runs_root),
+        "runs_root": Path(args.runs_root) if args.runs_root else None,
         "user_probe_root": Path(args.user_probe_root) if args.user_probe_root else work / "data" / "T71e" / "eval",
         "ref_projector": Path(args.ref_projector) if args.ref_projector else (
             work / "data" / "T71l" / "init" / "v2b-2b-cpt77-projector" / "checkpoint-0002700" / "projector.safetensors"
@@ -455,7 +497,7 @@ def parse_args(argv = None):
     if unknown:
         parser.error(f"未知的运行：{unknown}，可选 {list(c_runs.ALL_RUNS)}")
     args.rerun = [key for key in args.rerun_user.split(",") if key]
-    if args.keys and not args.runs_root:
+    if args.keys and not args.runs_root and not args.summary_only:
         parser.error("需要 --runs-root（或环境变量 C71_RUNS_ROOT）")
     if not args.dry_run and not args.summary_only and not args.py_ifeval:
         parser.error("需要 --py-ifeval（文本打分）")

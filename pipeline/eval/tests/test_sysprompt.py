@@ -182,6 +182,31 @@ class DriverTest(unittest.TestCase):
         rerun = sysprompt_local.label_entries(label = "c0", run = run, paths = paths, rerun_user = True)
         self.assertEqual([entry["item"] for entry in rerun], ["text", "audio_user", "audio_system"])
 
+    def test_target_script(self):
+        def item(instruction, lang, output):
+            return {"task": "translate", "instruction_id": instruction, "lang": lang, "output": output}
+
+        self.assertTrue(sysprompt_local.target_script(item = item("translate_zh_strict", "fr", "美国陆军工兵部队估计 6 英寸的降雨。")))
+        self.assertFalse(sysprompt_local.target_script(item = item("translate_zh_strict", "fr", "Selon le corps des ingénieurs.")))
+        self.assertIsNone(sysprompt_local.target_script(item = item("translate_zh_strict", "ja", "日本語の文")))
+        self.assertTrue(sysprompt_local.target_script(item = item("translate_en_strict", "ru", "Two fish species became extinct.")))
+        self.assertFalse(sysprompt_local.target_script(item = item("translate_en_strict", "ru", "Два вида рыб вымерли.")))
+        self.assertIsNone(sysprompt_local.target_script(item = item("translate_en_strict", "fr", "Deux espèces.")))
+        self.assertFalse(sysprompt_local.target_script(item = item("translate_en_strict", "ar", "")))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "items.jsonl"
+            rows = [
+                item("translate_zh_strict", "fr", "中文译文"),
+                item("translate_zh_strict", "de", "Deutscher Text"),
+                item("translate_en_strict", "th", "English text"),
+                {"task": "transcribe", "instruction_id": "transcribe_strict", "lang": "th", "output": "x"},
+            ]
+            sysprompt_bench.write_jsonl(path = path, rows = rows)
+            self.assertEqual(
+                sysprompt_local.target_script_shares(items_path = path),
+                {"translate_zh_target": 0.5, "translate_en_target": 1.0},
+            )
+
     def test_collect_and_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
