@@ -94,7 +94,7 @@ Drive 上的目录（`$DRIVE_DIR` 是 Drive 上本项目的目录）：
 | `$DRIVE_DIR/upload/qwen3.5-2b-mllm/` | 全量微调用的 2B 融合模型目录（约 5.7 GB），见单元格 7 的全量微调变体 |
 | `$DRIVE_DIR/upload/v2b-2b-checkpoint-0005000/` | 全量微调的起点：本机 `<工作目录>/data/T61/v2b-2b/checkpoint-0005000/` 整个目录（`projector.safetensors` 与 `projector.json`，约 34 MB） |
 | `$DRIVE_DIR/upload/replay-noloop-text.tar`、`replay-noloop-teacher.tar` | #71 C 组的自生成回放数据（文本约 1.4 GB、top-32 约 17 GB），见单元格 7 的 #71 C 组 |
-| `$DRIVE_DIR/upload/replay-sys-text.tar`、`replay-sys-teacher.tar` | #71 带系统提示的两组回放 free_sys_chat、free_sys_chat_think（系统提示由参考模型按元指令写出），打包方法见单元格 7 的 #71 C 组 |
+| `$DRIVE_DIR/upload/replay-sys-text.tar`、`replay-sys-teacher.tar` | #71 带系统提示的两组回放 free_sys_chat、free_sys_chat_think（系统提示由参考模型按元指令写出；文本约 0.34 GB、top-32 约 4.5 GB），打包方法见单元格 7 的 #71 C 组 |
 | `$DRIVE_DIR/shards/v2b-e0/` | 索引和全部分片（`$SHARDS_DRIVE`） |
 | `$DRIVE_DIR/runs/v2b-4b/` | 训练输出目录：本机训练的输出目录复制过来，不含 `dataset/` |
 | `$DRIVE_DIR/wheels/` | 安装包缓存，第一次运行 `setup.sh` 时生成 |

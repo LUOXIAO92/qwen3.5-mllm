@@ -241,6 +241,8 @@ FILTER=noloop SYS_META=eval=20,train=703 SYS_THINK_META=eval=20,train=128 \
 
 目标 token 数设得很大，生成在提示清单用完时结束，条数由提示清单决定。
 
+最终保留的条数（用户 2026-11-28 的要求：free_sys_chat 训练用约 11,000 条、评测用约 300 条，free_sys_chat_think 训练用约 2,000 条、评测用约 300 条，按语言均衡）：free_sys_chat 训练用 10,998 条（每种语言 611 条，计损失 token 约 396 万）、评测用 306 条（每种语言 17 条），free_sys_chat_think 训练用 1,998 条（每种语言 111 条，计损失 token 约 1,018 万，其中思考约 955 万）、评测用 306 条。计损失 token 与事先的估计（各约 500 万）不同：free_sys_chat 的回答平均约 360 token，free_sys_chat_think 的思考平均约 4,800 token，是没有元指令时的两倍多；只要约 500 万思考 token 时，可以用 `finalize --lang-quota train=55` 只取每种语言的前 55 条，teacher/ 不用重算。评测用与训练用之间没有相同的系统提示、用户消息或回答。生成与检查的完整记录（通过标准、三轮检查的统计与逐条判读、正式数据的统计）在 F 盘两组目录旁边的 `sys_groups_report/`。
+
 丢弃循环的目录中还准备了第五组 prompt_chat 的提示，暂不生成（用户 2026-11-22 决定先集中做模态对齐）：用户消息是指令数据集中真人写的提问，由参考模型写回答，提示由 `user_prompts.py` 写出（来源与用法见 `datasets.md`「回放文本的用户提问」）。提问来自 CohereLabs/aya_dataset 的 `inputs` 和 OpenAssistant/oasst2 每棵对话树的第一条用户消息，只取项目的 18 种语言，评测用取自两者的 test / validation 划分（1,840 条），训练用取自 train 划分（71,995 条），两者没有相同的提问；按规范化文本去重，少于 3 个 token 或多于 2,048 个 token 的丢弃，每个划分中任何一种语言最多占 25%。对话格式与 cont_chat 相同。提示文件在 `replay-noloop/prompt_chat/<划分>/prompts.jsonl`，需要时用 `PLAN=prompt_chat:eval@instruct,prompt_chat:train@instruct` 生成（`@` 后面是提示清单的 `part` 字段，进度按这一部分计）。
 
 `estimate` 统计各划分保留的生成 token 数和下一步需要的磁盘空间；`teacher` 再用参考模型把每条保留的样本（提示加生成，就是保存的 token id）整条前向一遍，在每个生成位置保存参考模型概率最高的 32 个 token，供以后试 top-k 截断的近似 KL 损失。`teacher` 用 transformers 加载融合模型（与训练同一套实现），输出层用 bfloat16 输入、float32 输出计算全部 248,320 个 logit，再取 log-sum-exp 和前 32 个；`verify` 抽几条样本单独前向，在 float64 上算整个词表的 log softmax 与保存的数对照。结果放在每个划分的 `teacher/` 目录，与 `raw/` 的 shard 一一对应，第 i 行就是 raw shard 中第 i 个生成 token 的位置：
