@@ -56,6 +56,10 @@ FlashAttention-2（think_check.FLASH_ATTENTION），载入或生成出错时整�
 批处理生成（pipeline/eval/gpqa_vllm.py）：题目、提示、答案解析、指标和输出文件都调用这里的函数（gpqa_rows、gpqa_prompts、
 write_gpqa），只有生成和随机数的分配不同。
 
+vLLM 引擎（--engine vllm，任务 #71，见 pipeline/eval/vllm_host.py）：选择题与 IFEval 在 vLLM 的 docker 镜像中一次做完
+（run_vllm）。选择题每题只生成 1 个 token，logprob_token_ids 取 A–D 在全词表上的对数概率；IFEval 贪心生成。提示、打分与
+输出文件与上面相同，汇总另记 engine 与 vllm；GPQA 的 vLLM 版是 pipeline/eval/gpqa_vllm.py。
+
 输出（--out-dir）：每项基准 <基准>.json（汇总）与 <基准>.items.jsonl（逐题：编号、标准答案、模型答案、四个字母的对数概率
 或 GPQA 的状态），IFEval 另有 responses 与 generation 两个文件，GPQA 另有 gpqa.ids.i32。
 """
