@@ -664,7 +664,7 @@ class DriverTest(unittest.TestCase):
     def test_defaults(self):
         args = bench_local.parse_args(argv = ["--work-dir", "/w", "--data-dir", "/d"])
         paths = bench_local.resolve_paths(args = args)
-        self.assertEqual(paths["gpqa_engine"], "hf")
+        self.assertEqual((paths["gpqa_engine"], paths["engine"], paths["order"]), ("vllm", "vllm", "run"))
         self.assertEqual(paths["gpqa_ref_lm"], Path("/w/data/T70/ref-lm"))
         self.assertEqual(paths["gpqa_export_root"], Path("/w/tmp/T71c/vllm-lm"))
         self.assertEqual(paths["gpqa_job_root"], Path("/w/tmp/T71c/vllm-job"))

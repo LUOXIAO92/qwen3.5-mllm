@@ -24,6 +24,13 @@ GPQA 的生成引擎（--gpqa-engine）：默认 hf，用 text_bench 的 transfo
 保留）。导出在 GPU 锁内进行，不到 1 分钟。与容器交换提示和结果的任务目录为 <工作目录>/tmp/T71c/vllm-job/<模型标签>（完成后
 删除），容器中的 HOME（vLLM、Triton 等的编译缓存，各模型共用）为 <工作目录>/tmp/T71c/vllm-home。
 
+简单基准的引擎（--engine，默认 vllm）：用户 2026-11-27 决定本机评测一律用 vLLM 的 docker 镜像。vllm 时 text_bench 加
+--engine vllm（选择题用 logprob_token_ids 取四个字母的全词表对数概率，IFEval 用 vLLM 贪心生成；提示、打分与输出文件不变，
+见 text_bench.run_vllm），四项在一个容器中做完；hf 为原来的 transformers 版。GPQA 的引擎 --gpqa-engine 默认也是 vllm。
+两项都用 vLLM 时一个运行的语言模型只导出一次（--gpqa-export-root/<标签>，简单基准导出后保留，GPQA 沿用），这个运行的最后
+一项做完后删除；默认顺序因此为 --order run（每个模型做完简单基准接着做 GPQA）；--order item 与以前相同（先做全部模型的
+简单基准，再做 GPQA），导出要留到 GPQA。
+
 输出（--out-dir，默认 <工作目录>/data/T71c/bench）：<模型标签>/<基准>.json（与 text_bench 的输出相同，IFEval 的打分为
 ifeval.json）、各项日志 <模型标签>/<项目>.log、summary.md 与 summary.json（各基准的绝对分数、与参考模型之差、模型卡上的
 分数，MMMLU 各语言，诊断量）、status.json 与 driver.log。summary 中 GPQA 只有汇总的比例，没有题目内容。
@@ -85,6 +92,8 @@ GPQA_QUESTIONS = 198
 #   GPQA 同时约 62 条、上下文到 32k，每步读的 KV 缓存与之相近，取 3,500 token/s。
 VLLM_LOAD_MINUTES = 2.0
 VLLM_EXPORT_MINUTES = 0.5
+# 简单基准的 vLLM 版：四项共约 9,900 条请求，一个容器（2026-11-27 核对：参考模型 78 秒，c-cont_raw-kl32tail 84 秒，含载入）
+VLLM_SIMPLE_MINUTES = 1.5
 VLLM_FILL = 0.9
 VLLM_TOKENS_PER_SECOND = 3500
 
@@ -150,13 +159,18 @@ def label_entries(paths, label, language_model, benches):
     entries = []
     simple = [bench for bench in SIMPLE if bench in benches]
     if simple:
+        command = base + simple + common
+        minutes = load + sum(SIMPLE_MINUTES[bench] for bench in simple)
+        if paths.get("engine", "hf") == "vllm":
+            command += vllm_simple_arguments(paths = paths, label = label, language_model = language_model)
+            minutes = VLLM_SIMPLE_MINUTES + (0.0 if language_model is None else VLLM_EXPORT_MINUTES + c71_local.LM_LOAD_MINUTES)
         entries.append({
             "label": label,
             "item": "simple",
             "benches": simple,
-            "command": base + simple + common,
+            "command": command,
             "marker": Outputs(paths = [bench_output(bench = bench, label_dir = label_dir) for bench in simple]),
-            "minutes": load + sum(SIMPLE_MINUTES[bench] for bench in simple),
+            "minutes": minutes,
             "log": label_dir / "simple.log",
         })
     if "gpqa" in benches:
@@ -167,6 +181,9 @@ def label_entries(paths, label, language_model, benches):
                 language_model = language_model,
                 common = common,
             )
+            if simple and paths.get("engine", "hf") == "vllm" and language_model is not None:
+                # 简单基准已经导出过这个运行的语言模型，GPQA 沿用
+                minutes -= VLLM_EXPORT_MINUTES + c71_local.LM_LOAD_MINUTES
         else:
             command = base + ["gpqa"] + common + [
                 "--gpqa-max-new-tokens", str(paths["gpqa_max_new"]),
@@ -183,6 +200,22 @@ def label_entries(paths, label, language_model, benches):
             "log": label_dir / "gpqa.log",
         })
     return entries
+
+
+def vllm_simple_arguments(paths, label, language_model):
+    """简单基准的 vLLM 参数：参考模型直接加载 --gpqa-ref-lm；运行导出到 --gpqa-export-root/<标签> 并保留（GPQA 沿用，驱动程序
+    在这个运行的最后一项之后删除）。"""
+    args = ["--engine", "vllm"]
+    if language_model is None:
+        args += ["--vllm-model", str(paths["gpqa_ref_lm"])]
+    else:
+        args += ["--export-dir", str(paths["gpqa_export_root"] / label), "--config-dir", str(paths["gpqa_ref_lm"]), "--keep-export"]
+    return args + [
+        "--image", str(paths["gpqa_vllm_image"]),
+        "--docker-home", str(paths["gpqa_docker_home"]),
+        "--gpu-memory-utilization", str(paths.get("gpu_memory_utilization", 0.9)),
+        "--job-dir", str(paths["gpqa_job_root"] / f"{label}-simple"),
+    ]
 
 
 def vllm_gpqa_command(paths, label, language_model, common):
@@ -208,8 +241,8 @@ def vllm_gpqa_command(paths, label, language_model, common):
     return command, minutes
 
 
-def build_plan(paths, ready, keys, include_ref, benches):
-    """全部项目的顺序表：先每个模型的简单基准（参考模型在前），再每个模型的 GPQA。"""
+def build_plan(paths, ready, keys, include_ref, benches, order = "item"):
+    """全部项目的顺序表：item 时先每个模型的简单基准（参考模型在前），再每个模型的 GPQA；run 时每个模型做完两项再做下一个。"""
     models = ([(REF, None)] if include_ref else []) + [(key, ready[key]) for key in keys if key in ready]
     per_label = [
         label_entries(
@@ -220,6 +253,8 @@ def build_plan(paths, ready, keys, include_ref, benches):
         )
         for label, language_model in models
     ]
+    if order == "run":
+        return [entry for entries in per_label for entry in entries]
     plan = []
     for item in ("simple", "gpqa"):
         plan += [entry for entries in per_label for entry in entries if entry["item"] == item]
@@ -466,7 +501,7 @@ def check_inputs(paths, benches):
         ok = result.returncode == 0
         detail = "import torch, transformers, safetensors, pyarrow, fla：" + ("通过" if ok else result.stderr.strip().splitlines()[-1][:200])
     checks.append((ok, f"python（text_bench）{python}：{detail}", True))
-    if "gpqa" in benches and paths.get("gpqa_engine") == "vllm":
+    if ("gpqa" in benches and paths.get("gpqa_engine") == "vllm") or (paths.get("engine") == "vllm" and any(bench in SIMPLE for bench in benches)):
         checks += vllm_checks(paths = paths)
     if "ifeval" in benches:
         problem = paths.get("ifeval_problem")
@@ -499,9 +534,9 @@ def vllm_checks(paths):
 
 def dry_run(paths, keys, include_ref, benches):
     print("#71 文本基准的本机驱动程序：演习（只检查和列出计划，不占用 GPU）")
-    for name in ("model_dir", "data_dir", "runs_root", "out_dir", "python_text", "python_ifeval", "gpqa_engine"):
+    for name in ("model_dir", "data_dir", "runs_root", "out_dir", "python_text", "python_ifeval", "engine", "gpqa_engine", "order"):
         print(f"  {name}: {paths[name]}")
-    if paths["gpqa_engine"] == "vllm":
+    if paths["gpqa_engine"] == "vllm" or paths["engine"] == "vllm":
         for name in ("gpqa_vllm_image", "gpqa_ref_lm", "gpqa_export_root", "gpqa_job_root", "gpqa_docker_home", "gpqa_keep_export", "gpqa_inflight_factor"):
             print(f"  {name}: {paths[name]}")
     print("\n输入检查")
@@ -519,6 +554,7 @@ def dry_run(paths, keys, include_ref, benches):
         keys = keys,
         include_ref = include_ref,
         benches = benches,
+        order = paths["order"],
     )
     plan_full = build_plan(
         paths = paths,
@@ -526,6 +562,7 @@ def dry_run(paths, keys, include_ref, benches):
         keys = keys,
         include_ref = include_ref,
         benches = benches,
+        order = paths["order"],
     )
     now_ids = {(entry["label"], entry["item"]) for entry in plan_now}
     print("\n计划（已有结果的项目跳过）")
@@ -579,6 +616,9 @@ def resolve_paths(args):
         "gpqa_vllm_image": args.gpqa_vllm_image,
         "gpqa_job_root": work / "tmp" / "T71c" / "vllm-job",
         "gpqa_docker_home": work / "tmp" / "T71c" / "vllm-home",
+        "engine": args.engine,
+        "order": args.order,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
     }
     paths["ifeval_problem"] = ifeval_python_problem(python = paths["python_ifeval"]) if "ifeval" in args.bench_list else None
     return paths
@@ -621,10 +661,23 @@ def parse_args(argv = None):
     )
     parser.add_argument(
         "--gpqa-engine",
-        default = "hf",
+        default = "vllm",
         choices = GPQA_ENGINES,
-        help = "GPQA 的生成引擎：hf 为 text_bench 的 transformers 分批生成，vllm 为 gpqa_vllm 的连续批处理",
+        help = "GPQA 的生成引擎：vllm（默认）为 gpqa_vllm 的连续批处理，hf 为 text_bench 的 transformers 分批生成",
     )
+    parser.add_argument(
+        "--engine",
+        default = "vllm",
+        choices = GPQA_ENGINES,
+        help = "简单基准（选择题与 IFEval）的引擎：vllm（默认，vLLM 的 docker 镜像）或 hf（transformers）",
+    )
+    parser.add_argument(
+        "--order",
+        default = None,
+        choices = ("item", "run"),
+        help = "item：先做全部模型的简单基准再做 GPQA；run：每个模型做完两项再做下一个（--engine vllm 时的默认）",
+    )
+    parser.add_argument("--gpu-memory-utilization", type = float, default = 0.9, help = "简单基准用 vLLM 时可用的显存比例")
     parser.add_argument("--gpqa-ref-lm", default = None, help = "vllm 引擎时参考模型的语言模型目录，默认 <工作目录>/data/T70/ref-lm")
     parser.add_argument("--gpqa-export-root", default = None, help = "vllm 引擎时各运行导出语言模型的上级目录，默认 <工作目录>/tmp/T71c/vllm-lm")
     parser.add_argument("--gpqa-keep-export", action = "store_true", help = "vllm 引擎时评测后保留导出的语言模型")
@@ -649,6 +702,8 @@ def parse_args(argv = None):
         parser.error(f"未知的基准：{unknown}，可选 {list(BENCH_CHOICES)}")
     if not args.dataset and not args.data_dir:
         parser.error("需要 --dataset（或环境变量 DATASET）或 --data-dir")
+    if args.order is None:
+        args.order = "run" if args.engine == "vllm" else "item"
     return args
 
 
@@ -681,8 +736,30 @@ def main(argv = None):
     benches = [bench for bench in args.bench_list if bench != "gpqa" or (paths["data_dir"] / DATA["gpqa"]).exists()]
     failures = []
     labels = ([REF] if include_ref else []) + keys
+    attempted = set()
+
+    def finish_label(entry, plan):
+        """一个运行的最后一项做完（或失败）后删除它的导出目录（简单基准用 vLLM 时导出后保留给 GPQA）。"""
+        if entry["label"] == REF or "vllm" not in (paths["engine"], paths["gpqa_engine"]):
+            return
+        remaining = [
+            other for other in plan
+            if other["label"] == entry["label"] and not other["marker"].exists() and (other["label"], other["item"]) not in attempted
+        ]
+        if not remaining:
+            from pipeline.eval.gpqa_vllm import EXPORT_MARKER, remove_marked
+
+            directory = paths["gpqa_export_root"] / entry["label"]
+            if directory.exists():
+                remove_marked(
+                    directory = directory,
+                    marker = EXPORT_MARKER,
+                    log = driver.log,
+                    what = "导出目录",
+                )
+
     try:
-        for item in ("simple", "gpqa"):
+        for item in (("simple", "gpqa") if args.order == "item" else (None,)):
             ready, missing = ready_runs(runs_root = paths["runs_root"], keys = keys)
             driver.set_status(runs_ready = list(ready), runs_missing = missing)
             plan = build_plan(
@@ -691,15 +768,19 @@ def main(argv = None):
                 keys = keys,
                 include_ref = include_ref,
                 benches = benches,
+                order = args.order,
             )
-            entries = [entry for entry in plan if entry["item"] == item]
-            pending = [entry["label"] for entry in entries if not entry["marker"].exists()]
-            driver.log(f"{item}：要做 {pending or '无'}；估计全部剩余 {driver.remaining_minutes(plan = plan) / 60:.1f} 小时")
+            entries = [entry for entry in plan if item is None or entry["item"] == item]
+            pending = [f"{entry['label']}:{entry['item']}" for entry in entries if not entry["marker"].exists()]
+            driver.log(f"{item or '全部项目'}：要做 {pending or '无'}；估计全部剩余 {driver.remaining_minutes(plan = plan) / 60:.1f} 小时")
             for entry in entries:
                 result = driver.run_entry(entry = entry, plan = plan)
+                attempted.add((entry["label"], entry["item"]))
                 if result not in ("ok", "skipped"):
                     failures.append(f"{entry['label']}:{entry['item']}")
-                if item == "simple" and "ifeval" in entry["benches"]:
+                if result != "skipped":
+                    finish_label(entry = entry, plan = plan)
+                if entry["item"] == "simple" and "ifeval" in entry["benches"]:
                     scored = score_ifeval(paths = paths, label = entry["label"], log = driver.log)
                     if scored not in ("ok", "skipped"):
                         driver.record(entry = dict(entry, item = "ifeval_score", log = paths["out_dir"] / entry["label"] / "ifeval_score.log"), result = scored)

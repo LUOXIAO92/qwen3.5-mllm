@@ -63,7 +63,21 @@ nvidia-smi 的已用显存，超过 --busy-mib（默认 3,000 MiB，例如 Windo
         >> <工作目录>/data/T71c/launch.out 2>&1 < /dev/null &
 
 停下：kill <status.json 中的 pid>（驱动程序结束正在运行的评测进程组后退出），之后重新运行即可续跑。
+
+评测引擎（--engine，默认 vllm）：用户 2026-11-27 决定本机评测一律用 vLLM 的 docker 镜像（把 GPU 用满、尽快出结果），
+不再用 transformers 的 generate。--engine vllm 时各项命令另加 --engine vllm 与 vLLM 的参数（见 pipeline/eval/vllm_host.py），
+提示、打分和输出文件不变，结果中记下 engine 与 vLLM 的设置；--engine hf 为原来的 transformers 版。vllm 时：
+
+- 语言模型：参考模型直接加载 --ref-lm（已导出的参考模型目录，默认 <工作目录>/data/T70/ref-lm）；每个运行在第一项评测时
+  导出到 --vllm-export-root/<标签>（约 3.8 GB，约 1 分钟），这个运行的各项评测共用，最后一项做完（或失败）后删除。默认顺序
+  因此为 --order run（一个运行做完全部项目再做下一个，同时只有一份导出）；--order item 时各运行的导出要留到它的最后一项。
+- 思考检查不做 sdpa 与 flash_attention_2 的冒烟比较（注意力由 vLLM 选择）。
+- 另做严格版指令探针（probe_strict：instruct_probe --instruction-set strict，转写、翻译、时间段三项，聊天格式，输出在
+  eval/<标签>/probe_strict/），与以前单独运行的严格版探针的命令相同；参考模型不做。
+- 任务目录（与容器交换提示、音频向量和结果）为 --vllm-job-root/<标签>-<项目>，做完删除；容器中的 HOME 为 --vllm-home
+  （编译缓存，各项共用）。FLEURS 的音频向量约 9 GB，在任务目录中，做完即删。
 """
+
 
 from __future__ import annotations
 
@@ -87,9 +101,16 @@ from pipeline.tokenizer_fix import TOKENIZER_CLASS
 REPO = Path(__file__).resolve().parents[2]
 REF = "ref"
 BASE = "c0"
-ITEM_ORDER = ("replay_gap", "lm_ppl", "fleurs", "probe", "think")
+ITEM_ORDER = ("replay_gap", "lm_ppl", "fleurs", "probe", "probe_strict", "think")
 # 各项评测用的 python：audio 为 --py-audio（soundfile），text 为 --py-text（fla、mm_assistant_mask）。
-PYTHON_OF_ITEM = {"fleurs": "audio", "probe": "audio", "lm_ppl": "text", "replay_gap": "text", "think": "text"}
+PYTHON_OF_ITEM = {"fleurs": "audio", "probe": "audio", "probe_strict": "audio", "lm_ppl": "text", "replay_gap": "text", "think": "text"}
+ENGINES = ("hf", "vllm")
+# 严格版指令探针（只在 --engine vllm 时加入计划）在 c_runs 的 probe 命令上换掉的参数。
+STRICT_PROBE_ARGS = ["--instruction-set", "strict", "--tasks", "transcribe", "translate", "timestamps"]
+# vLLM 引擎的估计用时（分钟，RTX 5090，2026-11-27 核对时实测，含启动容器与载入约 1 分钟），不含运行的导出（VLLM_EXPORT_MINUTES）。
+VLLM_MINUTES = {"replay_gap": 4.0, "lm_ppl": 1.5, "fleurs": 5.0, "probe": 4.0, "probe_strict": 3.0, "think": 3.5}
+# 运行的导出：从运行目录读 3.76 GB 的检查点（LM_LOAD_MINUTES）、写 3.8 GB，c0 实测共 41 秒
+VLLM_EXPORT_MINUTES = 1.0
 # 本机在 c_runs 的命令之后追加的参数。
 LOCAL_EXTRA = {"think": ["--fit-memory"]}
 CHECKPOINT = f"checkpoint-{c_runs.FULL_STEPS:07d}"
@@ -209,26 +230,79 @@ def discover_runs(runs_root, keys):
     return found
 
 
-def localize(items, python_audio, python_text, think_max_new, think_attention = c_runs.THINK_ATTENTION, load_minutes = 0.0):
+def localize(items, python_audio, python_text, think_max_new, think_attention = c_runs.THINK_ATTENTION, load_minutes = 0.0, vllm_args = None):
     """把 c_runs.eval_items 的项目换成本机的形式：[{item, command, marker, minutes}]。
 
     只换命令开头的 python 并追加 LOCAL_EXTRA，其余参数与 c_runs 相同。load_minutes 为每项从运行目录载入语言模型的用时。
+    vllm_args(item = 项目名) 不为 None 时（--engine vllm）追加它给出的 vLLM 参数，估计用时改用 VLLM_MINUTES。
     """
     pythons = {"audio": str(python_audio), "text": str(python_text)}
     localized = []
     for name, command, marker, _ in items:
-        minutes = local_minutes(
-            item = name,
-            think_max_new = think_max_new,
-            think_attention = think_attention,
-        )
+        if vllm_args is None:
+            minutes = local_minutes(
+                item = name,
+                think_max_new = think_max_new,
+                think_attention = think_attention,
+            ) + load_minutes
+            extra = []
+        else:
+            minutes = VLLM_MINUTES[name] * (think_max_new / c_runs.THINK_MAX_NEW if name == "think" else 1.0)
+            extra = vllm_args(item = name)
         localized.append({
             "item": name,
-            "command": [pythons[PYTHON_OF_ITEM[name]], *command[1:], *LOCAL_EXTRA.get(name, [])],
+            "command": [pythons[PYTHON_OF_ITEM[name]], *command[1:], *LOCAL_EXTRA.get(name, []), *extra],
             "marker": Path(marker),
-            "minutes": minutes + load_minutes,
+            "minutes": minutes,
         })
     return localized
+
+
+def strict_probe_item(items):
+    """由 c_runs 的 probe 项目得出严格版指令探针的项目（只用聊天格式，输出在 probe_strict/），没有 probe 时为 None。"""
+    for name, command, marker, minutes in items:
+        if name != "probe":
+            continue
+        command = list(command)
+        out = Path(command[command.index("--output-dir") + 1]).parent / "probe_strict"
+        command[command.index("--output-dir") + 1] = str(out)
+        start = command.index("--prompt-format")
+        end = start + 1
+        while end < len(command) and not command[end].startswith("--"):
+            end += 1
+        command[start:end] = ["--prompt-format", "chat"]
+        return ("probe_strict", command + STRICT_PROBE_ARGS, out / "summary.json", minutes)
+    return None
+
+
+def vllm_arguments(paths, label, run, item):
+    """--engine vllm 时一项评测追加的参数：参考模型直接加载 --ref-lm，运行导出到 <导出根目录>/<标签> 并保留（由驱动程序在这个
+    运行的最后一项之后删除）；任务目录为 <任务根目录>/<标签>-<项目>。"""
+    args = ["--engine", "vllm"]
+    if run is None:
+        args += ["--vllm-model", str(paths["ref_lm"])]
+    else:
+        args += ["--export-dir", str(paths["vllm_export_root"] / label), "--config-dir", str(paths["ref_lm"]), "--keep-export"]
+    return args + [
+        "--image", str(paths["vllm_image"]),
+        "--docker-home", str(paths["vllm_home"]),
+        "--gpu-memory-utilization", str(paths["gpu_memory_utilization"]),
+        "--job-dir", str(paths["vllm_job_root"] / f"{label}-{item}"),
+    ]
+
+
+def remove_export(paths, label, log):
+    """删除一个运行的导出目录（vllm_host 导出的，有 export.json 才删）。"""
+    from pipeline.eval.gpqa_vllm import EXPORT_MARKER, remove_marked
+
+    directory = Path(paths["vllm_export_root"]) / label
+    if directory.exists():
+        remove_marked(
+            directory = directory,
+            marker = EXPORT_MARKER,
+            log = log,
+            what = "导出目录",
+        )
 
 
 def label_items(label, run, paths):
@@ -238,6 +312,7 @@ def label_items(label, run, paths):
     c_runs.THINK_ATTENTION。
     """
     out = paths["eval_root"] / label
+    engine = paths.get("engine", "hf")
     think_attention = paths.get("think_attention") or c_runs.THINK_ATTENTION
     common = {
         "python": paths["python_audio"],
@@ -262,6 +337,19 @@ def label_items(label, run, paths):
             language_model = checkpoint / "language_model.safetensors",
             **common,
         )
+        strict = strict_probe_item(items = items) if engine == "vllm" else None
+        if strict is not None:
+            position = [name for name, _, _, _ in items].index("probe") + 1
+            items = items[:position] + [strict] + items[position:]
+
+    def vllm_args(item):
+        return vllm_arguments(
+            paths = paths,
+            label = label,
+            run = run,
+            item = item,
+        )
+
     localized = localize(
         items = items,
         python_audio = paths["python_audio"],
@@ -269,7 +357,11 @@ def label_items(label, run, paths):
         think_max_new = paths["think_max_new"],
         think_attention = think_attention,
         load_minutes = 0.0 if run is None else LM_LOAD_MINUTES,
+        vllm_args = vllm_args if engine == "vllm" else None,
     )
+    if engine == "vllm" and run is not None and localized:
+        # 运行的语言模型在第一项评测时导出，后面的项目共用
+        localized[0]["minutes"] += VLLM_EXPORT_MINUTES + LM_LOAD_MINUTES
     for entry in localized:
         entry["label"] = label
         entry["log"] = out / f"{entry['item']}.log"
@@ -331,8 +423,32 @@ def think_attentions(eval_root):
         return found
     for directory in sorted(root.iterdir()):
         summary = load_json(path = directory / "think" / "summary.json")
-        if summary is not None:
+        # vLLM 引擎的结果不经过这项选择（注意力由 vLLM 选择）
+        if summary is not None and summary.get("engine") != "vllm":
             found[directory.name] = summary.get("attn_implementation_used", "sdpa")
+    return found
+
+
+def engines_used(eval_root, labels):
+    """各标签各项结果所用的引擎：{标签: {项目: hf 或 vllm}}（结果中没有 engine 的是 transformers 版）。"""
+    files = {
+        "replay_gap": ("replay_gap", "summary.json"),
+        "lm_ppl": ("lm_ppl.json",),
+        "fleurs": ("fleurs", "summary.json"),
+        "probe": ("probe", "summary.json"),
+        "probe_strict": ("probe_strict", "summary.json"),
+        "think": ("think", "summary.json"),
+    }
+    found = {}
+    for label in labels:
+        entry = {}
+        for item, parts in files.items():
+            data = load_json(path = Path(eval_root, label, *parts))
+            if data is not None:
+                engine = data.get("engine") or (data.get("config") or {}).get("engine") or "hf"
+                entry[item] = engine
+        if entry:
+            found[label] = entry
     return found
 
 
@@ -578,6 +694,14 @@ def write_summary(paths, runs, keys, with_report, log):
             "思考检查中语言模型全注意力层的实现：" + "，".join(f"{label} {attentions[label]}" for label in labels if label in attentions),
             "",
         ]
+    engines = engines_used(eval_root = eval_root, labels = labels)
+    kinds = sorted({engine for entry in engines.values() for engine in entry.values()})
+    if kinds:
+        if len(kinds) == 1:
+            lines += [f"评测引擎：全部为 {kinds[0]}（hf 为 transformers，vllm 为 vLLM 的 docker 镜像）", ""]
+        else:
+            mixed = "；".join(f"{label} " + "、".join(f"{item} {engine}" for item, engine in entry.items()) for label, entry in engines.items())
+            lines += [f"评测引擎（hf 为 transformers，vllm 为 vLLM；两种引擎的数值只在内核的舍入上有差别）：{mixed}", ""]
     body, table = c_runs.summary_tables(labels = labels, eval_root = eval_root, runs = train)
     lines += body
     tables = load_json(path = summary_dir / "tables.json") or {}
@@ -585,7 +709,7 @@ def write_summary(paths, runs, keys, with_report, log):
     if (summary_dir / "tables.md").exists():
         lines += ["", "## FLEURS test（report）", "", (summary_dir / "tables.md").read_text(encoding = "utf-8")]
     (summary_dir / "summary.md").write_text(data = "\n".join(lines) + "\n", encoding = "utf-8")
-    data = {"labels": labels, "fleurs_mean": tables.get("fleurs_mean"), "think_attention": attentions, "runs": table}
+    data = {"labels": labels, "fleurs_mean": tables.get("fleurs_mean"), "think_attention": attentions, "engines": engines, "runs": table}
     (summary_dir / "summary.json").write_text(
         data = json.dumps(obj = data, ensure_ascii = False, indent = 1),
         encoding = "utf-8",
@@ -834,6 +958,30 @@ def check_inputs(paths, check_python = True):
             checks.append((ok, f"python（{'、'.join(items)}）{python}：{detail}"))
     lock = Path(paths["gpu_lock"])
     checks.append((lock.parent.exists(), f"GPU 锁 {lock}" + ("" if lock.exists() else "（还不存在，运行时创建）")))
+    if paths.get("engine") == "vllm":
+        checks += vllm_checks(paths = paths)
+    return checks
+
+
+def vllm_checks(paths):
+    """--engine vllm 的输入检查：参考模型的语言模型目录（分词器已按 #77 修正）与 docker 镜像是否在本机（不启动容器）。"""
+    ref_lm = Path(paths["ref_lm"])
+    tokenizer_class = (load_json(path = ref_lm / "tokenizer_config.json") or {}).get("tokenizer_class")
+    ok = (ref_lm / "model.safetensors").exists() and (ref_lm / "config.json").exists() and tokenizer_class == TOKENIZER_CLASS
+    checks = [(ok, f"参考模型的语言模型目录（vLLM）{ref_lm}：分词器 {tokenizer_class}（应为 {TOKENIZER_CLASS}）")]
+    try:
+        result = subprocess.run(
+            args = ["docker", "image", "inspect", "--format", "{{.Id}}", str(paths["vllm_image"])],
+            capture_output = True,
+            text = True,
+            check = False,
+        )
+        ok = result.returncode == 0
+        detail = result.stdout.strip()[:19] if ok else (result.stderr.strip().splitlines() or ["失败"])[-1][:200]
+    except FileNotFoundError:
+        ok = False
+        detail = "没有 docker 命令"
+    checks.append((ok, f"vLLM 镜像 {paths['vllm_image']}：{detail}"))
     return checks
 
 
@@ -843,6 +991,11 @@ def dry_run(paths, keys, order, include_ref, think_attention = "auto"):
     for name in ("model_dir", "fleurs", "replay", "runs_root", "out_dir", "python_audio", "python_text"):
         print(f"  {name}: {paths[name]}")
     print(f"  思考检查的生成上限：{paths['think_max_new']}")
+    print(f"  评测引擎：{paths['engine']}")
+    if paths["engine"] == "vllm":
+        for name in ("ref_lm", "vllm_image", "vllm_export_root", "vllm_job_root", "vllm_home", "gpu_memory_utilization"):
+            print(f"  {name}: {paths[name]}")
+        think_attention = "flash_attention_2" if think_attention == "auto" else think_attention
     planned = planned_think_attention(requested = think_attention, paths = paths)
     if planned is None:
         paths["think_attention"] = c_runs.THINK_ATTENTION
@@ -953,6 +1106,13 @@ def resolve_paths(args):
         "think_max_new": args.think_max_new,
         # 思考检查的注意力实现，main 或 dry_run 按冒烟比较或 --think-attention 填入
         "think_attention": None,
+        "engine": args.engine,
+        "ref_lm": Path(args.ref_lm) if args.ref_lm else work / "data" / "T70" / "ref-lm",
+        "vllm_image": args.vllm_image,
+        "vllm_export_root": Path(args.vllm_export_root) if args.vllm_export_root else work / "tmp" / "T71c" / "vllm-lm",
+        "vllm_job_root": Path(args.vllm_job_root) if args.vllm_job_root else work / "tmp" / "T71c" / "vllm-job",
+        "vllm_home": Path(args.vllm_home) if args.vllm_home else work / "tmp" / "T71c" / "vllm-home",
+        "gpu_memory_utilization": args.gpu_memory_utilization,
     }
 
 
@@ -976,10 +1136,17 @@ def parse_args(argv = None):
     parser.add_argument("--no-ref", action = "store_true", help = "不评测参考模型")
     parser.add_argument(
         "--order",
-        default = "item",
+        default = None,
         choices = ("item", "run"),
-        help = "item：按评测项目排列（默认）；run：与 Colab 相同",
+        help = "item：按评测项目排列（--engine hf 时的默认）；run：一个运行做完全部项目再做下一个（--engine vllm 时的默认）",
     )
+    parser.add_argument("--engine", default = "vllm", choices = ENGINES, help = "评测引擎：vllm（默认，vLLM 的 docker 镜像）或 hf（transformers）")
+    parser.add_argument("--ref-lm", default = None, help = "vllm 时参考模型的语言模型目录，默认 <工作目录>/data/T70/ref-lm")
+    parser.add_argument("--vllm-image", default = "vllm/vllm-openai:nightly-x86_64", help = "vllm 时的 docker 镜像")
+    parser.add_argument("--vllm-export-root", default = None, help = "vllm 时各运行导出语言模型的上级目录，默认 <工作目录>/tmp/T71c/vllm-lm")
+    parser.add_argument("--vllm-job-root", default = None, help = "vllm 时任务目录的上级，默认 <工作目录>/tmp/T71c/vllm-job")
+    parser.add_argument("--vllm-home", default = None, help = "vllm 时容器中的 HOME（编译缓存），默认 <工作目录>/tmp/T71c/vllm-home")
+    parser.add_argument("--gpu-memory-utilization", type = float, default = 0.9, help = "vllm 时 vLLM 可用的显存比例")
     parser.add_argument(
         "--think-max-new",
         type = int,
@@ -1012,6 +1179,8 @@ def parse_args(argv = None):
         parser.error(f"未知的运行：{unknown}，可选 {list(c_runs.ALL_RUNS)}")
     if not args.dataset and not args.replay_dir:
         parser.error("需要 --dataset（或环境变量 DATASET）或 --replay-dir")
+    if args.order is None:
+        args.order = "run" if args.engine == "vllm" else "item"
     args.keys = keys
     return args
 
@@ -1047,7 +1216,7 @@ def main(argv = None):
         runs_root = str(paths["runs_root"]),
     )
     driver.log(
-        f"开始（pid {os.getpid()}，顺序 {args.order}，运行 {keys}，参考模型 {'评测' if include_ref else '不评测'}，"
+        f"开始（pid {os.getpid()}，引擎 {args.engine}，顺序 {args.order}，运行 {keys}，参考模型 {'评测' if include_ref else '不评测'}，"
         f"运行目录 {paths['runs_root']}）"
     )
     failed_inputs = [text for ok, text in check_inputs(paths = paths, check_python = True) if not ok]
@@ -1082,17 +1251,37 @@ def main(argv = None):
             log = driver.log,
         )
 
+    attempted = set()
+
+    def finish_label(entry, plan):
+        """vllm：一个运行的最后一项做完（或失败）后删除它的导出目录。"""
+        if paths["engine"] != "vllm" or entry["label"] == REF:
+            return
+        remaining = [
+            other for other in plan
+            if other["label"] == entry["label"] and not other["marker"].exists() and (other["label"], other["item"]) not in attempted
+        ]
+        if not remaining:
+            remove_export(paths = paths, label = entry["label"], log = driver.log)
+
     def run(entries, plan, runs):
         for entry in entries:
             result = driver.run_entry(entry = entry, plan = plan)
+            attempted.add((entry["label"], entry["item"]))
             if result not in ("ok", "skipped"):
                 failures.append(f"{entry['label']}:{entry['item']}")
+            if result != "skipped":
+                finish_label(entry = entry, plan = plan)
             if result == "ok":
                 # FLEURS 的 report 要重新打分全部运行，只在 FLEURS 做完一项时重算
                 summarize(runs = runs, with_report = entry["item"] == "fleurs")
 
     def decide_think_attention():
-        """思考检查的注意力实现：能直接确定时用它，否则先做冒烟比较；比较没有结论时用 sdpa。"""
+        """思考检查的注意力实现：能直接确定时用它，否则先做冒烟比较；比较没有结论时用 sdpa。vllm 时不需要。"""
+        if paths["engine"] == "vllm":
+            paths["think_attention"] = c_runs.THINK_ATTENTION
+            driver.set_status(think_attention = {"use": "vllm", "reason": "--engine vllm：注意力由 vLLM 选择"})
+            return
         decided = planned_think_attention(requested = args.think_attention, paths = paths)
         if decided is None:
             entry = smoke_entry(paths = paths)

@@ -439,6 +439,7 @@ def write_inputs(root):
         "--py-audio", str(python),
         "--py-text", str(python),
         "--gpu-lock", str(root / "gpu.lock"),
+        "--engine", "hf",
     ]
 
 

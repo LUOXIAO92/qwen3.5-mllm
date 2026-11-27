@@ -339,6 +339,8 @@ def write_inputs(root):
         "--py-text", str(bin_dir / "python"),
         "--py-ifeval", str(bin_dir / "python-ifeval"),
         "--gpu-lock", str(root / "gpu.lock"),
+        "--engine", "hf",
+        "--gpqa-engine", "hf",
     ]
 
 
