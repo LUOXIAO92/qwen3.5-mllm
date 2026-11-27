@@ -11,7 +11,9 @@
 - 明确要求不以「你是一位专家」开头，只输出系统提示本身，不加标题和解释；
 - 一半的元指令（每种语言内各半，`meta_rule`）在措辞之后再加一句 RULE，要求系统提示至少写一条能从回答中检查的规则（字数或
   句数上限、规定格式、回答语言、固定的开头或结尾句）。第 1 轮检查（每种语言 40 条）中只有 format 措辞稳定写出这类规则，
-  人工判读 72 条中只有 15 条带可验证约束，低于三分之一，所以第 2 轮加了这一句。
+  人工判读 72 条中只有 15 条带可验证约束，低于三分之一，所以第 2 轮加了这一句；
+- 结尾要求之前另有一句 ADDRESS，要求写成对助手的指示，不写成问候或给用户的话（第 3 轮加入：第 2 轮约一成系统提示是
+  写给用户的问候、第一人称自述或「用户想要一个……的提示」一类的说明）。
 
 元指令只是一小段手写的提示，系统提示、用户消息和回答都由参考模型写出，不用任何外部数据。元指令这一轮（用户轮为元指令，
 助手轮按 `enable_thinking = False` 打开）只用于生成，不进入保存的训练序列：保存的样本就是
@@ -19,8 +21,9 @@
 
 生成时的筛选（`generate --resample-system/--resample-user`，finalize 再检查一遍）：
 
-- 系统提示为空、少于 8 个字母（例如只有「7/10」）、含 `<think>` / `</think>`、以代码围栏开头，或第一行写着「系统提示」
-  之类的标签（多是「这是一段系统提示：」一类的说明），见 `system_problem`；
+- 系统提示为空、内容太少（按文字加权的字母数不足 20，汉字和假名每个算 3：「7/10」「THK_DRIVING_01」「BELUM BUKA」
+  一类的碎片）、含 `<think>` / `</think>`、以代码围栏开头，或第一行写着「系统提示」之类的标签（多是「这是一段系统提示：」
+  一类的说明），见 `system_problem`；
 - 用户消息为空、含 `<think>` / `</think>`（模型把助手的思考写进了用户轮），或抄写系统提示（用户消息至少 20 个字符，并且是
   系统提示的一部分，或其中 60% 以上的 5 字符片段出现在系统提示中），见 `user_problem`。
 
@@ -31,7 +34,7 @@ import random
 import re
 import unicodedata
 
-META_VERSION = "2"
+META_VERSION = "3"
 LANGS = ("zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it", "id", "ms", "th", "vi", "fil", "ar", "tr", "fa")
 KINDS = ("persona", "task", "format", "style", "safety", "tutor", "organization", "short")
 DOMAINS = (
@@ -504,6 +507,28 @@ RULE = {
     "fa": "دست کم یک قاعده قابل بررسی برای پاسخ ها بگذار، مثلا حداکثر تعداد کلمه یا جمله، قالبی اجباری (فهرست، جدول یا مراحل شماره دار)، زبان پاسخ، یا جمله ای ثابت در آغاز یا پایان پاسخ.",
 }
 
+# 每条元指令在结尾要求之前加上这一句：写成对助手的指示（第 3 轮加入）
+ADDRESS = {
+    "zh": "以对助手下达指示的方式来写，不要写成问候语或写给用户的话。",
+    "en": "Write it as instructions addressed to the assistant, not as a greeting or a message to the user.",
+    "ja": "アシスタントへの指示として書き、挨拶やユーザーへのメッセージにはしないでください。",
+    "ko": "어시스턴트에게 주는 지시문으로 작성하고, 인사말이나 사용자에게 보내는 메시지로 쓰지 마세요.",
+    "de": "Formuliere ihn als Anweisungen an den Assistenten, nicht als Begrüßung oder als Nachricht an die Nutzer.",
+    "fr": "Rédige-le comme des instructions adressées à l'assistant, pas comme un message de bienvenue ni comme un message à l'utilisateur.",
+    "ru": "Пиши его как инструкции, обращённые к ассистенту; не пиши приветствие или сообщение пользователю.",
+    "pt": "Escreva-o como instruções dirigidas ao assistente, e não como uma saudação ou uma mensagem ao usuário.",
+    "es": "Escríbelo como instrucciones dirigidas al asistente, no como un saludo ni como un mensaje al usuario.",
+    "it": "Scrivilo come istruzioni rivolte all'assistente, non come un saluto o un messaggio all'utente.",
+    "id": "Tulis sebagai instruksi yang ditujukan kepada asisten, bukan sebagai salam atau pesan kepada pengguna.",
+    "ms": "Tulis sebagai arahan kepada pembantu AI, bukan sebagai ucapan salam atau mesej kepada pengguna.",
+    "th": "เขียนเป็นคำสั่งที่บอกผู้ช่วย ไม่ใช่คำทักทายหรือข้อความถึงผู้ใช้",
+    "vi": "Hãy viết dưới dạng chỉ dẫn dành cho trợ lý, không phải lời chào hay tin nhắn gửi người dùng.",
+    "fil": "Isulat ito bilang mga tagubilin para sa assistant, hindi bilang pagbati o mensahe sa user.",
+    "ar": "اكتبه على شكل تعليمات موجهة إلى المساعد، لا على شكل تحية أو رسالة إلى المستخدم.",
+    "tr": "Bunu asistana verilen talimatlar olarak yaz; selamlama ya da kullanıcıya mesaj olarak yazma.",
+    "fa": "آن را به صورت دستورهایی خطاب به دستیار بنویس، نه به صورت خوشامدگویی یا پیامی به کاربر.",
+}
+
 # 系统提示第一行中出现这些词（不区分大小写）时，多半是「这是一段系统提示：」一类的说明或标题，不是系统提示本身
 SYSTEM_PROMPT_LABELS = (
     "system prompt",
@@ -534,16 +559,16 @@ SYSTEM_PROMPT_LABELS = (
     "پرامپت سیستم",
 )
 MIN_COPY_CHARS = 20
-# 系统提示至少要有这么多个字母（各种文字的字母都算），否则只是「7/10」一类的碎片
-MIN_SYSTEM_LETTERS = 8
+# 系统提示按文字加权的字母数至少要有这么多（汉字和假名每个算 3，其他文字的字母算 1），否则只是「7/10」「BELUM BUKA」一类的碎片
+MIN_SYSTEM_LETTERS = 20
 COPY_SHARE = 0.6
 
 
 def meta_text(lang, kind, domain, rule = False):
-    """一条元指令：主题行、措辞、（rule 为真时）可检查规则的要求、结尾要求，各占一行。"""
+    """一条元指令：主题行、措辞、（rule 为真时）可检查规则的要求、写成对助手的指示、结尾要求，各占一行。"""
     text = TEXT[lang]
     topic = text["topic"].format(domain = text["domains"][DOMAINS.index(domain)])
-    lines = [topic, text["kinds"][kind]] + ([RULE[lang]] if rule else []) + [text["suffix"]]
+    lines = [topic, text["kinds"][kind]] + ([RULE[lang]] if rule else []) + [ADDRESS[lang], text["suffix"]]
     return "\n".join(lines)
 
 
@@ -582,12 +607,24 @@ def shingles(text, n = 5):
     return {text[start: start + n] for start in range(len(text) - n + 1)}
 
 
+def letter_weight(text):
+    """按文字加权的字母数：汉字（含扩展区与兼容区）和假名每个算 3，其他字母算 1。"""
+    total = 0
+    for char in text:
+        if not char.isalpha():
+            continue
+        code = ord(char)
+        cjk = 0x3040 <= code <= 0x30FF or 0x3400 <= code <= 0x9FFF or 0xF900 <= code <= 0xFAFF or 0x20000 <= code <= 0x2FFFF
+        total += 3 if cjk else 1
+    return total
+
+
 def system_problem(text):
     """系统提示不能用的原因（没有问题时返回 None）：empty_system、fragment、think_tag、special_token、code_fence、meta_label。"""
     stripped = (text or "").strip()
     if not stripped:
         return "empty_system"
-    if sum(char.isalpha() for char in stripped) < MIN_SYSTEM_LETTERS:
+    if letter_weight(text = stripped) < MIN_SYSTEM_LETTERS:
         return "fragment"
     if "<think>" in stripped or "</think>" in stripped:
         return "think_tag"
