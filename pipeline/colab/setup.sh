@@ -14,6 +14,9 @@
 #   EVAL_TAR        dev 清单 tar（bundle.py，--root <本机工作目录>），默认 $DRIVE_DIR/upload/fleurs-dev.tar
 #   REPLAY_TEXT_TAR、REPLAY_TEACHER_TAR  #71 C 组的回放数据（路径相对 $DATASET），默认 $DRIVE_DIR/upload/ 下的
 #                   replay-noloop-text.tar、replay-noloop-teacher.tar；不存在时跳过
+#   REPLAY_SYS_TEXT_TAR、REPLAY_SYS_TEACHER_TAR  带系统提示的两组回放 free_sys_chat、free_sys_chat_think（#71，元指令写的
+#                   系统提示，路径相对 $DATASET），默认 $DRIVE_DIR/upload/ 下的 replay-sys-text.tar、replay-sys-teacher.tar；
+#                   不存在时跳过
 #   TORCH_INDEX     PyTorch 的包索引，默认 https://download.pytorch.org/whl/cu130
 set -euo pipefail
 : "${DRIVE_DIR:?请设置 DRIVE_DIR（Google Drive 上本项目的目录）}"
@@ -28,6 +31,8 @@ noise_tar="${NOISE_TAR:-$upload/noise-v2.tar}"
 eval_tar="${EVAL_TAR:-$upload/fleurs-dev.tar}"
 replay_text_tar="${REPLAY_TEXT_TAR:-$upload/replay-noloop-text.tar}"
 replay_teacher_tar="${REPLAY_TEACHER_TAR:-$upload/replay-noloop-teacher.tar}"
+replay_sys_text_tar="${REPLAY_SYS_TEXT_TAR:-$upload/replay-sys-text.tar}"
+replay_sys_teacher_tar="${REPLAY_SYS_TEACHER_TAR:-$upload/replay-sys-teacher.tar}"
 torch_index="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
 venv="$work/envs/mllm-train"
 requirements="$repo/pipeline/colab/requirements-train.txt"
@@ -116,6 +121,17 @@ if ! done_before replay-teacher && [ -f "$replay_teacher_tar" ]; then
   step "解开回放的 top-32 $replay_teacher_tar"
   tar -C "$DATASET" -xf "$replay_teacher_tar"
   mark replay-teacher
+fi
+# 5c. 带系统提示的两组回放（#71）：同样解到 $DATASET/text/qwen3.5-asr/replay-noloop/ 下，与上面的各组并列
+if ! done_before replay-sys-text && [ -f "$replay_sys_text_tar" ]; then
+  step "解开带系统提示的回放文本 $replay_sys_text_tar"
+  tar -C "$DATASET" -xf "$replay_sys_text_tar"
+  mark replay-sys-text
+fi
+if ! done_before replay-sys-teacher && [ -f "$replay_sys_teacher_tar" ]; then
+  step "解开带系统提示的回放的 top-32 $replay_sys_teacher_tar"
+  tar -C "$DATASET" -xf "$replay_sys_teacher_tar"
+  mark replay-sys-teacher
 fi
 
 # 6. 融合模型（不在仓库中）复制到仓库根目录

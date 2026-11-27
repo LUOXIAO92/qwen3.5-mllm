@@ -30,6 +30,15 @@ free_sys_chat_think）中没有写出 `</think>` 的样本（含用户消息没�
 - `code_like`：文本像代码（含代码围栏，或括号、等号、分号等符号占非空白字符的 8% 以上）
 
 语言字段 `lang` 由 `langid` 一步补上。
+
+带系统提示的两组另做两项检查（`meta_prompts.py`，生成时 `--resample-system/--resample-user` 已按同样的规则重新采样，这里通常
+为 0 条）：系统提示不能用（空、含 `<think>`、以代码围栏开头、第一行是「系统提示」之类的标签）时 `drop_reason` 为对应原因；
+用户消息为空、含思考标签或抄写系统提示时为 `empty_user`、`user_think_tag`、`copied_user`。按元指令写系统提示的样本另记
+`meta_lang`、`meta_kind`、`meta_domain`、`meta_rule`、`meta_version`（取自提示清单），生成时重新采样过的记 `resampled`。
+
+`--lang-quota eval=17,train=611,free_sys_chat_think:train=111` 时，带元指令的样本按提示清单的顺序，每种元指令语言（`meta_lang`）
+只用前这么多条保留的样本，多出的 `keep` 为假、`drop_reason` 为 `lang_quota`。提示清单按语言交错排列，样本是否保留与长度无关，
+所以这样截取不改变长度分布。
 """
 
 import argparse
@@ -43,6 +52,7 @@ import numpy as np
 
 from pipeline.replay.degeneration import gzip_ratio, loop_onset, max_window_repeat, near_loop_onset, ngram_repeat_rate
 from pipeline.replay.groups import ALL_GROUPS, SELF_SYSTEM_GROUPS, SPLITS, THINK_GROUPS, self_roles
+from pipeline.replay.meta_prompts import system_problem, user_problem
 from pipeline.replay.store import ShardReader, read_all_records
 from pipeline.tokenizer_fix import check_tokenizer
 
@@ -86,6 +96,10 @@ def prompt_meta(row, prompt, group):
         for key in ("prefix_id", "source", "source_license", "source_ref", "doc_id", "prefix_text", "prefix_tokens"):
             row[key] = prompt[key]
         row["doc_lang"] = prompt["lang"]
+    if group in SELF_SYSTEM_GROUPS:
+        for key in ("meta_lang", "meta_kind", "meta_domain", "meta_rule", "meta_version"):
+            if key in prompt:
+                row[key] = prompt[key]
     if group == "prompt_chat":
         for key in ("part", "kind", "source", "source_license", "source_lang", "source_ref", "user_text", "user_tokens", "context_tokens"):
             if key in prompt:
@@ -111,6 +125,8 @@ def process(job):
         row["status"] = record["status"]
         if record.get("origin"):
             row["origin"] = record["origin"]
+    if record.get("resampled"):
+        row["resampled"] = record["resampled"]
     if record["status"] == "loop":
         # 生成时发现循环、整条丢弃的样本（generate --drop-loops 或 noloop 导入）：只有元数据
         row.update(
@@ -201,6 +217,11 @@ def process(job):
         if group in SELF_SYSTEM_GROUPS and row["keep"] and not has_assistant:
             # 系统提示或用户消息没有正常结束，没有助手回答，也就没有计损失的 token：不用
             row.update(keep = False, drop_reason = record["status"])
+        if group in SELF_SYSTEM_GROUPS and row["keep"]:
+            # 系统提示与用户消息的检查（与生成时重新采样的规则相同）
+            problem = system_problem(text = row["system_text"]) or user_problem(system = row["system_text"], user = row["user_text"])
+            if problem is not None:
+                row.update(keep = False, drop_reason = problem)
         if group in THINK_GROUPS and has_assistant:
             # 思考模式：助手回答依次是思考、</think>、正式回答；记录 </think> 的位置（没有写出时为 None）
             answer_ids = list(map(int, kept_arrays[-1]))
@@ -232,7 +253,29 @@ def process(job):
     return row
 
 
-def finalize_split(replay_dir, group, split, model_dir, jobs, no_filter = False, drop_loops = False):
+def apply_lang_quota(rows, quota):
+    """带元指令的样本按 prompt_index 的顺序，每种 meta_lang 只用前 quota 条保留的样本，其余记为 lang_quota。"""
+    used = Counter()
+    for row in sorted(rows, key = lambda item: item["prompt_index"]):
+        lang = row.get("meta_lang")
+        if lang is None or not row["keep"]:
+            continue
+        if used[lang] >= quota:
+            row.update(keep = False, drop_reason = "lang_quota")
+            continue
+        used[lang] += 1
+    return dict(used)
+
+
+def parse_quota(text, group, split):
+    """「划分=条数」或「组:划分=条数」的列表中，这个（组, 划分）的条数；没有给出时为 None。"""
+    if not text:
+        return None
+    values = {key: int(value) for key, value in (item.split("=") for item in text.split(",") if item)}
+    return values.get(f"{group}:{split}", values.get(split))
+
+
+def finalize_split(replay_dir, group, split, model_dir, jobs, no_filter = False, drop_loops = False, lang_quota = None):
     split_dir = Path(replay_dir) / group / split
     raw_dir = split_dir / "raw"
     if not raw_dir.exists():
@@ -263,6 +306,9 @@ def finalize_split(replay_dir, group, split, model_dir, jobs, no_filter = False,
     for row in rows:
         row["group"] = group
         row["split"] = split
+    quota_used = None
+    if lang_quota is not None and group in SELF_SYSTEM_GROUPS:
+        quota_used = apply_lang_quota(rows = rows, quota = lang_quota)
     tmp = split_dir / "samples.jsonl.tmp"
     with open(tmp, "w", encoding = "utf-8") as handle:
         for row in rows:
@@ -279,6 +325,8 @@ def finalize_split(replay_dir, group, split, model_dir, jobs, no_filter = False,
         "gen_tokens": sum(row["n_gen"] for row in rows),
         "kept_tokens": sum(row["n_kept"] for row in kept),
     }
+    if quota_used is not None:
+        summary["kept_by_meta_lang"] = quota_used
     print(f"{group}/{split}: {summary}", flush = True)
     return summary
 
@@ -292,6 +340,11 @@ def main():
     parser.add_argument("--jobs", type = int, default = 8)
     parser.add_argument("--no-filter", action = "store_true", help = "不截断、不丢弃，循环只作为元数据")
     parser.add_argument("--drop-loops", action = "store_true", help = "不截断；有循环的样本整条不用（generate --drop-loops 的目录）")
+    parser.add_argument(
+        "--lang-quota",
+        default = None,
+        help = "带元指令的组每种语言最多保留的样本数，例如 eval=17,train=611,free_sys_chat_think:train=111（按提示清单的顺序取）",
+    )
     args = parser.parse_args()
     for group in args.groups:
         for split in args.splits:
@@ -303,6 +356,7 @@ def main():
                 jobs = args.jobs,
                 no_filter = args.no_filter,
                 drop_loops = args.drop_loops,
+                lang_quota = parse_quota(text = args.lang_quota, group = group, split = split),
             )
 
 

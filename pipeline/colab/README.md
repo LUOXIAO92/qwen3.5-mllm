@@ -94,6 +94,7 @@ Drive 上的目录（`$DRIVE_DIR` 是 Drive 上本项目的目录）：
 | `$DRIVE_DIR/upload/qwen3.5-2b-mllm/` | 全量微调用的 2B 融合模型目录（约 5.7 GB），见单元格 7 的全量微调变体 |
 | `$DRIVE_DIR/upload/v2b-2b-checkpoint-0005000/` | 全量微调的起点：本机 `<工作目录>/data/T61/v2b-2b/checkpoint-0005000/` 整个目录（`projector.safetensors` 与 `projector.json`，约 34 MB） |
 | `$DRIVE_DIR/upload/replay-noloop-text.tar`、`replay-noloop-teacher.tar` | #71 C 组的自生成回放数据（文本约 1.4 GB、top-32 约 17 GB），见单元格 7 的 #71 C 组 |
+| `$DRIVE_DIR/upload/replay-sys-text.tar`、`replay-sys-teacher.tar` | #71 带系统提示的两组回放 free_sys_chat、free_sys_chat_think（系统提示由参考模型按元指令写出；文本约 0.34 GB、top-32 约 4.5 GB），打包方法见单元格 7 的 #71 C 组 |
 | `$DRIVE_DIR/shards/v2b-e0/` | 索引和全部分片（`$SHARDS_DRIVE`） |
 | `$DRIVE_DIR/runs/v2b-4b/` | 训练输出目录：本机训练的输出目录复制过来，不含 `dataset/` |
 | `$DRIVE_DIR/wheels/` | 安装包缓存，第一次运行 `setup.sh` 时生成 |
@@ -288,7 +289,20 @@ tar -cf replay-noloop-text.tar --exclude='*/teacher' --exclude='text/qwen3.5-asr
 tar -cf replay-noloop-teacher.tar text/qwen3.5-asr/replay-noloop/*/*/teacher
 ```
 
-`setup.sh` 看到这两个文件就解到 `$DATASET` 下与本机相同的位置（文本约 1.4 GB、top-32 约 17 GB，Drive 上约 35–50 MB/s 时复制约 6–8 分钟，本地盘多占约 19 GB）；没有时跳过，不影响其他训练。单元格 4 运行 `setup.sh` 时与全量微调变体一样让它复制 2B 模型（`MODEL_NAME=qwen3.5-2b-mllm`），之后准备 FLEURS test（`python -m pipeline.eval.fleurs_prepare`，放在 `$WORK_DIR/data/T02`，同 #71 第一轮）。单元格 5、6 不用运行（驱动程序自己为每个运行准备分片窗口，领先 1 万步、预算 80 GB），在后台启动驱动程序：
+带系统提示的两组（free_sys_chat、free_sys_chat_think，`pipeline/README.md` 第 9 节）放在 F 盘，本机 `$DATASET` 下的两个组目录是指向
+F 盘的符号链接，打包时从 F 盘的数据集目录开始（路径同样相对 `$DATASET`），另成两个 tar：
+
+```bash
+cd /mnt/f/models/qwen3.5-asr/dataset
+tar -cf upload/replay-sys-text.tar --exclude='*/teacher' \
+    text/qwen3.5-asr/replay-noloop/free_sys_chat text/qwen3.5-asr/replay-noloop/free_sys_chat_think
+tar -cf upload/replay-sys-teacher.tar text/qwen3.5-asr/replay-noloop/free_sys_chat*/*/teacher
+```
+
+`setup.sh` 看到 `replay-sys-text.tar`、`replay-sys-teacher.tar` 时同样解到 `$DATASET` 下与本机相同的位置（`REPLAY_SYS_TEXT_TAR`、
+`REPLAY_SYS_TEACHER_TAR` 可以改路径），没有时跳过。
+
+`setup.sh` 看到 `replay-noloop-text.tar`、`replay-noloop-teacher.tar` 就解到 `$DATASET` 下与本机相同的位置（文本约 1.4 GB、top-32 约 17 GB，Drive 上约 35–50 MB/s 时复制约 6–8 分钟，本地盘多占约 19 GB）；没有时跳过，不影响其他训练。单元格 4 运行 `setup.sh` 时与全量微调变体一样让它复制 2B 模型（`MODEL_NAME=qwen3.5-2b-mllm`），之后准备 FLEURS test（`python -m pipeline.eval.fleurs_prepare`，放在 `$WORK_DIR/data/T02`，同 #71 第一轮）。单元格 5、6 不用运行（驱动程序自己为每个运行准备分片窗口，领先 1 万步、预算 80 GB），在后台启动驱动程序：
 
 ```python
 import os
