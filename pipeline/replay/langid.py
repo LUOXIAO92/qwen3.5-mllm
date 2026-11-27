@@ -2,10 +2,11 @@
 
     python -m pipeline.replay.langid --replay-dir <回放目录> --langid-model <GlotLID model_v3.bin>
 
-在 `envs/t03` 中运行（需要 fasttext）。判断的文本：无模板的两组为 `generated_text`，带模板的两组为
-`assistant_text`，free_chat 的 `user_text` 另判一次。字段：`lang`（项目的语言代码；GlotLID 给出其他语言时为
-`other`，文本为空时为 `none`）、`lang_label`、`lang_prob`、`script`（字母中占比最高的 Unicode 文字），
-free_chat 另有 `user_lang`、`user_lang_label`。结果直接写回 `samples.jsonl`。
+在 `envs/t03` 中运行（需要 fasttext）。判断的文本：无模板的两组为 `generated_text`，带模板的组为
+`assistant_text`（思考模式写出 `</think>` 时为其后的正式回答 `answer_text`），模型自己写的 `user_text`、`system_text`
+另判一次。字段：`lang`（项目的语言代码；GlotLID 给出其他语言时为 `other`，文本为空时为 `none`）、`lang_label`、
+`lang_prob`、`script`（字母中占比最高的 Unicode 文字），free_chat 类另有 `user_lang`、`user_lang_label`，带系统提示的两组
+再有 `system_lang`、`system_lang_label`。结果直接写回 `samples.jsonl`。
 """
 
 import argparse
@@ -14,11 +15,11 @@ import unicodedata
 from collections import Counter
 from pathlib import Path
 
+from pipeline.replay.groups import ALL_GROUPS, SELF_SYSTEM_GROUPS, SELF_USER_GROUPS, SPLITS
 from pipeline.text.langid import LangIdentifier
 from pipeline.text.langs import GLOTLID_LABELS
 
-GROUPS = ("free_raw", "free_chat", "cont_raw", "cont_chat", "free_chat_think", "prompt_chat")
-SPLITS = ("eval", "train")
+GROUPS = ALL_GROUPS
 LABEL_TO_LANG = {label: lang for lang, labels in GLOTLID_LABELS.items() for label in labels}
 MAX_CHARS = 20000
 
@@ -61,8 +62,10 @@ def main():
                     text = row.get("answer_text")  # 思考模式：判断正式回答的语言
                 row["lang"], row["lang_label"], row["lang_prob"] = detect(identifier = identifier, text = text)
                 row["script"] = main_script(text = text or "")
-                if group in ("free_chat", "free_chat_think"):
+                if group in SELF_USER_GROUPS + SELF_SYSTEM_GROUPS:
                     row["user_lang"], row["user_lang_label"], _ = detect(identifier = identifier, text = row.get("user_text"))
+                if group in SELF_SYSTEM_GROUPS:
+                    row["system_lang"], row["system_lang_label"], _ = detect(identifier = identifier, text = row.get("system_text"))
             tmp = path.with_suffix(".jsonl.tmp")
             with open(tmp, "w", encoding = "utf-8") as handle:
                 for row in rows:

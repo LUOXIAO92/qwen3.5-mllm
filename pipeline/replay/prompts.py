@@ -11,6 +11,8 @@
 | free_chat_think | 与 free_chat 相同，助手轮按思考模式打开（`enable_thinking = True` 的生成提示，补上的是 `<|im_start|>assistant\\n<think>\\n`），模型先写思考、`</think>`，再写回答 |
 | cont_raw | 文档开头（64–256 token），不加模板 |
 | cont_chat | 用户轮内容为续写指令加空行加同一段文档开头，助手轮开头和空的思考块之后由模型续写 |
+| free_sys_chat | 聊天模板的系统轮开头 `<|im_start|>system\\n`。模型写完系统提示（以 `<|im_end|>` 结束）后补上 `\\n<|im_start|>user\\n`，模型写用户消息，之后与 free_chat 相同 |
+| free_sys_chat_think | 与 free_sys_chat 相同，助手轮按思考模式打开（与 free_chat_think 相同） |
 
 free_raw 默认用换行开头。试运行中两种开头各采样 600 条：换行开头 58% 的样本出现循环，前 20 万 token 中不同 4-gram
 的比例为 0.66，开头 8 个 token 与其他样本相同的占 2.5%，一半像代码；随机 token 开头分别为 51%、0.61、0%，四分之一像代码。
@@ -21,6 +23,13 @@ free_raw 默认用换行开头。试运行中两种开头各采样 600 条：换
 `<|im_start|>user\\n{用户}<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n{助手}<|im_end|>\\n`。
 这里用同一个函数渲染带占位符的对话，再按占位符切出模板的各段，所以模板写法不在代码里重复。
 训练时只对助手内容和结尾的 `<|im_end|>` 计算损失，free_chat 的用户消息也是模型生成的，是否计算损失由训练决定。
+
+带系统提示的两组（#71）：模型在系统轮里自己写系统提示，程序补上的各段取自 chat template 对
+「系统消息 + 用户消息」加生成提示的渲染（`enable_thinking` 为假或真），见 `system_chat_segments`。拼出的结果是
+`<|im_start|>system\\n{系统}<|im_end|>\\n<|im_start|>user\\n{用户}<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n{助手}<|im_end|>`
+（思考模式下助手轮开头为 `<|im_start|>assistant\\n<think>\\n`，模型接着写思考、`</think>` 和回答），与 chat template 渲染完整的
+三轮对话逐个 token 相同（`pipeline/replay/tests/test_system_prompts.py`）。系统提示和用户消息只作上下文，训练时只对助手
+内容和结尾的 `<|im_end|>` 计算损失。
 
 文档开头的长度：每篇文档先在 [64, 256] 中均匀抽一个目标 token 数，再在不超过目标的位置中选最靠后的句末或行末
 （没有时退到词边界），切下的文本去掉结尾空白后重新分词。至少 64 token 才能定下语言、话题和文体；
@@ -42,12 +51,21 @@ import numpy as np
 from transformers import AutoTokenizer
 
 from pipeline.replay.first_token import first_token_logprobs, sample_first
-from pipeline.replay.groups import ALL_GROUPS, CHAT_GROUPS, GROUPS, SELF_USER_GROUPS, SPLITS  # noqa: F401（其他模块从这里导入）
+from pipeline.replay.groups import (  # noqa: F401（其他模块从这里导入）
+    ALL_GROUPS,
+    CHAT_GROUPS,
+    GROUPS,
+    SELF_SYSTEM_GROUPS,
+    SELF_USER_GROUPS,
+    SPLITS,
+    THINK_GROUPS,
+)
 from pipeline.tokenizer_fix import check_tokenizer
 
 CONTINUE_INSTRUCTION = "Continue writing the following text."
 MIN_PREFIX_TOKENS = 64
 MAX_PREFIX_TOKENS = 256
+_SYSTEM = "\x01SYSTEM\x01"
 _USER = "\x01USER\x01"
 _ASSISTANT = "\x01ASSISTANT\x01"
 _TERMINALS = set("。！？!?.…;؟؛।")
@@ -98,6 +116,58 @@ def chat_segments(tokenizer):
     prompt = render_prompt(tokenizer = tokenizer, user = _USER)
     assert prompt == head + _USER + middle, "加生成提示的渲染与训练渲染的前半段不一致"
     return {"user_start": head, "between": middle, "end": tail}
+
+
+def system_conversation(system, user, assistant = None, reasoning = None):
+    """系统消息加用户消息（以及可选的助手回答、思考）的对话，内容为纯文本。"""
+    conversation = [
+        {"role": "system", "content": [{"type": "text", "text": system}]},
+        {"role": "user", "content": [{"type": "text", "text": user}]},
+    ]
+    if assistant is not None:
+        message = {"role": "assistant", "content": [{"type": "text", "text": assistant}]}
+        if reasoning is not None:
+            message["reasoning_content"] = reasoning
+        conversation.append(message)
+    return conversation
+
+
+def system_chat_segments(tokenizer, thinking):
+    """带系统消息的模板各段：系统轮开头、系统提示的 <|im_end|> 之后补上的文本、用户消息的 <|im_end|> 之后补上的文本、助手之后。
+
+    先按占位符渲染「系统 + 用户」加生成提示（enable_thinking = thinking），切出前三段；再渲染加上助手回答的完整对话
+    （add_generation_prompt = False，思考模式下助手回答带一段思考），确认完整对话就是生成提示后面接模型写出的内容：
+    非思考模式为「回答」，思考模式为「思考 + \\n</think>\\n\\n + 回答」，最后是结尾的 <|im_end|>\\n。
+    """
+    prompt = tokenizer.apply_chat_template(
+        conversation = system_conversation(system = _SYSTEM, user = _USER),
+        tokenize = False,
+        add_generation_prompt = True,
+        enable_thinking = thinking,
+    )
+    head, rest = prompt.split(_SYSTEM)
+    system_tail, user_tail = rest.split(_USER)
+    assert system_tail.startswith("<|im_end|>") and user_tail.startswith("<|im_end|>"), "系统轮或用户轮不以 <|im_end|> 结束"
+    reasoning = "\x01REASONING\x01" if thinking else None
+    full = tokenizer.apply_chat_template(
+        conversation = system_conversation(
+            system = _SYSTEM,
+            user = _USER,
+            assistant = _ASSISTANT,
+            reasoning = reasoning,
+        ),
+        tokenize = False,
+        add_generation_prompt = False,
+        enable_thinking = thinking,
+    )
+    written = f"{reasoning}\n</think>\n\n{_ASSISTANT}" if thinking else _ASSISTANT
+    assert full.startswith(prompt + written), "完整对话的渲染与「生成提示 + 模型写出的内容」不一致"
+    return {
+        "system_start": head,
+        "system_between": system_tail.removeprefix("<|im_end|>"),
+        "user_between": user_tail.removeprefix("<|im_end|>"),
+        "end": full.removeprefix(prompt + written),
+    }
 
 
 def encode(tokenizer, text):
@@ -157,7 +227,7 @@ def main():
     parser.add_argument("--model", required = True, help = "参考模型目录（取分词器与 chat template）")
     parser.add_argument("--replay-dir", required = True, help = "回放目录；续写组默认读取其中的 prefixes/<划分>.jsonl")
     parser.add_argument("--prefixes-dir", default = None, help = "文档开头目录（prefixes 的输出），默认为 <回放目录>/prefixes")
-    parser.add_argument("--groups", nargs = "+", default = list(GROUPS), help = "free_chat_think 只用于丢弃循环的回放目录，需要显式给出")
+    parser.add_argument("--groups", nargs = "+", default = list(GROUPS), help = "free_chat_think、free_sys_chat、free_sys_chat_think 只用于丢弃循环的回放目录，需要显式给出")
     parser.add_argument("--free-count", default = "eval=8000,train=60000", help = "自由生成两组每个划分的提示条数（生成在达到 token 目标时停止）")
     parser.add_argument("--free-raw-start", choices = ["newline", "random"], default = "newline")
     parser.add_argument("--seed", type = int, default = 0)
@@ -207,6 +277,23 @@ def main():
                     "between_ids": encode(tokenizer = tokenizer, text = between),
                     "end_text": segments["end"],
                     "template": template,
+                }
+            elif group in SELF_SYSTEM_GROUPS:
+                thinking = group in THINK_GROUPS
+                system_parts = system_chat_segments(tokenizer = tokenizer, thinking = thinking)
+                start_ids = encode(tokenizer = tokenizer, text = system_parts["system_start"])
+                rows = [{"prompt_ids": start_ids} for _ in range(free_count[split])]
+                templates[group] = {
+                    "start_text": system_parts["system_start"],
+                    "start_ids": start_ids,
+                    # 系统提示以生成的 <|im_end|> 结束，其后补上的 token（用户轮开头）
+                    "system_between_text": system_parts["system_between"],
+                    "system_between_ids": encode(tokenizer = tokenizer, text = system_parts["system_between"]),
+                    # 用户消息以生成的 <|im_end|> 结束，其后补上的 token（助手轮开头）
+                    "between_text": system_parts["user_between"],
+                    "between_ids": encode(tokenizer = tokenizer, text = system_parts["user_between"]),
+                    "end_text": system_parts["end"],
+                    "template": f"apply_chat_template(add_generation_prompt = True, enable_thinking = {thinking})，系统消息与用户消息都由模型自己写",
                 }
             else:
                 with open(prefixes_dir / f"{split}.jsonl", encoding = "utf-8") as handle:

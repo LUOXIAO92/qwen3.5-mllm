@@ -42,6 +42,7 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.replay.generate import parse_plan
+from pipeline.replay.groups import THINK_GROUPS
 from pipeline.replay.store import ShardReader, list_shards, read_all_records, shard_paths
 
 TOP = 32
@@ -80,7 +81,8 @@ def build_sequence(record, reader):
     return ids, pieces
 
 
-# 为真时 free_chat_think 中没有写出 </think> 的样本（samples.jsonl 的 think_closed 不为真）也不算（--exclude-unclosed-think）
+# 为真时思考模式的组（free_chat_think、free_sys_chat_think）中没有写出 </think> 的样本（samples.jsonl 的 think_closed
+# 不为真）也不算（--exclude-unclosed-think）
 EXCLUDE_UNCLOSED_THINK = False
 
 
@@ -94,7 +96,7 @@ def kept_records(split_dir):
     samples_path = split_dir / "samples.jsonl"
     if not samples_path.exists():
         raise SystemExit(f"{split_dir} 还没有 samples.jsonl，先运行 finalize")
-    exclude_unclosed = EXCLUDE_UNCLOSED_THINK and split_dir.parent.name == "free_chat_think"
+    exclude_unclosed = EXCLUDE_UNCLOSED_THINK and split_dir.parent.name in THINK_GROUPS
     with open(samples_path, encoding = "utf-8") as handle:
         keep = {row["sample_id"]: row["keep"] and (not exclude_unclosed or row.get("think_closed") is True) for row in map(json.loads, handle)}
     missing = [record["sample_id"] for record in records if record["sample_id"] not in keep]

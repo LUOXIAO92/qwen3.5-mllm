@@ -39,6 +39,11 @@ free_chat 分两段生成：先从 `<|im_start|>user\\n` 生成用户消息，�
 `\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n`，再生成助手回答，两段合计不超过 16,384 个 token。
 用户消息没有以 `<|im_end|>` 结束（达到长度上限或以 `<|endoftext|>` 结束）的样本记为 `no_user_end`，不生成回答；
 筛选模式不用这些样本，不筛选模式原样保留（只有用户消息）。
+
+free_sys_chat、free_sys_chat_think（#71）分三段生成：先从 `<|im_start|>system\\n` 生成系统提示，以 `<|im_end|>` 结束后补上
+`\\n<|im_start|>user\\n`，再生成用户消息，之后与 free_chat、free_chat_think 相同（补上的 token 都取自 `templates.json`）。三段合计
+不超过 16,384 个 token；系统提示没有以 `<|im_end|>` 结束的样本记为 `no_system_end`，系统提示中出现循环（筛选模式）记为
+`system_loop`。每一段的提示都是前面全部片段（提示、已生成的 token、补上的模板）依次拼接。
 """
 
 import argparse
@@ -52,7 +57,7 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.replay.degeneration import degeneration_onset, loop_onset, near_loop_onset
-from pipeline.replay.groups import CHAT_GROUPS, SELF_USER_GROUPS
+from pipeline.replay.groups import CHAT_GROUPS, SELF_SYSTEM_GROUPS, THINK_GROUPS, self_roles
 from pipeline.replay.store import TOP_K, ShardReader, ShardWriter, read_all_records, repair
 from pipeline.tokenizer_fix import check_tokenizer
 
@@ -195,8 +200,9 @@ class Generator:
         all_records = read_all_records(raw_dir = raw_dir)
         done = {record["prompt_index"] for record in all_records}
         records = [record for record in all_records if part is None or record.get("part") == part]
-        # free_chat_think 加 --count-closed-think 时，只有写出 </think> 的样本计入进度（没有写出的照样保留）
-        count_closed = args.count_closed_think and group == "free_chat_think"
+        # 思考模式的组（free_chat_think、free_sys_chat_think）加 --count-closed-think 时，只有写出 </think> 的样本计入进度
+        # （没有写出的照样保留）
+        count_closed = args.count_closed_think and group in THINK_GROUPS
         reader = ShardReader(raw_dir = raw_dir)
 
         def closed_in_shard(record):
@@ -228,10 +234,14 @@ class Generator:
             prompts = [json.loads(line) for line in handle]
         started = done | {stream.state["row"]["prompt_index"] for stream in suspended}
         pending = (row for row in prompts if row["prompt_index"] not in started and (part is None or row.get("part") == part))
-        between_ids = None
-        if group in SELF_USER_GROUPS:
+        # 模型自己写的各段依次的角色，以及每段（以 <|im_end|> 结束）之后补上的模板 token
+        roles = self_roles(group = group)
+        after_ids = {}
+        if roles:
             templates = json.loads((Path(args.replay_dir) / "templates.json").read_text(encoding = "utf-8"))
-            between_ids = templates[group]["between_ids"]
+            after_ids["user"] = templates[group]["between_ids"]
+            if group in SELF_SYSTEM_GROUPS:
+                after_ids["system"] = templates[group]["system_between_ids"]
         main_role = "assistant" if group in CHAT_GROUPS else "text"
 
         writer = None
@@ -262,6 +272,22 @@ class Generator:
                 return
             prompt_ids = stream.prompt_ids + stream.token_ids
             self.engine.add_request(request_id = request_id, prompt = {"prompt_token_ids": prompt_ids}, params = self.params(max_tokens = remaining))
+
+        def phase_of(role):
+            """请求编号中的段号：模型自己写的各段依次为 1、2、3，其他组只有一段。"""
+            return roles.index(role) + 1 if roles else 1
+
+        def context_ids(state):
+            """样本到目前为止的全部 token：直接给定的片段（提示、模板）与已生成的片段依次拼接。"""
+            ids = []
+            gen_index = 0
+            for piece in state["pieces"]:
+                if "gen" in piece:
+                    ids.extend(state["arrays"][gen_index][0].tolist())
+                    gen_index += 1
+                else:
+                    ids.extend(piece["ids"])
+            return ids
 
         def submit(state, phase, prompt_ids, max_tokens, role, first = None):
             request_id = f"{state['row']['prompt_index']}-{phase}"
@@ -330,7 +356,7 @@ class Generator:
                 record["loop"] = loop
                 counters["dropped"] += 1
             counted = kept
-            if group == "free_chat_think" and loop is None:
+            if group in THINK_GROUPS and loop is None:
                 # 助手回答（思考 + 回答）中是否写出了 </think>；没有助手回答的样本记为否
                 answer = [arrays[0] for arrays, role in zip(state["arrays"], state["roles"]) if role == "assistant"]
                 record["think_closed"] = bool(answer) and self.think_end in answer[-1].tolist()
@@ -344,7 +370,8 @@ class Generator:
             mean_kept = (kept_total + prior * PRIOR_SAMPLES) / (finished_samples + PRIOR_SAMPLES)
 
         def piece_done(request_id, finish_reason):
-            """请求结束（正常停止、达到上限或因循环中止）后的处理：free_chat 用户消息正常结束时接着生成回答，否则样本完成。"""
+            """请求结束（正常停止、达到上限或因循环中止）后的处理：模型自己写的系统提示、用户消息正常结束时补上模板，
+            接着生成下一段，否则样本完成。"""
             stream = streams.pop(request_id)
             state = stream.state
             ids = close_piece(stream = stream, finish_reason = finish_reason)
@@ -357,31 +384,32 @@ class Generator:
                     finish_sample(state = state, status = "loop", kept = 0, loop = loop)
                     return
             onset = None if args.no_filter or args.drop_loops else degeneration_onset(ids = ids)
-            if stream.role == "user":
+            if stream.role in after_ids:
+                # 系统提示或用户消息：正常以 <|im_end|> 结束时补上模板，接着生成下一段
                 if onset is not None:
-                    finish_sample(state = state, status = "user_loop", kept = 0)
+                    finish_sample(state = state, status = f"{stream.role}_loop", kept = 0)
                     return
-                used = len(ids)
-                if finish_reason == "stop" and used and ids[-1] == self.im_end and used < args.max_new_tokens:
-                    state["pieces"].append({"ids": between_ids})
+                used = state.get("used", 0) + len(ids)
+                if finish_reason == "stop" and len(ids) and ids[-1] == self.im_end and used < args.max_new_tokens:
+                    state["pieces"].append({"ids": after_ids[stream.role]})
                     state["used"] = used
-                    prompt_ids = state["row"]["prompt_ids"] + ids.tolist() + between_ids
+                    next_role = roles[roles.index(stream.role) + 1]
                     submit(
                         state = state,
-                        phase = 2,
-                        prompt_ids = prompt_ids,
+                        phase = phase_of(role = next_role),
+                        prompt_ids = context_ids(state = state),
                         max_tokens = args.max_new_tokens - used,
-                        role = "assistant",
+                        role = next_role,
                     )
                     return
-                finish_sample(state = state, status = "no_user_end", kept = used if args.no_filter or args.drop_loops else 0)
+                status = f"no_{stream.role}_end"
+                finish_sample(state = state, status = status, kept = used if args.no_filter or args.drop_loops else 0)
                 return
             kept = state.get("used", 0) + (onset if onset is not None else len(ids))
             finish_sample(state = state, status = "ok", kept = kept)
 
         for stream in suspended:
-            phase = 2 if stream.role == "assistant" and group in SELF_USER_GROUPS else 1
-            request(request_id = f"{stream.state['row']['prompt_index']}-{phase}", stream = stream)
+            request(request_id = f"{stream.state['row']['prompt_index']}-{phase_of(role = stream.role)}", stream = stream)
 
         while True:
             if time.time() >= deadline and streams:
@@ -394,7 +422,7 @@ class Generator:
                 tmp.replace(inflight_path)
                 streams.clear()
                 break
-            # 在途样本的保留 token 估计：已生成的长度与平均值中较大的一个（free_chat 两段按同一条样本计）
+            # 在途样本的保留 token 估计：已生成的长度与平均值中较大的一个（模型自己写的几段按同一条样本计）
             lengths = {}
             for stream in streams.values():
                 index = stream.state["row"]["prompt_index"]
@@ -407,7 +435,7 @@ class Generator:
                     exhausted = True
                     break
                 state = {"row": row, "pieces": [{"ids": row["prompt_ids"]}], "arrays": [], "roles": []}
-                role = "user" if group in SELF_USER_GROUPS else main_role
+                role = roles[0] if roles else main_role
                 submit(
                     state = state,
                     phase = 1,
@@ -441,7 +469,7 @@ class Generator:
                         if args.drop_loops:
                             stream.abort_at = stream.length  # 整条丢弃，立即中止
                         else:
-                            stream.abort_at = onset if stream.role == "user" else onset + args.loop_margin
+                            stream.abort_at = onset if stream.role in after_ids else onset + args.loop_margin
                 if stream.abort_at is not None and stream.length >= stream.abort_at:
                     to_abort.append(output.request_id)
             if to_abort:
@@ -530,7 +558,8 @@ def main():
     parser.add_argument(
         "--count-closed-think",
         action = "store_true",
-        help = "free_chat_think 的进度只计写出 </think> 的样本；没有写出的样本照样保留，索引中 think_closed 为假",
+        help = "思考模式的组（free_chat_think、free_sys_chat_think）的进度只计写出 </think> 的样本；没有写出的样本照样保留，"
+        "索引中 think_closed 为假",
     )
     parser.add_argument("--topk", type = int, default = TOP_K, help = f"每个生成位置另存的 top-k 对数概率个数，只能取 {TOP_K} 或 0（不存）")
     parser.add_argument("--max-new-tokens", type = int, default = MAX_NEW_TOKENS)

@@ -9,8 +9,10 @@
 
 `--drop-loops`（丢弃循环的回放目录 `replay-noloop/`）时同样不截断：生成时已经整条丢弃的样本（索引状态 `loop`，只有
 元数据）写成 `keep` 为假、`drop_reason` 为 `loop` 的行，`loop_onset` 取自生成时的记录，`n_gen` 是花掉的生成 token 数；
-其余样本按同一套规则再完整检查一次，仍发现循环的也整条不用（正常情况下为 0 条）。free_chat_think 中没有写出 `</think>`
-的样本（含用户消息没有正常结束、没有助手回答的）同样整条不用，`drop_reason` 为 `think_unclosed`，token 仍留在 `raw/` 中。
+其余样本按同一套规则再完整检查一次，仍发现循环的也整条不用（正常情况下为 0 条）。思考模式的组（free_chat_think、
+free_sys_chat_think）中没有写出 `</think>` 的样本（含用户消息没有正常结束、没有助手回答的）同样整条不用，`drop_reason` 为
+`think_unclosed`，token 仍留在 `raw/` 中。带系统提示的两组（free_sys_chat、free_sys_chat_think）中系统提示或用户消息没有正常
+结束、因而没有助手回答的样本在任何模式下都不用，`drop_reason` 为生成时的状态（`no_system_end` 或 `no_user_end`）。
 
 在 `envs/mllm-eval` 中运行（只用 CPU）。二进制数组不复制也不改写：`samples.jsonl` 中每个生成片段的 `keep`
 给出截断后保留的 token 数，读取时取 `[offset, offset + keep)`。每行字段：
@@ -22,8 +24,9 @@
 - `gzip_ratio`、`rep4`（4-gram 重复率）、`window_repeat`（256 token 窗口内复制前文的最大比例），都在保留的生成 token 上计算
 - `gen_nll`：最后一个生成片段（free_chat 为助手回答）保留部分的平均每 token 负对数似然，取自生成时记录的对数概率；
   明显偏高（例如超过 4）的多是各种文字混杂、不成句的文本
-- 文本：`generated_text`（无模板的两组：保留的生成文本，不含结束符）；`user_text`、`assistant_text`（带模板的两组：
-  用户与助手内容，不含模板和结束符）；续写两组另有 `prefix_text` 与来源信息（`doc_lang`、`source`、`source_ref` 等）
+- 文本：`generated_text`（无模板的两组：保留的生成文本，不含结束符）；`user_text`、`assistant_text`（带模板的组：
+  用户与助手内容，不含模板和结束符）；带系统提示的两组另有 `system_text`；续写两组另有 `prefix_text` 与来源信息
+  （`doc_lang`、`source`、`source_ref` 等）
 - `code_like`：文本像代码（含代码围栏，或括号、等号、分号等符号占非空白字符的 8% 以上）
 
 语言字段 `lang` 由 `langid` 一步补上。
@@ -39,7 +42,7 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.replay.degeneration import gzip_ratio, loop_onset, max_window_repeat, near_loop_onset, ngram_repeat_rate
-from pipeline.replay.prompts import ALL_GROUPS, SELF_USER_GROUPS, SPLITS
+from pipeline.replay.groups import ALL_GROUPS, SELF_SYSTEM_GROUPS, SPLITS, THINK_GROUPS, self_roles
 from pipeline.replay.store import ShardReader, read_all_records
 from pipeline.tokenizer_fix import check_tokenizer
 
@@ -184,14 +187,21 @@ def process(job):
         row["generated_text"] = generated
         stats_text = generated
     else:
-        user = content(ids = kept_arrays[0]) if group in SELF_USER_GROUPS else None
-        has_assistant = group in ("cont_chat", "prompt_chat") or len(kept_arrays) > 1
-        assistant = content(ids = kept_arrays[-1]) if has_assistant else ""
-        if group in SELF_USER_GROUPS:
-            row["user_text"] = user
+        # 各生成片段按角色取出：模型自己写的系统提示、用户消息，以及助手回答（续写、真人提问两组只有助手回答）
+        by_role = {piece["gen"]: ids for piece, ids in zip(gen_pieces, kept_arrays)}
+        has_assistant = "assistant" in by_role
+        assistant = content(ids = by_role["assistant"]) if has_assistant else ""
+        roles = self_roles(group = group) or ()
+        if "system" in roles:
+            row["system_text"] = content(ids = by_role["system"])
+        if "user" in roles:
+            row["user_text"] = content(ids = by_role["user"]) if "user" in by_role else ""
         row["assistant_text"] = assistant
         stats_text = assistant
-        if group == "free_chat_think" and has_assistant:
+        if group in SELF_SYSTEM_GROUPS and row["keep"] and not has_assistant:
+            # 系统提示或用户消息没有正常结束，没有助手回答，也就没有计损失的 token：不用
+            row.update(keep = False, drop_reason = record["status"])
+        if group in THINK_GROUPS and has_assistant:
             # 思考模式：助手回答依次是思考、</think>、正式回答；记录 </think> 的位置（没有写出时为 None）
             answer_ids = list(map(int, kept_arrays[-1]))
             close = answer_ids.index(job["think_end_id"]) if job["think_end_id"] in answer_ids else None
@@ -199,9 +209,9 @@ def process(job):
             row["reasoning_tokens"] = close if close is not None else len(answer_ids)
             row["answer_tokens"] = len(answer_ids) - close - 1 if close is not None else 0
             row["answer_text"] = content(ids = answer_ids[close + 1:]) if close is not None else ""
-        elif group == "free_chat_think":
-            row["think_closed"] = False  # 用户消息没有正常结束，没有助手回答
-        if group == "free_chat_think" and drop_loops and row["keep"] and not row["think_closed"]:
+        elif group in THINK_GROUPS:
+            row["think_closed"] = False  # 系统提示或用户消息没有正常结束，没有助手回答
+        if group in THINK_GROUPS and drop_loops and row["keep"] and not row["think_closed"]:
             # 没有写出 </think> 的样本（含没有助手回答的）整条不用，不截断（用户 2026-11-22 决定）；token 仍留在 raw 中
             row.update(keep = False, drop_reason = "think_unclosed")
     prompt_meta(row = row, prompt = prompt, group = group)

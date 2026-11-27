@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pipeline.replay.prompts import ALL_GROUPS, CHAT_GROUPS, SELF_USER_GROUPS, SPLITS
+from pipeline.replay.prompts import ALL_GROUPS, CHAT_GROUPS, SELF_SYSTEM_GROUPS, SELF_USER_GROUPS, SPLITS, THINK_GROUPS
 from pipeline.replay.store import ShardReader
 from pipeline.replay.teacher import Teacher
 
@@ -245,7 +245,7 @@ def split_summary(replay_dir, group, split):
     for row in kept:
         tokens_by_lang[row.get("lang", "?")] += row["n_kept"]
     summary["lang_tokens"] = dict(tokens_by_lang.most_common())
-    if group == "free_chat_think":
+    if group in THINK_GROUPS:
         # 写出率按没有循环的全部样本计（没有写出 </think> 的样本在丢弃循环的目录中整条不用）
         answered = [row for row in rows if "think_closed" in row and row["drop_reason"] in (None, "think_unclosed")]
         closed = [row for row in answered if row["think_closed"]]
@@ -263,9 +263,12 @@ def split_summary(replay_dir, group, split):
             "samples_not_closed": sum(not row["think_closed"] for row in answered),
             "not_closed_hit_cap": sum(not row["think_closed"] and row["finish_reason"] == "length" for row in answered),
         }
-    if group in SELF_USER_GROUPS:
+    if group in SELF_USER_GROUPS + SELF_SYSTEM_GROUPS:
         summary["user_lang_samples"] = dict(Counter(row.get("user_lang", "?") for row in kept).most_common())
         summary["user_tokens"] = percentiles(values = [next(p["keep"] for p in row["pieces"] if p.get("gen") == "user") for row in kept])
+    if group in SELF_SYSTEM_GROUPS:
+        summary["system_lang_samples"] = dict(Counter(row.get("system_lang", "?") for row in kept).most_common())
+        summary["system_tokens"] = percentiles(values = [next(p["keep"] for p in row["pieces"] if p.get("gen") == "system") for row in kept])
     if group.startswith("cont"):
         summary["doc_lang_samples"] = dict(sorted(Counter(row["doc_lang"] for row in kept).items()))
         tokens_by_doc = Counter()
@@ -365,6 +368,8 @@ def markdown(summary):
             if "doc_lang_samples" in item:
                 lines.append(f"- 续写语言与文档语言相同的比例：{item['same_lang_as_doc']}；文档语言（保留样本数）：{item['doc_lang_samples']}")
                 lines.append(f"- 来源：{item['source_samples']}；文档开头 token 数：{item['prefix_tokens']}")
+            if "system_lang_samples" in item:
+                lines.append(f"- 系统提示语言：{item['system_lang_samples']}；系统提示 token 数：{item['system_tokens']}；丢弃：{item['dropped']}")
             if "user_lang_samples" in item:
                 lines.append(f"- 用户消息语言：{item['user_lang_samples']}；用户消息 token 数：{item['user_tokens']}")
             if "think" in item:
