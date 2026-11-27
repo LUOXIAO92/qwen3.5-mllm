@@ -469,7 +469,7 @@ def parse_args(argv = None):
     parser.add_argument("--work-dir", default = os.environ.get("WORK_DIR", str(REPO.parent / "qwen3.5-asr-work")), help = "工作目录，默认环境变量 WORK_DIR")
     parser.add_argument("--model-dir", default = os.environ.get("MODEL_DIR", str(REPO / "qwen3.5-2b-mllm")), help = "2B 融合模型目录")
     parser.add_argument("--runs-root", default = os.environ.get("C71_RUNS_ROOT"), help = "运行目录的上级，默认环境变量 C71_RUNS_ROOT")
-    parser.add_argument("--runs", default = ",".join(c_runs.ALL_RUNS), help = "逗号分隔的运行，默认全部 13 个；空字符串时只做参考模型")
+    parser.add_argument("--runs", default = ",".join(c_runs.ALL_RUNS), help = "逗号分隔的运行，默认 c_runs.ALL_RUNS 中的全部；空字符串时只做参考模型")
     parser.add_argument("--no-ref", action = "store_true", help = "不评测参考模型")
     parser.add_argument("--rerun-user", default = "", help = "逗号分隔的运行：另做指令在用户回合的语音探针，与已有结果核对")
     parser.add_argument("--out-dir", default = None, help = "输出目录，默认 <工作目录>/data/T71e/sysprompt")

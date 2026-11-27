@@ -39,7 +39,8 @@
 环境变量（与 t71_cpt_run.py 相同）：REPO、WORK_DIR、DRIVE_DIR、DATASET、PY、INDEX、SHARDS_DRIVE、SHARDS_LOCAL；
 回放数据须已由 setup.sh 解到 $DATASET/text/qwen3.5-asr/replay-noloop，FLEURS test 已由 fleurs_prepare 准备在
 $WORK_DIR/data/T02。可选：C71_TAG（输出名后缀）、C71_RATIO（默认 0.5）、C71_REPLAY_NORM（asr 或 step，默认 asr，按 token 归一化）、
-C71_RUNS（逗号分隔，只跑这些运行，默认第一轮的六个；第二轮的 kl32 运行 c-cont_raw-kl32、c-cont_think-kl32、c-cont_raw-kl32tail、第三轮的 c-cont_raw-kl32tail-lr5e-6、-lr1e-6 与第四轮的 LoRA 运行 c-cont_raw-kl32tail-lora32、-lora90 要点名）、
+C71_RUNS（逗号分隔，只跑这些运行，默认第一轮的六个；第二轮的 kl32 运行 c-cont_raw-kl32、c-cont_think-kl32、c-cont_raw-kl32tail、第三轮的 c-cont_raw-kl32tail-lr5e-6、-lr1e-6、第四轮的 LoRA 运行 c-cont_raw-kl32tail-lora32、-lora90 与第五轮加系统提示回放的
+c-sys-kl32tail-lora90、c-sys-kl32tail-lr5e-6 要点名）、
 C71_SKIP_SMOKE=1、C71_THINK_MAX_NEW（默认 16384）、C71_THINK_ATTENTION（思考检查全注意力层的实现，默认 flash_attention_2）、
 C71_DEADLINE_HOURS、C71_CU_PER_HOUR（默认 10，#65 实测的 G4 消耗）、
 C71_STATE_SYNC_STEPS、C71_ESTIMATE_ONLY=1（只打印估计后退出）、C71_TRAIN_ONLY=1（只训练：跳过各运行的评测、参考模型的评测和
@@ -130,6 +131,16 @@ LORA_RANK = {"c-cont_raw-kl32tail-lora32": 32, "c-cont_raw-kl32tail-lora90": 90}
 LORA_LR = "1e-4"
 KL_RUNS.update({key: "cont_raw=1" for key in LORA_RANK})
 KL_TAIL_RUNS.update(LORA_RANK)
+# 第五轮（用户 2026-11-28）：回放加入参考模型从系统轮开始自写的两组（free_sys_chat 接普通回答、free_sys_chat_think 接思考块），
+# 保留无系统提示的续写组 cont_raw，按 token 2 : 1 : 1 混合；其余设置与第四轮的 LoRA 秩 90、第三轮的全量微调 5e-6 相同
+# （kl32 加尾部项），看系统提示词的遵循能否恢复。在本机训练，登记在这里是为了让本机评测（c71_local、bench_local、
+# sysprompt_local）能点名。
+SYS_REPLAY = "cont_raw=2,free_sys_chat=1,free_sys_chat_think=1"
+SYS_RUNS = ("c-sys-kl32tail-lora90", "c-sys-kl32tail-lr5e-6")
+KL_RUNS.update({key: SYS_REPLAY for key in SYS_RUNS})
+KL_TAIL_RUNS.update(SYS_RUNS)
+LORA_RANK["c-sys-kl32tail-lora90"] = 90
+LM_LR["c-sys-kl32tail-lr5e-6"] = "5e-6"
 ALL_RUNS = {**RUNS, **KL_RUNS}
 SELECTED = [key for key in ENV.get("C71_RUNS", ",".join(RUNS)).split(",") if key]
 UNKNOWN = [key for key in SELECTED if key not in ALL_RUNS]
