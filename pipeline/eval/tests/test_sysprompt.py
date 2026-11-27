@@ -211,6 +211,9 @@ class DriverTest(unittest.TestCase):
             self.assertEqual(data["labels"], ["ref", "c0"])
             self.assertAlmostEqual(data["text"]["c0"]["B_minus_ref"]["diff"], -1 / 3)
             self.assertEqual(data["text"]["c0"]["C_minus_ref"]["diff"], 0.0)
+            # (B − C) 逐条：c0 为 (−1, 0, −1)，参考模型为 (0, 0, −1)，之差平均 −1/3
+            self.assertAlmostEqual(data["text"]["c0"]["gap_minus_ref"]["diff"], -1 / 3)
+            self.assertEqual(data["text"]["ref"]["gap_minus_ref"]["diff"], 0.0)
             self.assertEqual(data["audio"]["c0"]["user"]["source"], str(root / "eval" / "c0" / "probe_strict" / "summary.json"))
             self.assertEqual(data["audio"]["c0"]["system"]["values"]["translate_en_chrf"], 40.0)
             self.assertIsNone(data["audio"]["c0"]["system"]["values"]["translate_zh_chrf"])

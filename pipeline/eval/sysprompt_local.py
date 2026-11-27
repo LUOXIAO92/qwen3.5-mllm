@@ -188,8 +188,23 @@ def audio_sources(paths, label):
     return {name: (load_json(path = path), path) for name, path in sources.items()}
 
 
+def gap_difference(table, ref_table, ids):
+    """(B − C)_模型 − (B − C)_参考模型（strict）：逐条算 (B − C) 之差（取值 −2 到 2）再平均，给出差与标准误。为负时，
+    系统消息比用户消息少照做的部分比参考模型多，即对系统消息的敏感度比一般的指令遵循退化得更多。"""
+    values = [
+        (int(table["B"][item_id][0]) - int(table["C"][item_id][0])) - (int(ref_table["B"][item_id][0]) - int(ref_table["C"][item_id][0]))
+        for item_id in ids
+    ]
+    n = len(values)
+    if n < 2:
+        return {"diff": None, "se": None, "n": n}
+    mean = sum(values) / n
+    variance = sum((value - mean) ** 2 for value in values) / (n - 1)
+    return {"diff": mean, "se": (variance / n) ** 0.5, "n": n}
+
+
 def text_entry(paths, label, ref_table):
-    """一个模型文本部分的汇总：scores.json 的主要数值，加上 B、C 与参考模型的成对差（strict）。"""
+    """一个模型文本部分的汇总：scores.json 的主要数值，加上 B、C、B − C 与参考模型的成对差（strict）。"""
     scores = load_json(path = paths["out_dir"] / label / "text" / "scores.json")
     if scores is None:
         return None
@@ -208,6 +223,7 @@ def text_entry(paths, label, ref_table):
                 first = [table[condition][item_id][0] for item_id in ids],
                 second = [ref_table[condition][item_id][0] for item_id in ids],
             )
+        entry["gap_minus_ref"] = gap_difference(table = table, ref_table = ref_table, ids = ids)
     return entry
 
 
@@ -260,10 +276,11 @@ def summary_lines(data, paths):
         f"文本：{len(items)} 条中性问题各加一个 IFEval 约束（{len(INSTRUCTION_TYPES)} 类，见 pipeline/eval/sysprompt_bench.py），"
         "非思考模式贪心生成，最多 1,280 个新 token。A 为不提要求（碰巧满足的比例），B 为约束在系统消息、问题在用户消息，C 为没有"
         "系统消息、约束接在问题之后。数值为约束满足率（%），strict / loose 定义同 IFEval；B − C 与「比参考模型」都是同一组条目上的"
-        "成对差（百分点）及其标准误。",
+        "成对差（百分点）及其标准误。「B − C 比参考模型」为 (B − C) 减去参考模型的 (B − C)（strict，逐条成对）：为负时系统消息比"
+        "用户消息少照做的部分比参考模型多，即系统消息的效力比一般的指令遵循退化得更多。",
         "",
-        "| 模型 | A strict | A loose | B strict | B loose | C strict | C loose | B − C strict | B − C loose | B 比参考模型 | C 比参考模型 | B 平均长度 |",
-        "| --- |" + " ---: |" * 11,
+        "| 模型 | A strict | A loose | B strict | B loose | C strict | C loose | B − C strict | B − C loose | B 比参考模型 | C 比参考模型 | B − C 比参考模型 | B 平均长度 |",
+        "| --- |" + " ---: |" * 12,
     ]
     for label in labels:
         text = data["text"].get(label)
@@ -282,6 +299,7 @@ def summary_lines(data, paths):
             signed(diff = gap["loose"]["diff"], se = gap["loose"]["se"]),
             "—" if label == REF else signed(diff = (text.get("B_minus_ref") or {}).get("diff"), se = (text.get("B_minus_ref") or {}).get("se")),
             "—" if label == REF else signed(diff = (text.get("C_minus_ref") or {}).get("diff"), se = (text.get("C_minus_ref") or {}).get("se")),
+            "—" if label == REF else signed(diff = (text.get("gap_minus_ref") or {}).get("diff"), se = (text.get("gap_minus_ref") or {}).get("se")),
             f"{text['generation']['B']['mean_new_tokens']:.0f}",
         ]
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
