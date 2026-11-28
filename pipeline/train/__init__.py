@@ -101,8 +101,8 @@ projector 用 --lr，两组按同一条预热加余弦的曲线变化。--init-p
   写回模型（master.MasterWeights）；none 时直接更新模型中的 bfloat16 参数（master.DirectWeights）。
 - --language-model-grad-dtype fp32（默认）| bf16：交给优化器的梯度精度。fp32 时 bfloat16 的梯度一算出就转成 float32
   （有主权重时加到主权重的梯度上并释放 bfloat16 的梯度；没有主权重时由 autograd 按参数的 grad_dtype 转换后累加）。
-  梯度累积时各微批的梯度在这个精度中相加，bf16 时每次相加都舍入；本项目用 --grad-accum 1，一步只有一次反传，
-  两种精度交给优化器的数值相同，bf16 只是少占 2 字节。
+  梯度累积时各微批的梯度在这个精度中相加，bf16 时每次相加都舍入；本项目用 --grad-accum 1，不开回放时一步只有一次反传，
+  两种精度交给优化器的数值相同，bf16 只是少占 2 字节（开启回放时长样本另成微批，一步可能有几次反传）。
 - --language-model-rounding nearest（默认）| stochastic：没有主权重时，新的权重（在 float32 中算出）写回 bfloat16 参数
   的舍入。学习率 1e-5 时每步的更新多半小于 bfloat16 的舍入间距（权重绝对值在 0.0625–0.125 时间距约 0.0005），就近舍入
   会把它们舍掉；随机舍入按距离随机取上下两个 bfloat16 数之一，期望等于 float32 的结果（arXiv 2502.20566）。
@@ -210,8 +210,9 @@ projector 为 1.418（dev 与训练清单是同一批句子，只说明全量微
 在第 68 步把末尾 6 层改为梯度检查点，之后峰值 29.3 GB，每秒约 2.9 步；bfloat16 状态时第 40 步改为 6 层、第 119 步改为
 12 层，峰值 29.5 GB。
 
-开启自生成回放时（任务 #71）的 2B 全量微调。回放的长样本另成微批，一步之内有多次反传，--offload-optimizer 与
---lm-blocks-to-swap 都不能用（replay.py「长样本与拼接」），32 GB 上只能用显存中的精度选项。本机用的是保留 fp32 主权重和
+开启自生成回放时（任务 #71）的 2B 全量微调。回放的长样本另成微批，一步之内有多次反传（replay.py「长样本与拼接」）。
+以前主机内存中的更新不累加梯度，--offload-optimizer 与 --lm-blocks-to-swap 不能与回放同用，32 GB 上只能用显存中的精度选项，
+下面是那时的做法；现在主机内存中也累加梯度，默认精度的做法与实测见下一节的「梯度累积与回放」。本机用的是保留 fp32 主权重和
 fp32 梯度、只把 AdamW 状态存成 8 bit（--language-model-optimizer-states 8bit，每参数 12.03 字节），全部层做梯度检查点；
 不去掉主权重，因为学习率 5e-6 时每步的更新远小于 bfloat16 的舍入间距，3 万步里随机舍入给权重带来的随机游走比优化器本身
 的更新噪声大得多。实测（RTX 5090，c-cont_raw-kl32tail 的设置：每批 16 条、360 秒，拼接批次，回放 cont_raw、r = 0.5、
@@ -256,9 +257,9 @@ CPU 上的 AdamW（placement.HostAdamW）。梯度以 bfloat16 搬到主机，�
 限制，本机（16 核）约每秒 15 亿个参数。随机舍入的随机数来自自己的一份生成器状态（种子由 --seed 决定），随
 trainer_state.pt 保存（rng 中的 host_rounding），不受数据读取等其他用到 CPU 默认生成器的地方影响。
 
-支持的精度组合（precision.host_problem）：AdamW 状态必须是 fp32；主权重 fp32 或 none 都可以，none 时可以就近或随机舍入；
-还要求 --grad-accum 1（梯度每次反传后直接覆盖主机上的缓冲，torchao 的 offload_gradients 也是这样）。--grad-accum 1 时
-float32 梯度就是 bfloat16 梯度的精确转换，所以 --language-model-grad-dtype 在主机内存中不起作用。bf16、8bit、4bit、fp8
+支持的精度组合（precision.host_problem）：AdamW 状态必须是 fp32；主权重 fp32 或 none 都可以，none 时可以就近或随机舍入。
+一步只有一次反传时 float32 梯度就是 bfloat16 梯度的精确转换，--language-model-grad-dtype 只在一步有多个微批时起作用：
+主机上的累加按这个精度进行（见下文「梯度累积与回放」）。bf16、8bit、4bit、fp8
 状态是为省显存设计的，状态在主机内存中时不需要，没有实现；这些设置下打开两项会报错，显存不足的退让也跳过语言模型的
 流式加载。另外，流式加载可训练的层不能与 --compile lm、all 同用（没有验证过）。
 

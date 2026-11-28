@@ -77,8 +77,9 @@ class BlockSwap:
         self.host_grads = {}
         self.grad_done = {}
         self.grad_norms = {}
-        # 本步梯度已搬到主机的参数（id）
+        # 本步梯度已搬到主机的参数（id）；当前微批中搬过的参数（id，一步有多个微批时 placement.py 据此累加后清空）
         self.received = set()
+        self.fresh = set()
         # 层号 -> 当前绑定在参数上的显存张量、上传完成的事件
         self.resident = {}
         self.upload_done = {}
@@ -169,8 +170,8 @@ class BlockSwap:
     def offload_grads(self, index):
         """这一层的反传已全部排队：求出各梯度的 float32 范数，把梯度搬到锁页主机内存，释放显存中的梯度。
 
-        拷贝流先等计算流算出梯度；显存中的梯度记录拷贝流，在搬完之前不会被分配器回收。梯度累积不在这里处理：
-        每次反传都覆盖主机上的梯度缓冲（placement.py 要求 --grad-accum 1）。
+        拷贝流先等计算流算出梯度；显存中的梯度记录拷贝流，在搬完之前不会被分配器回收。每次反传都覆盖主机上的梯度缓冲；
+        一步有多个微批时，placement.LanguageModelUpdate.end_micro_batch 在下一个微批之前把它加到主机内存中的累加缓冲上。
         """
         compute = torch.cuda.current_stream(device = self.device)
         pairs = [
@@ -191,6 +192,7 @@ class BlockSwap:
             parameter.grad = None
         self.grad_done[index] = done
         self.received.update(id(parameter) for parameter, _ in pairs)
+        self.fresh.update(id(parameter) for parameter, _ in pairs)
 
     def wait_grads(self):
         """让 CPU 等各层的梯度搬完（主机上的优化器读梯度之前调用）。"""
@@ -202,7 +204,7 @@ class BlockSwap:
         for params in self.params.values():
             for parameter in params:
                 parameter.grad = None
-        self.grad_done, self.grad_norms, self.received = {}, {}, set()
+        self.grad_done, self.grad_norms, self.received, self.fresh = {}, {}, set(), set()
 
     def restore(self):
         """把全部流式层的参数放回显存，取消流式加载。可训练的层以主机上的权重（优化器更新的那一份）为准。"""
@@ -211,7 +213,7 @@ class BlockSwap:
             for parameter, buffer in zip(params, self.host[index]):
                 parameter.data = buffer.to(device = self.device)
         self.params, self.host, self.resident, self.upload_done, self.pool = {}, {}, {}, {}, {}
-        self.host_grads, self.grad_done, self.grad_norms, self.received = {}, {}, {}, set()
+        self.host_grads, self.grad_done, self.grad_norms, self.received, self.fresh = {}, {}, {}, set(), set()
         self.count = 0
         self.start = len(self.blocks)
 

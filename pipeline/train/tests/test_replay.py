@@ -905,13 +905,15 @@ class ConfigTest(unittest.TestCase):
 
         check_replay_args(args = parse_args(argv = self.ARGV))
         check_replay_args(args = parse_args(argv = self.ARGV + self.REPLAY + ["--replay-loss", "kl32", "--replay-kl-tail"]))
+        # 语言模型参数在主机内存中更新时一步内各微批的梯度在主机上累加（placement.py），可以与回放同用。
+        for host in (["--offload-optimizer"], ["--gradient-checkpointing", "--lm-blocks-to-swap", "8"]):
+            check_replay_args(args = parse_args(argv = self.ARGV + self.REPLAY + host))
         bad = [
             self.ARGV + ["--replay-groups", "free_raw=1"],
             self.ARGV + ["--replay-loss", "kl32"],
             self.ARGV + ["--replay-dir", "/data/replay-noloop", "--replay-ratio", "0.5"],
             self.ARGV + self.REPLAY + ["--replay-kl-tail"],
             self.ARGV + self.REPLAY[:-1] + ["0"],
-            self.ARGV + self.REPLAY + ["--offload-optimizer"],
             [arg for arg in self.ARGV if arg != "--pack-sequences"] + self.REPLAY,
             [arg for arg in self.ARGV if arg not in ("--train-language-model", "--language-model-lr", "1e-5")] + self.REPLAY,
         ]

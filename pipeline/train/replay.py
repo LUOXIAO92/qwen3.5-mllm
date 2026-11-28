@@ -39,8 +39,8 @@ trainer_state.pt 的 replay 项中，只由这些状态和每步的 A 决定，�
   --replay-micro-batch-tokens（默认 16,640，回放数据中最长的样本 16,639 个 token），超过上限的单条样本自己成一个微批。
   这样一条几千到 16k token 的样本与 ASR 的一行分开前向、反传，一步的峰值显存取两者中较大的一个。
 
-一步之内有多次反传，所以回放与「语言模型参数在主机内存中更新」（--offload-optimizer、--lm-blocks-to-swap，要求
---grad-accum 1）不能同时使用。
+一步之内有多次反传，梯度在各微批之间累加。语言模型参数在主机内存中更新（--offload-optimizer、--lm-blocks-to-swap）时，
+各微批搬到主机的梯度在主机内存中累加，一步结束时一起裁剪、更新（placement.py「梯度累积」），与只在显存中训练时相同。
 
 损失归一化与实际权重
 ====================

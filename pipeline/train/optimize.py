@@ -45,7 +45,8 @@
 
 全量微调（train.py 的 --train-language-model，任务 #66）时语言模型的权重要更新：梯度检查点照常可用（反传重算
 一层时同时求这一层参数的梯度）；--lm-blocks-to-swap 和 --offload-optimizer 把语言模型参数放到主机内存中更新，
-只支持 fp32 的 AdamW 状态和 --grad-accum 1（precision.host_problem，其余组合不允许）；--fp8-frozen lm/all 只适用于
+只支持 fp32 的 AdamW 状态（precision.host_problem，其余组合不允许），一步有多个微批时梯度在主机内存中累加
+（placement.py「梯度累积」）；--fp8-frozen lm/all 只适用于
 冻结的权重，不能使用。显存不足时的退让先增加做梯度检查点的层，再逐步把语言模型的层改为流式加载（参数改在主机内存中
 更新，主权重和 AdamW 状态原样搬过去，placement.LanguageModelUpdate.rebuild；精度设置不支持时跳过这一档），最后改为
 流式加载音频塔。--optimizer muon（任务 #78）时全量微调不能流式加载语言模型的层（muon.stream_problem），退让同样跳过

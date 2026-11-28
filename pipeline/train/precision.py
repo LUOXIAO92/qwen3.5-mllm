@@ -6,8 +6,9 @@
 - --language-model-master-weights fp32|none：fp32 时优化器更新另存的 float32 主权重，更新后舍入成 bfloat16
   写回模型（master.MasterWeights）；none 时优化器直接更新模型中的 bfloat16 参数，不另存主权重（master.DirectWeights）。
 - --language-model-grad-dtype fp32|bf16：交给优化器的梯度的精度。fp32 时反传得到的 bfloat16 梯度转成 float32 再累加；
-  bf16 时不转换。梯度累积（--grad-accum 大于 1）时各微批的梯度在这个精度中相加，bf16 时每次相加都舍入到 bfloat16，
-  累积的微批越多误差越大；本项目的设置是 --grad-accum 1，一步只有一次反传，两者算出的梯度相同，bf16 只省显存。
+  bf16 时不转换。梯度累积（--grad-accum 大于 1，或开启回放时长样本另成的微批）时各微批的梯度在这个精度中相加，bf16 时
+  每次相加都舍入到 bfloat16，累积的微批越多误差越大；本项目的设置是 --grad-accum 1，不开回放时一步只有一次反传，两者算出的
+  梯度相同，bf16 只省显存。参数在主机内存中更新时累加也按这个精度进行（placement.py「梯度累积」）。
 - --language-model-rounding nearest|stochastic：没有主权重时，AdamW 在 float32 中算出新的权重，再写回 bfloat16 参数时
   怎样舍入。nearest 就近舍入：学习率小时每步的更新常常小于 bfloat16 相邻两个数的间距（权重为 1 时约 0.0078），
   被舍掉，权重不动。stochastic 随机舍入：按与上下两个 bfloat16 数的距离随机取其一，期望等于 float32 的结果，
@@ -131,20 +132,18 @@ def validate(options, train_language_model):
             ) from error
 
 
-def host_problem(options, grad_accum):
+def host_problem(options):
     """语言模型参数在主机内存中更新（流式加载的层、--offload-optimizer，placement.py）时这组设置有什么不支持，返回原因；
     支持时返回 None。
 
-    支持：fp32 主权重 + fp32 状态（梯度精度任意，舍入只能就近），以及 none + fp32 状态 + 就近或随机舍入。梯度一层算完
-    就搬到主机、每次反传覆盖主机上的缓冲，所以要求 --grad-accum 1；这时两种梯度精度交给优化器的数值相同。
+    支持：fp32 主权重 + fp32 状态（梯度精度任意，舍入只能就近），以及 none + fp32 状态 + 就近或随机舍入。一步有多个微批
+    （回放的长样本、--grad-accum 大于 1）时梯度在主机内存中按梯度精度累加（placement.py「梯度累积」）。
     """
     if options["language_model_optimizer_states"] != "fp32":
         return (
             f"语言模型参数在主机内存中更新时 AdamW 状态只支持 fp32（现在是 {options['language_model_optimizer_states']}）："
             "bf16 和量化状态是为省显存设计的，状态放在主机内存时不需要，也没有实现"
         )
-    if grad_accum != 1:
-        return f"语言模型参数在主机内存中更新时需要 --grad-accum 1（现在是 {grad_accum}）：梯度每次反传后直接搬到主机，不在主机上累加"
     return None
 
 

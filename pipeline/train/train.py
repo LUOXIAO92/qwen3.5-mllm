@@ -850,18 +850,6 @@ def check_replay_args(args):
         raise SystemExit("--replay-kl-tail 只用于 --replay-loss kl32。")
     if args.replay_inline_max_tokens < 0 or args.replay_micro_batch_tokens <= 0:
         raise SystemExit("--replay-inline-max-tokens 不能为负，--replay-micro-batch-tokens 应大于 0。")
-    if host_placement(args = args):
-        raise SystemExit(
-            "回放的长样本另成微批，一步之内有多次反传；语言模型参数在主机内存中更新（--offload-optimizer、"
-            "--lm-blocks-to-swap）时梯度不在主机上累加，不能与回放同时使用。"
-        )
-
-
-def replay_host_problem(args):
-    """开启回放时，语言模型参数不能在主机内存中更新的原因（交给 optimize.apply，显存不足时也不退到流式加载语言模型的层）。"""
-    if args.replay_dir is None:
-        return None
-    return "回放的长样本另成微批，一步之内有多次反传，主机内存中的更新要求每步只反传一次"
 
 
 def replay_forward_backward(
@@ -873,10 +861,13 @@ def replay_forward_backward(
     forward_context,
     loss_impl = "chunked",
     kl_tail = False,
+    after_backward = None,
 ):
     """开启回放时一步内各微批的前向与反传（ASR 微批接上了短样本，另有纯文本微批），梯度累积在可训练参数上。
 
-    每个微批的损失之和除以整步的分母 n_tokens（Replay.normalizer）再反传。返回这一步的统计（都已取回 CPU）：
+    每个微批的损失之和除以整步的分母 n_tokens（Replay.normalizer）再反传。after_backward 不为 None 时在每次反传之后调用
+    （语言模型参数在主机内存中更新时，placement.LanguageModelUpdate.end_micro_batch 把这个微批的梯度加到主机上的累加缓冲）。
+    返回这一步的统计（都已取回 CPU）：
     loss（按来源的损失之和，长度 SOURCE_COUNT，0 是 ASR）、nll（对实际 token 的负对数似然之和）、correct（预测正确数）、
     empty_loss、empty_correct（空目标样本，只在 ASR 中）、objective（全部损失之和）。
     """
@@ -895,6 +886,8 @@ def replay_forward_backward(
                 kl_tail = kl_tail,
             )
         (losses.sum() / n_tokens).backward()
+        if after_backward is not None:
+            after_backward()
         sources = inputs["loss_source"]
         loss_sum.scatter_add_(dim = 0, index = sources, src = losses.detach())
         nll_sum.scatter_add_(dim = 0, index = sources, src = nll)
@@ -1096,10 +1089,7 @@ def main(argv = None):
         options = options_from_args(args = args),
         device = device,
         train_language_model = args.train_language_model,
-        host_problem = precision.host_problem(
-            options = precision.options_from_args(args = args),
-            grad_accum = args.grad_accum,
-        ) or replay_host_problem(args = args),
+        host_problem = precision.host_problem(options = precision.options_from_args(args = args)),
         # Muon 的参数要在显存中正交化，全量微调时不能流式加载语言模型的层（muon.stream_problem）。
         stream_problem = muon.stream_problem(optimizer = args.optimizer, train_language_model = args.train_language_model),
     )
@@ -1517,6 +1507,8 @@ def main(argv = None):
                 losses, correct, rows = token_losses(model = model, inputs = inputs, loss_impl = args.loss_impl)
             loss_sum = losses.sum()
             (loss_sum / n_tokens).backward()
+            if language is not None:
+                language.end_micro_batch()
             loss_total += loss_sum.detach()
             correct_total += correct.sum()
             # 空目标样本只有一个计损失的 token（<|im_end|>），单独统计它的损失和预测正确率。
@@ -1544,6 +1536,9 @@ def main(argv = None):
                 probe_pending = False
                 n_tokens = replay.normalizer(asr_tokens = asr_tokens, replay_tokens = step_replay["replay_tokens"])
             while True:
+                if language is not None:
+                    # 语言模型参数在主机内存中更新、这一步有多个微批时，各微批的梯度在主机内存中累加（placement.py）。
+                    language.begin_step(micro_batches = len(micro_batches))
                 try:
                     if replay is None:
                         totals = forward_backward(micro_batches = micro_batches, n_tokens = n_tokens)
@@ -1557,6 +1552,7 @@ def main(argv = None):
                             forward_context = optimized.forward_context,
                             loss_impl = args.loss_impl,
                             kl_tail = args.replay_kl_tail,
+                            after_backward = language.end_micro_batch if language is not None else None,
                         )
                 except torch.OutOfMemoryError:
                     totals = None
