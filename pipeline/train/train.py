@@ -72,7 +72,8 @@
 省显存的卸载选项 --offload-activations（层边界提前一层上传，--activation-prefetch）、全量微调时的 --lm-blocks-to-swap
 （流式加载可训练的层，参数在主机内存中更新）和 --offload-optimizer（梯度、主权重与 AdamW 状态放到主机内存）见
 optimize.py 和 placement.py（任务 #66）。它们只改变数据放在哪里，续训状态的格式不变，不在 RESUME_KEYS 中，续训时可以
-打开或关闭；打开后两项时续训状态读到 CPU 上（torch.load 的 map_location）。
+打开或关闭；打开后两项时续训状态读到 CPU 上（torch.load 的 map_location）。一步有多个微批（回放的长样本、--grad-accum
+大于 1）时，主机上的梯度在每个微批反传之后累加（LanguageModelUpdate.begin_step、end_micro_batch，任务 #71）。
 
 自生成回放（任务 #71 C 组，replay.py）：--replay-dir <回放目录> --replay-groups free_raw=1,... 在每一步的 ASR 批次之外按
 比例 --replay-ratio 混入参考模型自己生成的文本，ASR 批次、训练计划和步数都不变。需要 --train-language-model 和

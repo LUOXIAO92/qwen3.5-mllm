@@ -69,7 +69,7 @@ class AccumulateTest(unittest.TestCase):
             for grad in grads[1:]:
                 expected.add_(grad)
             self.assertTrue(torch.equal(input = target, other = expected), msg = str(dtype))
-            # 加法确有舍入（换一个相加的顺序结果就不同），上面的逐位相同不是因为没有舍入。
+            # 加法确有舍入：换一个相加的顺序，结果就不同。
             reverse = grads[-1].to(dtype = dtype)
             for grad in grads[-2::-1]:
                 reverse.add_(grad)
