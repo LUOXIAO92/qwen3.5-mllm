@@ -60,7 +60,7 @@ class SysRunsTest(unittest.TestCase):
         self.assertEqual(c_runs.ALL_RUNS["c-cont_raw-kl32tail-lr5e-6"], "cont_raw=1")
         self.assertEqual(c_runs.LORA_RANK["c-cont_raw-kl32tail-lora90"], 90)
         self.assertEqual(c_runs.LM_LR["c-cont_raw-kl32tail-lr5e-6"], "5e-6")
-        self.assertEqual(len(c_runs.ALL_RUNS), 15)
+        self.assertEqual(len(c_runs.ALL_RUNS), 17)  # 加上第六轮的两个 free_raw 运行
 
     def test_run_names(self):
         self.assertEqual(c_runs.run_name(key = "c-sys-kl32tail-lora90"), "v2b-2b-cpt77-c-sys-kl32tail-lora90" + c_runs.TAG)
@@ -87,3 +87,23 @@ class DriversTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FreeRunsTest(unittest.TestCase):
+    """第六轮的两个运行：回放以 free_raw 为基础，kl32 加尾部项，语言模型学习率 5e-6，全量微调（不是 LoRA）。"""
+
+    def test_free_runs(self):
+        expected = {
+            "c-free_raw-kl32tail-lr5e-6": "free_raw=1",
+            "c-frsys-kl32tail-lr5e-6": "free_raw=2,free_sys_chat=1,free_sys_chat_think=1",
+        }
+        for key, spec in expected.items():
+            self.assertEqual(c_runs.ALL_RUNS[key], spec)
+            self.assertEqual(c_runs.replay_loss(key = key), "kl32")
+            self.assertIn(key, c_runs.KL_TAIL_RUNS)
+            self.assertEqual(c_runs.LM_LR[key], "5e-6")
+            self.assertNotIn(key, c_runs.LORA_RANK)
+            arguments = c_runs.replay_arguments(spec = spec, loss = "kl32", tail = True)
+            self.assertEqual(arguments[arguments.index("--replay-groups") + 1], spec)
+            self.assertIn("--replay-kl-tail", arguments)
+

@@ -141,6 +141,16 @@ KL_RUNS.update({key: SYS_REPLAY for key in SYS_RUNS})
 KL_TAIL_RUNS.update(SYS_RUNS)
 LORA_RANK["c-sys-kl32tail-lora90"] = 90
 LM_LR["c-sys-kl32tail-lr5e-6"] = "5e-6"
+# 第六轮（用户 2026-11-28）：把回放的基础组从续写 cont_raw 换成无模板自由生成 free_raw（连文档开头都不需要，数据成本最低），
+# 全量微调、语言模型学习率 5e-6、kl32 加尾部项，在本机训练（8 位 AdamW 状态，与 c-sys-kl32tail-lr5e-6 相同）：
+# c-free_raw-kl32tail-lr5e-6 只用 free_raw；c-frsys-kl32tail-lr5e-6 为 free_raw : 系统非思考 : 系统思考 = 2 : 1 : 1。
+FREE_RUNS = {
+    "c-free_raw-kl32tail-lr5e-6": "free_raw=1",
+    "c-frsys-kl32tail-lr5e-6": "free_raw=2,free_sys_chat=1,free_sys_chat_think=1",
+}
+KL_RUNS.update(FREE_RUNS)
+KL_TAIL_RUNS.update(FREE_RUNS)
+LM_LR.update({key: "5e-6" for key in FREE_RUNS})
 ALL_RUNS = {**RUNS, **KL_RUNS}
 SELECTED = [key for key in ENV.get("C71_RUNS", ",".join(RUNS)).split(",") if key]
 UNKNOWN = [key for key in SELECTED if key not in ALL_RUNS]
