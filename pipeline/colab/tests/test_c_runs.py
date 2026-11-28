@@ -60,7 +60,7 @@ class SysRunsTest(unittest.TestCase):
         self.assertEqual(c_runs.ALL_RUNS["c-cont_raw-kl32tail-lr5e-6"], "cont_raw=1")
         self.assertEqual(c_runs.LORA_RANK["c-cont_raw-kl32tail-lora90"], 90)
         self.assertEqual(c_runs.LM_LR["c-cont_raw-kl32tail-lr5e-6"], "5e-6")
-        self.assertEqual(len(c_runs.ALL_RUNS), 17)  # 加上第六轮的两个 free_raw 运行
+        self.assertEqual(len(c_runs.ALL_RUNS), 18)  # 加上第六轮的两个 free_raw 运行和改名的 -8bit 运行
 
     def test_run_names(self):
         self.assertEqual(c_runs.run_name(key = "c-sys-kl32tail-lora90"), "v2b-2b-cpt77-c-sys-kl32tail-lora90" + c_runs.TAG)
@@ -106,4 +106,12 @@ class FreeRunsTest(unittest.TestCase):
             arguments = c_runs.replay_arguments(spec = spec, loss = "kl32", tail = True)
             self.assertEqual(arguments[arguments.index("--replay-groups") + 1], spec)
             self.assertIn("--replay-kl-tail", arguments)
+
+    def test_8bit_run_kept(self):
+        """第四轮 8 位状态的运行改名为 -8bit 后设置不变，c-sys-kl32tail-lr5e-6 仍在（默认精度重训）。"""
+        for key in ("c-sys-kl32tail-lr5e-6", "c-sys-kl32tail-lr5e-6-8bit"):
+            self.assertEqual(c_runs.ALL_RUNS[key], c_runs.SYS_REPLAY)
+            self.assertIn(key, c_runs.KL_TAIL_RUNS)
+            self.assertEqual(c_runs.LM_LR[key], "5e-6")
+            self.assertNotIn(key, c_runs.LORA_RANK)
 

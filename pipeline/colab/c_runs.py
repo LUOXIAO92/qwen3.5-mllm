@@ -151,6 +151,11 @@ FREE_RUNS = {
 KL_RUNS.update(FREE_RUNS)
 KL_TAIL_RUNS.update(FREE_RUNS)
 LM_LR.update({key: "5e-6" for key in FREE_RUNS})
+# 第四轮在本机用 8 位 AdamW 状态训练的 c-sys-kl32tail-lr5e-6 改名为 -8bit 保留（归档与评测目录同样改名）；c-sys-kl32tail-lr5e-6
+# 改为用默认精度重训（--lm-blocks-to-swap 11，主机内存中的梯度累加），与第三轮 Colab 的 c-cont_raw-kl32tail-lr5e-6 只差回放数据。
+KL_RUNS["c-sys-kl32tail-lr5e-6-8bit"] = SYS_REPLAY
+KL_TAIL_RUNS.add("c-sys-kl32tail-lr5e-6-8bit")
+LM_LR["c-sys-kl32tail-lr5e-6-8bit"] = "5e-6"
 ALL_RUNS = {**RUNS, **KL_RUNS}
 SELECTED = [key for key in ENV.get("C71_RUNS", ",".join(RUNS)).split(",") if key]
 UNKNOWN = [key for key in SELECTED if key not in ALL_RUNS]
